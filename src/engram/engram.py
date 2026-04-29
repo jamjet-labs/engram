@@ -15,6 +15,7 @@ from types import TracebackType
 from typing import Any
 from uuid import uuid4
 
+from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.extract.pipeline import ExtractionPipeline
@@ -230,14 +231,22 @@ class Engram:
         query: str,
         user_id: str = "default",
         org_id: str = "default",
-        token_budget: int = 2000,
+        token_budget: int | None = None,
         chars_per_token: int = 4,
+        classifier: QuestionClassifier | None = None,
     ) -> str:
         """Assemble a context string from top-N facts that fit `token_budget`.
 
         Crude char-based budgeting: assumes ~4 chars/token. Phase 6 will replace
         with a proper tokenizer.
+
+        Phase 10: if `classifier` is provided AND `token_budget` is None,
+        auto-pick the budget per the LongMemEval category (1.5K-7.5K from
+        AgentMemory's calibration).
         """
+        if token_budget is None:
+            qt = await classifier.classify(query) if classifier is not None else None
+            token_budget = budget_for(qt)
         char_budget = token_budget * chars_per_token
         candidates = await self.recall(query, user_id=user_id, org_id=org_id, top_k=30)
         lines: list[str] = []
