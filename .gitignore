@@ -1,3 +1,36 @@
+# ── Engram-specific (added 2026-04-30) ─────────────────────────────────
+# Belt-and-suspenders: never commit secrets, runtime DBs, or per-run benchmark output.
+*.env
+*.env.*
+!*.env.example
+.envrc
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account.json
+*.token
+.openai
+.anthropic
+
+# Engram runtime / benchmark artifacts
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+engram*.db
+benchmarks/run_*.json
+benchmarks/phase_*_results.json
+/tmp/engram_*
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -14,6 +14,10 @@ For a real submission, use the LongMemEval evaluate_qa.py with gpt-4o-mini judge
 
 Usage:
     set -a && source /path/to/.env && set +a
+    # Optional: point at the LongMemEval oracle JSON if not in the default location.
+    export LONGMEMEVAL_ORACLE=/path/to/longmemeval_oracle.json
+    # Optional: where to write per-question results (default: ./benchmarks/phase_6_results.json).
+    export ENGRAM_BENCH_OUT=./benchmarks/run_$(date +%s).json
     python -m benchmarks.longmemeval_v2 --limit 10
 """
 
@@ -36,9 +40,10 @@ from engram.read.reader import Reader
 from engram.retrieve.base import RetrievalConfig
 from engram.retrieve.rerank import CrossEncoderReranker
 
-ORACLE_PATH = Path(
-    "/Users/sunilp/Development/sunil-ws/jamjet-research/paper/experiments/longmemeval_repo/data/longmemeval_oracle.json"
+_DEFAULT_ORACLE = (
+    "../jamjet-research/paper/experiments/longmemeval_repo/data/longmemeval_oracle.json"
 )
+ORACLE_PATH = Path(os.environ.get("LONGMEMEVAL_ORACLE", _DEFAULT_ORACLE)).expanduser().resolve()
 
 
 def _parse_haystack_date(raw: str) -> datetime:
@@ -179,7 +184,7 @@ async def main(limit: int) -> None:
     for t, lst in sorted(by_type_count.items()):
         c = sum(lst)
         print(f"  [{t}] {c}/{len(lst)} = {100 * c / len(lst):.0f}%")
-    out_path = Path("/tmp/engram_v2_parity.json")
+    out_path = Path(os.environ.get("ENGRAM_BENCH_OUT", "./benchmarks/phase_6_results.json"))
     out_path.write_text(json.dumps(results, indent=2))
     print(f"\nResults written to {out_path}")
 
