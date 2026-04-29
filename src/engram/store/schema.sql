@@ -88,6 +88,57 @@ CREATE INDEX IF NOT EXISTS idx_relationships_source
 CREATE INDEX IF NOT EXISTS idx_relationships_target
     ON relationships(org_id, user_id, target);
 
+-- ── Events (Phase 11: SVO event calendar) ──────────────────────────────────
+CREATE TABLE IF NOT EXISTS events (
+    id                  TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL,
+    user_id             TEXT NOT NULL,
+    subject_canonical   TEXT NOT NULL,
+    verb                TEXT NOT NULL,
+    object_canonical    TEXT NOT NULL,
+    time_start          TEXT NOT NULL,
+    time_end            TEXT,
+    confidence          REAL NOT NULL DEFAULT 1.0,
+    aliases             TEXT NOT NULL DEFAULT '[]',
+    source_fact_ids     TEXT NOT NULL DEFAULT '[]',
+    metadata            TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_events_scope ON events(org_id, user_id, time_start);
+CREATE INDEX IF NOT EXISTS idx_events_subject ON events(org_id, user_id, subject_canonical);
+CREATE INDEX IF NOT EXISTS idx_events_object ON events(org_id, user_id, object_canonical);
+CREATE INDEX IF NOT EXISTS idx_events_verb ON events(org_id, user_id, verb);
+
+-- FTS5 over canonical SVO + aliases for natural-language event search.
+-- Contentless FTS5 (no content= linkage) — we maintain text via triggers.
+CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+    text,
+    org_id UNINDEXED,
+    user_id UNINDEXED,
+    tokenize='porter unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events BEGIN
+    INSERT INTO events_fts(rowid, text, org_id, user_id)
+    VALUES (
+        new.rowid,
+        new.subject_canonical || ' ' || new.verb || ' ' || new.object_canonical || ' ' || new.aliases,
+        new.org_id,
+        new.user_id
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events BEGIN
+    DELETE FROM events_fts WHERE rowid = old.rowid;
+END;
+CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE ON events BEGIN
+    DELETE FROM events_fts WHERE rowid = old.rowid;
+    INSERT INTO events_fts(rowid, text, org_id, user_id)
+    VALUES (
+        new.rowid,
+        new.subject_canonical || ' ' || new.verb || ' ' || new.object_canonical || ' ' || new.aliases,
+        new.org_id,
+        new.user_id
+    );
+END;
+
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
     text,
     org_id UNINDEXED,

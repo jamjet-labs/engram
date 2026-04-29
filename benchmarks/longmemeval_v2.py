@@ -76,7 +76,9 @@ async def _answer(
     memory: Engram, reader: Reader, classifier: RuleBasedClassifier, q: dict[str, Any], user_id: str
 ) -> str:
     ctx = await memory.context(query=q["question"], user_id=user_id, classifier=classifier)
-    result = await reader.read(question=q["question"], context=ctx)
+    # The question_date is "today" for temporal reasoning purposes.
+    today = _parse_haystack_date(q["question_date"]) if q.get("question_date") else None
+    result = await reader.read(question=q["question"], context=ctx, today=today)
     return result.answer
 
 
@@ -97,29 +99,27 @@ async def main(limit: int) -> None:
 
     print("Loading dataset + reranker...")
     data = json.loads(ORACLE_PATH.read_text())
-    # Pick `limit` questions, one per type if possible (smallest haystack each)
-    by_type: dict[str, list[dict[str, Any]]] = {}
-    for q in data:
-        by_type.setdefault(q["question_type"], []).append(q)
-    selected: list[dict[str, Any]] = []
-    types = sorted(by_type.keys())
-    while len(selected) < limit:
-        progress_made = False
-        for t in types:
-            if len(selected) >= limit:
-                break
+    # Pick `limit` questions. For limit >= len(data), use the whole dataset
+    # in original order (so 500 means literally all 500 LongMemEval-S
+    # questions — same set, same order across runs).
+    if limit >= len(data):
+        selected: list[dict[str, Any]] = list(data)
+    else:
+        # Sample evenly across categories, smallest haystack first.
+        by_type: dict[str, list[dict[str, Any]]] = {}
+        for q in data:
+            by_type.setdefault(q["question_type"], []).append(q)
+        for t in by_type:
+            by_type[t].sort(key=lambda q: sum(len(s) for s in q["haystack_sessions"]))
+        selected = []
+        types = sorted(by_type.keys())
+        idx = 0
+        while len(selected) < limit and any(by_type.values()):
+            t = types[idx % len(types)]
             if by_type[t]:
-                cands = sorted(
-                    by_type[t], key=lambda q: sum(len(s) for s in q["haystack_sessions"])
-                )
-                selected.append(cands[0])
-                by_type[t] = by_type[t][1:] if len(by_type[t]) > 1 else by_type[t]
-                if cands[0] in by_type[t]:
-                    by_type[t].remove(cands[0])
-                progress_made = True
-        if not progress_made:
-            break
-    selected = selected[:limit]
+                selected.append(by_type[t].pop(0))
+            idx += 1
+        selected = selected[:limit]
 
     # Stack: Ollama for embeddings (local, free), Claude Haiku for reading (paid),
     # ms-marco cross-encoder for reranking (local, free). OpenAI key in env was
@@ -147,8 +147,16 @@ async def main(limit: int) -> None:
             n_chunks = await _ingest(memory, q, user_id="alice")
             t_ingest = time.time() - t0
             t1 = time.time()
+            # Verifier disabled by default for Anthropic — its JSON mode is
+            # less reliable than OpenAI's, so verdict was always defaulting to
+            # PARTIAL anyway. Set ENGRAM_BENCH_VERIFIER=1 to re-enable.
+            verifier_on = os.environ.get("ENGRAM_BENCH_VERIFIER") == "1"
             answer = await _answer(
-                memory, reader=Reader(llm), classifier=classifier, q=q, user_id="alice"
+                memory,
+                reader=Reader(llm, verifier=verifier_on),
+                classifier=classifier,
+                q=q,
+                user_id="alice",
             )
             t_answer = time.time() - t1
         ok = _correct(q["answer"], answer)

@@ -12,7 +12,7 @@ from uuid import UUID
 import aiosqlite
 
 from engram.errors import StoreError
-from engram.models import ChatMessage, Fact, MemoryTier, Polarity
+from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
 from engram.scope import Scope
 
 
@@ -244,6 +244,139 @@ class SqliteStore:
             ),
         )
         await self._conn.commit()
+
+    # ── Events (Phase 11) ────────────────────────────────────────────────
+
+    async def upsert_event(self, event: Event) -> None:
+        try:
+            await self._conn.execute(
+                """INSERT INTO events (
+                    id, org_id, user_id, subject_canonical, verb, object_canonical,
+                    time_start, time_end, confidence, aliases, source_fact_ids, metadata
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    subject_canonical=excluded.subject_canonical,
+                    verb=excluded.verb,
+                    object_canonical=excluded.object_canonical,
+                    time_start=excluded.time_start,
+                    time_end=excluded.time_end,
+                    confidence=excluded.confidence,
+                    aliases=excluded.aliases,
+                    source_fact_ids=excluded.source_fact_ids,
+                    metadata=excluded.metadata""",
+                (
+                    str(event.id),
+                    event.scope.org_id,
+                    event.scope.user_id,
+                    event.subject_canonical,
+                    event.verb,
+                    event.object_canonical,
+                    _dt(event.time_start),
+                    _dt(event.time_end),
+                    event.confidence,
+                    json.dumps(event.aliases),
+                    json.dumps([str(fid) for fid in event.source_fact_ids]),
+                    json.dumps(event.metadata),
+                ),
+            )
+            await self._conn.commit()
+        except aiosqlite.Error as e:
+            raise StoreError(f"upsert_event: {e}") from e
+
+    async def get_event(self, event_id: UUID, scope: Scope) -> Event | None:
+        async with self._conn.execute(
+            "SELECT * FROM events WHERE id=? AND org_id=? AND user_id=?",
+            (str(event_id), scope.org_id, scope.user_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._row_to_event(row) if row else None
+
+    async def search_events(
+        self,
+        query: str,
+        scope: Scope,
+        time_start: datetime | None = None,
+        time_end: datetime | None = None,
+        limit: int = 10,
+    ) -> list[Event]:
+        sanitized = self._sanitize_fts(query) if query else ""
+        try:
+            if sanitized:
+                # Step 1: FTS5 (bm25 only valid against the FTS5 table directly)
+                async with self._conn.execute(
+                    """SELECT rowid, -bm25(events_fts) AS score
+                       FROM events_fts
+                       WHERE events_fts MATCH ?
+                         AND events_fts.org_id = ?
+                         AND events_fts.user_id = ?""",
+                    (sanitized, scope.org_id, scope.user_id),
+                ) as cur:
+                    fts_rows = await cur.fetchall()
+                if not fts_rows:
+                    return []
+                row_scores = {int(r["rowid"]): float(r["score"]) for r in fts_rows}
+
+                # Step 2: fetch events including their rowids so we can sort in Python
+                placeholders = ",".join("?" * len(row_scores))
+                params: list[object] = [scope.org_id, scope.user_id]
+                params += list(row_scores.keys())
+                clauses = ["org_id=?", "user_id=?", f"rowid IN ({placeholders})"]
+                if time_start is not None:
+                    clauses.append("time_start >= ?")
+                    params.append(_dt(time_start))
+                if time_end is not None:
+                    clauses.append("(time_end IS NULL OR time_end <= ?)")
+                    params.append(_dt(time_end))
+                sql = (
+                    f"SELECT events.*, events.rowid AS _rowid "
+                    f"FROM events WHERE {' AND '.join(clauses)} LIMIT ?"
+                )
+                params.append(limit * 4)
+                async with self._conn.execute(sql, params) as cur:
+                    rows = await cur.fetchall()
+                scored: list[tuple[float, Event]] = [
+                    (row_scores.get(int(r["_rowid"]), 0.0), self._row_to_event(r)) for r in rows
+                ]
+                scored.sort(key=lambda x: x[0], reverse=True)
+                return [e for _, e in scored[:limit]]
+
+            # No query: time-window only listing
+            clauses = ["org_id=?", "user_id=?"]
+            params2: list[object] = [scope.org_id, scope.user_id]
+            if time_start is not None:
+                clauses.append("time_start >= ?")
+                params2.append(_dt(time_start))
+            if time_end is not None:
+                clauses.append("(time_end IS NULL OR time_end <= ?)")
+                params2.append(_dt(time_end))
+            sql = (
+                f"SELECT * FROM events WHERE {' AND '.join(clauses)} "
+                f"ORDER BY time_start DESC LIMIT ?"
+            )
+            params2.append(limit)
+            async with self._conn.execute(sql, params2) as cur:
+                rows = await cur.fetchall()
+            return [self._row_to_event(r) for r in rows]
+        except aiosqlite.Error as e:
+            raise StoreError(f"search_events: {e}") from e
+
+    @staticmethod
+    def _row_to_event(row: aiosqlite.Row) -> Event:
+        return Event(
+            id=UUID(row["id"]),
+            scope=Scope(org_id=row["org_id"], user_id=row["user_id"]),
+            subject_canonical=row["subject_canonical"],
+            verb=row["verb"],
+            object_canonical=row["object_canonical"],
+            time_start=datetime.fromisoformat(row["time_start"]),
+            time_end=_parse_dt(row["time_end"]),
+            confidence=row["confidence"],
+            aliases=json.loads(row["aliases"]) if row["aliases"] else [],
+            source_fact_ids=[UUID(s) for s in json.loads(row["source_fact_ids"] or "[]")],
+            metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+        )
+
+    # ── Messages ─────────────────────────────────────────────────────────
 
     async def list_messages(
         self, session_id: str, scope: Scope, limit: int = 1000

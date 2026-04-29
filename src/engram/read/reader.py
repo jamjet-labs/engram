@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from engram.errors import ExtractionError
 from engram.llm.base import LLMClient, LLMMessage
-from engram.read.prompts import READER_SYSTEM_PROMPT, VERIFIER_SYSTEM_PROMPT
+from engram.read.prompts import READER_SYSTEM_PROMPT, TODAY_CLAUSE, VERIFIER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,15 @@ class Reader:
         self._llm = llm
         self._verifier_enabled = verifier
 
-    async def read(self, question: str, context: str) -> ReadResult:
+    async def read(
+        self,
+        question: str,
+        context: str,
+        today: datetime | None = None,
+    ) -> ReadResult:
+        """Answer `question` from `context`. Pass `today` to anchor temporal queries."""
+        today_clause = TODAY_CLAUSE.format(today=today.date().isoformat()) if today else ""
+
         verdict: Verdict | None = None
         missing: str | None = None
         if self._verifier_enabled:
@@ -61,7 +70,11 @@ class Reader:
                 [
                     LLMMessage(
                         role="system",
-                        content=READER_SYSTEM_PROMPT.format(context=context, question=question),
+                        content=READER_SYSTEM_PROMPT.format(
+                            today_clause=today_clause,
+                            context=context,
+                            question=question,
+                        ),
                     ),
                     LLMMessage(role="user", content=question),
                 ],

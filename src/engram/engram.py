@@ -18,9 +18,10 @@ from uuid import UUID, uuid4
 from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
+from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.llm.base import LLMClient
-from engram.models import ChatMessage, ExtractedFact, Fact, MemoryTier, Polarity
+from engram.models import ChatMessage, Event, ExtractedFact, Fact, MemoryTier, Polarity
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.hybrid import HybridRetriever
 from engram.scope import Scope
@@ -45,12 +46,14 @@ class Engram:
         embedder: EmbeddingProvider,
         retriever: HybridRetriever,
         extraction: ExtractionPipeline | None = None,
+        event_extractor: EventExtractor | None = None,
     ) -> None:
         self._store = store
         self._vec = vector_store
         self._embed = embedder
         self._retrieve = retriever
         self._extract = extraction
+        self._events = event_extractor
 
     @classmethod
     async def open(
@@ -80,7 +83,8 @@ class Engram:
             reranker=reranker,
         )
         extraction = ExtractionPipeline(llm) if llm is not None else None
-        return cls(store, vec, embedder, retriever, extraction)
+        events = EventExtractor(llm) if llm is not None else None
+        return cls(store, vec, embedder, retriever, extraction, events)
 
     async def close(self) -> None:
         await self._vec.close()
@@ -98,6 +102,45 @@ class Engram:
         await self.close()
 
     # ── Public API ──────────────────────────────────────────────────────
+
+    async def extract_events(
+        self,
+        messages: list[ChatMessage],
+        session_date: datetime | None = None,
+        persist: bool = True,
+    ) -> list[Event]:
+        """Phase 11: extract SVO events from a chat segment via LLM.
+
+        Persists the events into the event calendar by default. Requires an
+        LLM to have been passed at `Engram.open(llm=...)`.
+        """
+        if self._events is None:
+            raise RuntimeError("event extraction requires an LLM; pass `llm=...` to Engram.open()")
+        if not messages:
+            return []
+        events = await self._events.extract(messages, session_date=session_date)
+        if persist:
+            for ev in events:
+                await self._store.upsert_event(ev)
+        return events
+
+    async def search_events(
+        self,
+        query: str = "",
+        user_id: str = "default",
+        org_id: str = "default",
+        time_start: datetime | None = None,
+        time_end: datetime | None = None,
+        limit: int = 10,
+    ) -> list[Event]:
+        """Phase 11: query the event calendar by FTS + optional time window."""
+        return await self._store.search_events(
+            query,
+            Scope(org_id=org_id, user_id=user_id),
+            time_start=time_start,
+            time_end=time_end,
+            limit=limit,
+        )
 
     async def supersede(
         self,

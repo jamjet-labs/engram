@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
-from engram.models import ChatMessage, Fact
+from engram.models import ChatMessage, Event, Fact
 from engram.scope import Scope
 
 
@@ -48,6 +49,26 @@ class EngramStore(Protocol):
 
     @abstractmethod
     async def record_access(self, fact_id: UUID) -> None: ...
+
+    # Phase 11: SVO event calendar ──────────────────────────────────────
+
+    @abstractmethod
+    async def upsert_event(self, event: Event) -> None: ...
+
+    @abstractmethod
+    async def get_event(self, event_id: UUID, scope: Scope) -> Event | None: ...
+
+    @abstractmethod
+    async def search_events(
+        self,
+        query: str,
+        scope: Scope,
+        time_start: datetime | None = None,
+        time_end: datetime | None = None,
+        limit: int = 10,
+    ) -> list[Event]:
+        """Return events matching the query string + optional time-window."""
+        ...
 
     @abstractmethod
     async def close(self) -> None: ...

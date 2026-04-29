@@ -115,6 +115,30 @@ class Fact(BaseModel):
         return True
 
 
+class Event(BaseModel):
+    """Phase 11: an SVO event tuple with absolute time range.
+
+    Inspired by the Chronos benchmark architecture. Each event is a structured
+    fact about something that happened, with canonical subject/verb/object
+    plus a `[time_start, time_end]` window. Aliases let the same event be
+    matched by surface variants ("dinner with Mom" / "family dinner").
+    """
+
+    model_config = ConfigDict(frozen=False)
+
+    id: UUID = Field(default_factory=uuid4)
+    scope: Scope
+    subject_canonical: str = Field(min_length=1, max_length=512)
+    verb: str = Field(min_length=1, max_length=128)
+    object_canonical: str = Field(min_length=1, max_length=512)
+    time_start: datetime
+    time_end: datetime | None = None
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    aliases: list[str] = Field(default_factory=list)
+    source_fact_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatMessage(BaseModel):
     """A raw conversation turn — stored alongside extracted facts so we can
     re-extract or drill back to source utterances.

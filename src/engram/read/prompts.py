@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
-# Reading prompt — strict abstention discipline
+# Reading prompt — strict abstention discipline + Chain-of-Note + temporal anchor
 READER_SYSTEM_PROMPT = """\
 You answer a question about a user using ONLY the facts provided.
 
+{today_clause}
 FACTS:
 {context}
 
 QUESTION: {question}
 
+Reasoning approach (Chain-of-Note):
+1. First, identify which facts are directly relevant to the question.
+2. Then reason step by step:
+   - For temporal questions (X days/weeks ago), compute the difference between
+     today and the relevant [YYYY-MM-DD] date in the facts.
+   - For multi-part questions (sums, comparisons), gather each piece independently
+     before combining.
+3. Give a concise final answer.
+
 Rules:
-- If the facts directly support an answer, give it concisely (one sentence).
+- If the facts directly support an answer, give it concisely (one short sentence).
 - If the facts only INDIRECTLY support an answer:
     - Only answer when at least 2 facts agree, AND each has [confidence] >= 0.8
     - Otherwise output exactly: I don't know
@@ -21,6 +31,8 @@ Rules:
 - Stay focused: do not volunteer tangential information.
 
 Answer:"""
+
+TODAY_CLAUSE = "Today is {today}.\n"
 
 
 VERIFIER_SYSTEM_PROMPT = """\
