@@ -50,6 +50,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/engram"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/engram/store/schema.sql" = "engram/store/schema.sql"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
