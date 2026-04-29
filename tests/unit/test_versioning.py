@@ -153,10 +153,11 @@ async def test_repeated_runs_with_same_seed_produce_identical_top_results() -> N
 
 
 def test_python_hash_seed_recommendation_documented() -> None:
-    """Smoke-check: README mentions PYTHONHASHSEED for reproducible runs."""
-    readme = open("/Users/sunilp/Development/sunil-ws/engram/README.md").read()
-    # Tolerate missing reference for now — Phase 13 also bumps README in a follow-up.
-    # We fail soft: just assert the file exists.
+    """Smoke-check: README exists and mentions reproducible runs."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    readme = (repo_root / "README.md").read_text()
     assert len(readme) > 100
 
 
