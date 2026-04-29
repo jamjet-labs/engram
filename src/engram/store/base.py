@@ -32,6 +32,13 @@ class EngramStore(Protocol):
     async def keyword_search(self, query: str, scope: Scope, limit: int = 30) -> list[Fact]: ...
 
     @abstractmethod
+    async def aggregate_sessions(
+        self, query: str, scope: Scope, top_sessions: int = 5
+    ) -> list[tuple[str, float]]:
+        """Phase 9: rank sessions by aggregate fact relevance to a query."""
+        ...
+
+    @abstractmethod
     async def upsert_message(self, message: ChatMessage) -> None: ...
 
     @abstractmethod

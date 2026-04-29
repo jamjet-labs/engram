@@ -103,6 +103,7 @@ class Engram:
         text: str,
         user_id: str = "default",
         org_id: str = "default",
+        session_id: str | None = None,
         category: str | None = None,
         confidence: float = 1.0,
         polarity: Polarity = Polarity.AFFIRMATIVE,
@@ -111,12 +112,17 @@ class Engram:
         event_date: datetime | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Fact:
-        """Record a single fact (no LLM extraction). Embeds + stores in one call."""
+        """Record a single fact (no LLM extraction). Embeds + stores in one call.
+
+        Pass `session_id` to enable Phase 9 two-stage retrieval — facts in the
+        same session can then be retrieved together via session-first ranking.
+        """
         scope = Scope(org_id=org_id, user_id=user_id)
         fact = Fact(
             text=text,
             scope=scope,
             valid_from=valid_from or datetime.now().astimezone(),
+            session_id=session_id,
             category=category,
             confidence=confidence,
             polarity=polarity,
@@ -164,6 +170,8 @@ class Engram:
         if not messages:
             return []
         scope = messages[0].scope
+        # All input messages share a session — pick the first one's session_id
+        sid: str | None = messages[0].session_id if messages else None
         extracted: list[ExtractedFact] = await self._extract.extract(
             messages, session_date=session_date
         )
@@ -175,6 +183,7 @@ class Engram:
                     text=ef.text,
                     scope=scope,
                     valid_from=session_date or datetime.now().astimezone(),
+                    session_id=sid,
                     confidence=ef.confidence,
                     category=ef.category,
                     polarity=ef.polarity,
@@ -194,6 +203,7 @@ class Engram:
                         text=ef.text,
                         scope=scope,
                         valid_from=session_date or datetime.now().astimezone(),
+                        session_id=sid,
                         confidence=ef.confidence,
                         category=ef.category,
                         polarity=ef.polarity,

@@ -115,7 +115,7 @@ class SqliteStore:
                     fact.access_count,
                     _dt(fact.last_accessed),
                     json.dumps(fact.metadata),
-                    None,
+                    fact.session_id,
                 ),
             )
             await self._conn.commit()
@@ -166,6 +166,51 @@ class SqliteStore:
     def _sanitize_fts(q: str) -> str:
         # Strip FTS5 metacharacters; keep alphanumerics + spaces.
         return " ".join(t for t in q.split() if t.replace("_", "").isalnum())
+
+    async def aggregate_sessions(
+        self, query: str, scope: Scope, top_sessions: int = 5
+    ) -> list[tuple[str, float]]:
+        """Stage-1 retrieval: rank sessions by aggregate fact relevance.
+
+        FTS5's `bm25()` aux function is only valid in a SELECT directly against
+        the FTS5 virtual table — joining or CTE-wrapping breaks it. So we do
+        FTS5 + scoring in one query, then aggregate in Python.
+        """
+        sanitized = self._sanitize_fts(query)
+        if not sanitized:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT rowid, -bm25(facts_fts) AS row_score
+                   FROM facts_fts
+                   WHERE facts_fts MATCH ?
+                     AND facts_fts.org_id = ?
+                     AND facts_fts.user_id = ?""",
+                (sanitized, scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+            if not rows:
+                return []
+            # Now join to facts to get session_id (fts rowid == facts rowid)
+            row_scores = {int(r["rowid"]): float(r["row_score"]) for r in rows}
+            placeholders = ",".join("?" * len(row_scores))
+            async with self._conn.execute(
+                f"SELECT rowid, session_id FROM facts WHERE rowid IN ({placeholders})",
+                tuple(row_scores.keys()),
+            ) as cur:
+                fact_rows = await cur.fetchall()
+        except aiosqlite.Error as e:
+            raise StoreError(f"aggregate_sessions: {e}") from e
+
+        # Aggregate by session_id, skipping null
+        agg: dict[str, float] = {}
+        for fr in fact_rows:
+            sid = fr["session_id"]
+            if sid is None:
+                continue
+            agg[sid] = agg.get(sid, 0.0) + row_scores[int(fr["rowid"])]
+        ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)
+        return ranked[:top_sessions]
 
     async def record_access(self, fact_id: UUID) -> None:
         await self._conn.execute(
@@ -240,6 +285,7 @@ class SqliteStore:
             access_count=row["access_count"],
             last_accessed=_parse_dt(row["last_accessed"]),
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+            session_id=row["session_id"],
         )
 
     @staticmethod

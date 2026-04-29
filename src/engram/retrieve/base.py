@@ -37,6 +37,12 @@ class RetrievalConfig(BaseModel):
     candidate_pool_multiplier: int = Field(default=3, ge=1, le=10)
     temporal_sigma_days: float = Field(default=30.0, gt=0.0)
 
+    # Phase 9: two-stage retrieval. When True, retrieve top-K sessions first
+    # (by aggregate fact relevance) then restrict the candidate pool to facts
+    # from those sessions. Helps when haystacks are pre-segmented.
+    enable_two_stage: bool = False
+    two_stage_top_sessions: int = Field(default=3, ge=1, le=20)
+
 
 @runtime_checkable
 class Reranker(Protocol):

@@ -55,6 +55,18 @@ class HybridRetriever:
         intent = detect_temporal_intent(query)
         anchor = temporal_anchor or datetime.now(UTC)
 
+        # Phase 9 — Stage 1: session-first retrieval (when enabled)
+        allowed_sessions: set[str] | None = None
+        if cfg.enable_two_stage:
+            session_scores = await self._facts.aggregate_sessions(
+                query, scope, top_sessions=cfg.two_stage_top_sessions
+            )
+            if session_scores:
+                allowed_sessions = {sid for sid, _ in session_scores}
+            # If Stage 1 returns nothing, we fall through to global retrieval
+            # rather than emit an empty result — handles the "first ingestion
+            # didn't tag session_id" case gracefully.
+
         # 1. Vector search
         [q_vec] = await self._embed.embed([query])
         vec_matches = await self._vec.search(q_vec, scope, k=candidate_k)
@@ -72,6 +84,10 @@ class HybridRetriever:
         if not all_ids:
             return []
 
+        # Phase 9 — Stage 2 filter: drop candidates whose session isn't in the top-K
+        # Applied to facts we have full rows for; for vector-only IDs we'll check
+        # after fetching them below.
+
         # 4. Resolve full Fact rows (some IDs may live only in vec store, some only in kw)
         # First, the keyword side already has the full Fact rows
         facts_by_id: dict[UUID, Fact] = {f.id: f for f in kw_facts}
@@ -82,9 +98,15 @@ class HybridRetriever:
             if fetched is not None:
                 facts_by_id[fid] = fetched
 
-        # 5. Compute merged score
+        # 5. Compute merged score (Stage 2 filter happens here)
         scored: list[ScoredFact] = []
         for fid, fact in facts_by_id.items():
+            if (
+                allowed_sessions is not None
+                and fact.session_id is not None
+                and fact.session_id not in allowed_sessions
+            ):
+                continue
             vs = vec_scores.get(fid, 0.0)
             ks = kw_scores.get(fid, 0.0)
             ts = (

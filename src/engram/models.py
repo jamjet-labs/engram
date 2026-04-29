@@ -94,6 +94,7 @@ class Fact(BaseModel):
     source_event_id: str | None = None
     source_message_id: UUID | None = None
     source_span: tuple[int, int] | None = None
+    session_id: str | None = None  # Phase 9: enables two-stage session-first retrieval
 
     supersedes: UUID | None = None
     superseded_by: UUID | None = None
