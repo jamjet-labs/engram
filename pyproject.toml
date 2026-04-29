@@ -23,6 +23,9 @@ dependencies = [
     "pydantic>=2.7,<3",
     "aiosqlite>=0.20",
     "anyio>=4.4",
+    "httpx>=0.28.1",
+    "numpy>=2.4.4",
+    "hnswlib>=0.8.0",
 ]
 
 [project.optional-dependencies]
