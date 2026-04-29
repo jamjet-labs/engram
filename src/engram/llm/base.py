@@ -13,11 +13,38 @@ class LLMMessage(BaseModel):
     content: str
 
 
+FinishReason = Literal["stop", "length", "tool_calls", "content_filter"]
+
+
+def normalize_finish_reason(raw: str | None) -> FinishReason | None:
+    """Map provider-specific finish-reason strings to our canonical set.
+
+    OpenAI: stop, length, tool_calls, content_filter, function_call (legacy)
+    Anthropic: end_turn, max_tokens, stop_sequence, tool_use, refusal
+    Ollama: depends; we already pass 'stop' or 'length'
+    """
+    if raw is None:
+        return None
+    mapping: dict[str, FinishReason] = {
+        "stop": "stop",
+        "end_turn": "stop",
+        "stop_sequence": "stop",
+        "length": "length",
+        "max_tokens": "length",
+        "tool_calls": "tool_calls",
+        "tool_use": "tool_calls",
+        "function_call": "tool_calls",
+        "content_filter": "content_filter",
+        "refusal": "content_filter",
+    }
+    return mapping.get(raw, "stop")
+
+
 class LLMResponse(BaseModel):
     content: str
     input_tokens: int = 0
     output_tokens: int = 0
-    finish_reason: Literal["stop", "length", "tool_calls", "content_filter"] | None = None
+    finish_reason: FinishReason | None = None
     model: str | None = None
 
 

@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 from engram.errors import ExtractionError
-from engram.llm.base import LLMMessage, LLMResponse
+from engram.llm.base import LLMMessage, LLMResponse, normalize_finish_reason
 
 
 class OpenAILLM:
@@ -16,7 +16,7 @@ class OpenAILLM:
         api_key: str | None = None,
     ) -> None:
         try:
-            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+            from openai import AsyncOpenAI
         except ImportError as e:
             raise ExtractionError(
                 "openai package not installed; pip install 'jamjet-engram[llm-openai]'"
@@ -53,6 +53,6 @@ class OpenAILLM:
             content=choice.message.content or "",
             input_tokens=usage.prompt_tokens if usage else 0,
             output_tokens=usage.completion_tokens if usage else 0,
-            finish_reason=choice.finish_reason,
+            finish_reason=normalize_finish_reason(choice.finish_reason),
             model=self._model,
         )

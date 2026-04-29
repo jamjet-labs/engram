@@ -1,0 +1,102 @@
+[
+  {
+    "id": "a2f3aa27",
+    "type": "knowledge-update",
+    "expected": "1300",
+    "predicted": "Based on the facts provided, you mentioned you were close to 1300 followers as of [2023-05-28], but your exact current follower count is not definitively stated in the facts.",
+    "n_chunks": 20,
+    "t_ingest": 0.6,
+    "t_answer": 3.8,
+    "correct": true
+  },
+  {
+    "id": "edced276",
+    "type": "multi-session",
+    "expected": "15 days",
+    "predicted": "I don't know.\n\nThe facts state you spent five days on a solo trip to New York City, but there is no information in the facts about how many days you spent in Hawaii. One response mentions Hawaii as a destination, but it does not specify the duration of that trip.",
+    "n_chunks": 18,
+    "t_ingest": 0.55,
+    "t_answer": 4.58,
+    "correct": true
+  },
+  {
+    "id": "89527b6b",
+    "type": "single-session-assistant",
+    "expected": "The Plesiosaur had a blue scaly body.",
+    "predicted": "According to the children's book text provided, the Plesiosaur had a blue scaly body.",
+    "n_chunks": 2,
+    "t_ingest": 0.08,
+    "t_answer": 2.63,
+    "correct": true
+  },
+  {
+    "id": "75832dbd",
+    "type": "single-session-preference",
+    "expected": "The user would prefer suggestions related to recent research papers, articles, or conferences that focus on artificial intelligence in healthcare, particularly those that involve deep learning for medical image analysis. They would not be interested in general AI topics or those unrelated to healthcare.",
+    "predicted": "I don't know\n\nThe facts provided contain information about research papers and datasets in explainable AI and deep learning for medical image analysis, but they do not include any recommendations for recent publications or conferences that would be of interest to you.",
+    "n_chunks": 12,
+    "t_ingest": 0.36,
+    "t_answer": 3.71,
+    "correct": true
+  },
+  {
+    "id": "6f9b354f",
+    "type": "single-session-user",
+    "expected": "a lighter shade of gray",
+    "predicted": "You repainted your bedroom walls a lighter shade of gray.",
+    "n_chunks": 10,
+    "t_ingest": 0.31,
+    "t_answer": 2.41,
+    "correct": true
+  },
+  {
+    "id": "8077ef71",
+    "type": "temporal-reasoning",
+    "expected": "26 days. 27 days (including the last day) is also acceptable.",
+    "predicted": "Based on the facts provided, you attended a networking event from 6 PM to 8 PM on [2022-03-09], and all the subsequent conversation also occurred on [2022-03-09]. Since the question asks \"how many days ago\" without specifying a reference date, and the facts only establish that the event happened on the same day as the conversation, I cannot determine how many days ago that was relative to today.\n\nI don't know",
+    "n_chunks": 10,
+    "t_ingest": 0.27,
+    "t_answer": 3.56,
+    "correct": true
+  },
+  {
+    "id": "10e09553",
+    "type": "knowledge-update",
+    "expected": "7",
+    "predicted": "Based on the facts provided, you caught 7 largemouth bass with Alex on 7/10 at Lake Michigan, which was before the 7/22 trip where you caught 9 largemouth bass.",
+    "n_chunks": 20,
+    "t_ingest": 0.57,
+    "t_answer": 3.33,
+    "correct": true
+  },
+  {
+    "id": "edced276_abs",
+    "type": "multi-session",
+    "expected": "The information provided is not enough. You mentioned traveling for 10 days in Hawaii but did not mention abything about the trip to Seattle.",
+    "predicted": "I don't know\n\nThe facts mention a 10-day family trip to Hawaii, but there is no information about any travel to Seattle.",
+    "n_chunks": 18,
+    "t_ingest": 0.55,
+    "t_answer": 3.25,
+    "correct": true
+  },
+  {
+    "id": "1903aded",
+    "type": "single-session-assistant",
+    "expected": "Transcriptionist.",
+    "predicted": "The 7th job in the list was Transcriptionist.",
+    "n_chunks": 2,
+    "t_ingest": 0.06,
+    "t_answer": 2.54,
+    "correct": true
+  },
+  {
+    "id": "32260d93",
+    "type": "single-session-preference",
+    "expected": "The user would prefer recommendations for stand-up comedy specials on Netflix, especially those that are known for their storytelling. They may not prefer recommendations for other genres or platforms.",
+    "predicted": "I don't know\n\nThe facts provided discuss stand-up comedy specials and resources for improving comedy writing and performance, but they don't contain a general recommendation for what show or movie you should watch tonight based on your personal preferences.",
+    "n_chunks": 12,
+    "t_ingest": 0.37,
+    "t_answer": 3.6,
+    "correct": true
+  }
+]

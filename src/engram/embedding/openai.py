@@ -29,7 +29,7 @@ class OpenAIEmbedding:
         dim: int | None = None,
     ) -> None:
         try:
-            from openai import AsyncOpenAI  # type: ignore[import-not-found]
+            from openai import AsyncOpenAI
         except ImportError as e:
             raise EmbeddingError(
                 "openai package not installed; pip install 'jamjet-engram[embed-openai]'"

@@ -9,7 +9,7 @@ import os
 from typing import Any
 
 from engram.errors import ExtractionError
-from engram.llm.base import LLMMessage, LLMResponse
+from engram.llm.base import LLMMessage, LLMResponse, normalize_finish_reason
 
 
 class AnthropicLLM:
@@ -19,7 +19,7 @@ class AnthropicLLM:
         api_key: str | None = None,
     ) -> None:
         try:
-            from anthropic import AsyncAnthropic  # type: ignore[import-not-found]
+            from anthropic import AsyncAnthropic
         except ImportError as e:
             raise ExtractionError(
                 "anthropic package not installed; pip install 'jamjet-engram[llm-anthropic]'"
@@ -62,6 +62,6 @@ class AnthropicLLM:
             content="".join(content_parts),
             input_tokens=resp.usage.input_tokens if resp.usage else 0,
             output_tokens=resp.usage.output_tokens if resp.usage else 0,
-            finish_reason=resp.stop_reason or "stop",
+            finish_reason=normalize_finish_reason(resp.stop_reason),
             model=self._model,
         )

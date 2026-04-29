@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 
 from engram.errors import ExtractionError
-from engram.llm.base import LLMMessage, LLMResponse
+from engram.llm.base import LLMMessage, LLMResponse, normalize_finish_reason
 
 
 class OllamaLLM:
@@ -53,6 +53,6 @@ class OllamaLLM:
             content=content,
             input_tokens=int(data.get("prompt_eval_count", 0)),
             output_tokens=int(data.get("eval_count", 0)),
-            finish_reason="stop" if data.get("done") else "length",
+            finish_reason=normalize_finish_reason("stop" if data.get("done") else "length"),
             model=self._model,
         )
