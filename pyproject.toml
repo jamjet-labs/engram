@@ -39,6 +39,9 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.11",
 ]
+rerank = [
+    "sentence-transformers>=3",
+]
 
 [project.urls]
 Homepage = "https://jamjet.dev/engram"
