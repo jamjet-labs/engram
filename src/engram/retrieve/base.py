@@ -43,6 +43,11 @@ class RetrievalConfig(BaseModel):
     enable_two_stage: bool = False
     two_stage_top_sessions: int = Field(default=3, ge=1, le=20)
 
+    # Phase 13: active fact-versioning. When True (default), facts whose
+    # `superseded_by` is set are excluded from results — only the canonical
+    # latest version surfaces. Set False to include the full history.
+    exclude_superseded: bool = True
+
 
 @runtime_checkable
 class Reranker(Protocol):

@@ -98,9 +98,12 @@ class HybridRetriever:
             if fetched is not None:
                 facts_by_id[fid] = fetched
 
-        # 5. Compute merged score (Stage 2 filter happens here)
+        # 5. Compute merged score (Stage 2 + Phase 13 superseded filters happen here)
         scored: list[ScoredFact] = []
         for fid, fact in facts_by_id.items():
+            # Phase 13: exclude superseded facts by default
+            if cfg.exclude_superseded and fact.superseded_by is not None:
+                continue
             if (
                 allowed_sessions is not None
                 and fact.session_id is not None

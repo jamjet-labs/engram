@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
@@ -98,6 +98,33 @@ class Engram:
         await self.close()
 
     # ── Public API ──────────────────────────────────────────────────────
+
+    async def supersede(
+        self,
+        old_fact_id: UUID,
+        new_fact_id: UUID,
+        user_id: str = "default",
+        org_id: str = "default",
+    ) -> None:
+        """Mark `old_fact_id` as superseded by `new_fact_id`.
+
+        Phase 13 active versioning: superseded facts are filtered out of
+        default retrieval (set `RetrievalConfig.exclude_superseded=False` to
+        include the history).
+
+        Both facts must exist in the same scope.
+        """
+        scope = Scope(org_id=org_id, user_id=user_id)
+        old = await self._store.get_fact(old_fact_id, scope)
+        new = await self._store.get_fact(new_fact_id, scope)
+        if old is None:
+            raise ValueError(f"old fact {old_fact_id} not found in scope")
+        if new is None:
+            raise ValueError(f"new fact {new_fact_id} not found in scope")
+        old.superseded_by = new_fact_id
+        new.supersedes = old_fact_id
+        await self._store.upsert_fact(old)
+        await self._store.upsert_fact(new)
 
     async def record(
         self,

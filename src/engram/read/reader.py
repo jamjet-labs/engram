@@ -75,7 +75,10 @@ class Reader:
         return ReadResult(answer=answer, verdict=verdict, missing=missing, abstained=abstained)
 
     async def _verify(self, question: str, context: str) -> tuple[Verdict, str | None]:
-        """Run the verifier. Returns (verdict, missing). On parse failure, returns ('PARTIAL', None)."""
+        """Run the verifier.
+
+        Returns (verdict, missing). On parse failure, returns ('PARTIAL', None).
+        """
         try:
             resp = await self._llm.generate(
                 [
