@@ -1,12 +1,15 @@
-"""HybridRetriever — merges vector + keyword candidates, optionally reranks."""
+"""HybridRetriever — merges vector + keyword + temporal candidates, optionally reranks."""
 
 from __future__ import annotations
 
+import math
+from datetime import UTC, datetime
 from uuid import UUID
 
 from engram.embedding.base import EmbeddingProvider
 from engram.models import Fact
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
+from engram.retrieve.temporal import TemporalIntent, detect_temporal_intent
 from engram.scope import Scope
 from engram.store.base import EngramStore
 from engram.vector.base import VectorStore
@@ -43,11 +46,14 @@ class HybridRetriever:
         query: str,
         scope: Scope,
         top_k: int = 10,
+        temporal_anchor: datetime | None = None,
     ) -> list[ScoredFact]:
         if not query.strip():
             return []
         cfg = self._config
         candidate_k = top_k * cfg.candidate_pool_multiplier
+        intent = detect_temporal_intent(query)
+        anchor = temporal_anchor or datetime.now(UTC)
 
         # 1. Vector search
         [q_vec] = await self._embed.embed([query])
@@ -81,8 +87,21 @@ class HybridRetriever:
         for fid, fact in facts_by_id.items():
             vs = vec_scores.get(fid, 0.0)
             ks = kw_scores.get(fid, 0.0)
-            final = cfg.vector_weight * vs + cfg.keyword_weight * ks
-            scored.append(ScoredFact(fact=fact, score=final, vector_score=vs, keyword_score=ks))
+            ts = (
+                _temporal_score(fact, anchor, intent, cfg.temporal_sigma_days)
+                if intent is not None
+                else 0.0
+            )
+            final = cfg.vector_weight * vs + cfg.keyword_weight * ks + cfg.temporal_weight * ts
+            scored.append(
+                ScoredFact(
+                    fact=fact,
+                    score=final,
+                    vector_score=vs,
+                    keyword_score=ks,
+                    temporal_score=ts,
+                )
+            )
 
         scored.sort(key=lambda s: s.score, reverse=True)
 
@@ -97,3 +116,24 @@ class HybridRetriever:
             await self._facts.record_access(sf.fact.id)
 
         return scored
+
+
+def _temporal_score(
+    fact: Fact, anchor: datetime, intent: TemporalIntent, sigma_days: float
+) -> float:
+    """Return a [0, 1] temporal-relevance score for a fact given query intent.
+
+    - If the fact has no event_date AND no mention_date, return 0.
+    - For RECENCY/POINT_IN_TIME: Gaussian decay from anchor.
+    - For DURATION: prefer facts with explicit event_date over those without.
+    - For ORDERING: same as RECENCY (most recent gets highest score).
+    """
+    ref = fact.event_date or fact.mention_date
+    if ref is None:
+        return 0.5 if intent == TemporalIntent.DURATION else 0.0
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=UTC)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=UTC)
+    days = abs((anchor - ref).total_seconds()) / 86400.0
+    return float(math.exp(-(days * days) / (2.0 * sigma_days * sigma_days)))

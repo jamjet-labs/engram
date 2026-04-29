@@ -147,6 +147,56 @@ class _ReverseReranker:
         return out[:top_k]
 
 
+async def test_temporal_score_zero_on_atemporal_query(
+    setup_retriever: tuple[HybridRetriever, Scope, list[Fact]],
+) -> None:
+    retriever, scope, _ = setup_retriever
+    results = await retriever.search("alice prefers", scope, top_k=3)
+    # No temporal intent in query -> all temporal scores zero
+    assert all(r.temporal_score == 0.0 for r in results)
+
+
+async def test_temporal_score_nonzero_on_temporal_query() -> None:
+    """Facts with event_date close to the temporal anchor get higher temporal_score."""
+    from datetime import timedelta
+
+    fact_store = await SqliteStore.open(":memory:")
+    embedder = SyntheticEmbedding(dim=64)
+    vec_store = HnswVectorStore(dim=64)
+    scope = Scope(org_id="acme", user_id="alice")
+    anchor = datetime(2026, 4, 30, tzinfo=UTC)
+
+    recent = Fact(
+        text="user did something yesterday",
+        scope=scope,
+        valid_from=anchor,
+        event_date=anchor - timedelta(days=1),
+        id=uuid4(),
+    )
+    distant = Fact(
+        text="user did something long ago",
+        scope=scope,
+        valid_from=anchor,
+        event_date=anchor - timedelta(days=365),
+        id=uuid4(),
+    )
+    for f in (recent, distant):
+        await fact_store.upsert_fact(f)
+        [v] = await embedder.embed([f.text])
+        await vec_store.add(f.id, v, scope)
+
+    retriever = HybridRetriever(fact_store=fact_store, vector_store=vec_store, embedder=embedder)
+    # "yesterday" triggers RECENCY intent
+    results = await retriever.search(
+        "what happened yesterday?", scope, top_k=2, temporal_anchor=anchor
+    )
+    # Recent fact should rank above distant
+    assert "yesterday" in results[0].fact.text
+    assert results[0].temporal_score > results[1].temporal_score
+    await fact_store.close()
+    await vec_store.close()
+
+
 @pytest.mark.asyncio
 async def test_reranker_is_invoked(
     setup_retriever: tuple[HybridRetriever, Scope, list[Fact]],

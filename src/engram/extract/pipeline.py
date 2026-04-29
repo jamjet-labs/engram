@@ -16,6 +16,7 @@ from engram.extract.prompts import (
 )
 from engram.llm.base import LLMClient, LLMMessage
 from engram.models import ChatMessage, ExtractedFact
+from engram.temporal.resolver import resolve_relative_dates
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ class ExtractionPipeline:
                 resp = await self._llm.generate(prompt_messages, temperature=0.0, json_mode=True)
                 parsed = _parse_json_response(resp.content)
                 facts = _coerce_facts(parsed, mention_date=session_date)
+                # Phase 8: fallback resolver for relative dates the LLM left as null.
+                if session_date is not None:
+                    facts = resolve_relative_dates(facts, anchor=session_date)
                 return facts
             except (ExtractionError, json.JSONDecodeError, ValidationError, ValueError) as e:
                 last_err = e
