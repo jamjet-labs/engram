@@ -477,3 +477,63 @@ Per the deferred decision in the original item-1 changelog, re-tested all three 
 **Future work (deferred):** add a native-tool-use code path in `AnthropicLLM` that uses the proper `tools=` parameter and `tool_use` content blocks. Would unlock Sonnet's potential edge with this pipeline. Out of scope for this batch.
 
 **Final reader configuration:** `ModelTier.default()` continues to return gpt-4o-mini for both reader and utility. Sonnet/Haiku alternates remain available via `ModelTier.sonnet_reader()` / `ModelTier.haiku_reader()` for users whose pipelines don't use the text-protocol tools path.
+
+### Item 7 (ReAct retrieval agent, Phase 11b) + Item 8 (fine-tuned cross-encoder) — 2026-04-30
+
+#### Item 8 first (fast, deterministic)
+
+**Workstream A — offline training:**
+- Generated 1136 (question, passage, label) pairs from LongMemEval-S; group-aware split: 929 train pairs (186 questions) / 207 eval pairs (47 questions)
+- Fine-tuned `cross-encoder/ms-marco-MiniLM-L-6-v2` for 3 epochs (~56s on M-series MPS)
+- **Eval nDCG@10:** base **0.9481** → fine-tuned **0.9785** (+3.04 absolute)
+
+That nDCG lift looked like a clear win at first.
+
+**Workstream B — live smoke (--decompose --tools --ft-cross-encoder, n=100):** **61.0% (−7pp from baseline 68%)**.
+
+Per-category vs item 4 baseline (--decompose --tools):
+- knowledge-update: 76% → 76% (0)
+- multi-session: 65% → **35% (−30pp)** ← collapse
+- single-session-assistant: 88% → 88% (0)
+- single-session-preference: 35% → 18% (−17pp)
+- single-session-user: 69% → 69% (0)
+- temporal-reasoning: 75% → 81% (+6pp)
+
+**Diagnosis:** the synthetic pair generator labelled "turn containing the answer string verbatim" as positive (label=1) and other turns as negative. For multi-session questions, the answer is *synthesized* across multiple turns — none of which contain the literal answer. The fine-tuned model learned to push answer-containing turns to the top of the rerank list, which improves IR-style metrics (nDCG ↑) but actively hurts multi-session retrieval where you need *several* contributing turns each. The eval set was group-aware split but didn't catch this because nDCG measures ranking quality on the *same biased label distribution*.
+
+**Decision:** ship `--ft-cross-encoder` behind flag default OFF. Valuable negative result: **high nDCG@10 ≠ good downstream accuracy when training labels misalign with task structure**. To rescue, we'd need question-type-aware labels (different positive criteria for multi-session vs single-session). Out of scope.
+
+#### Item 7 (--react smoke, n=100): **64.0% (−4pp)**
+
+Per-category vs item 4 baseline:
+- multi-session: 65% → 59% (−6)
+- knowledge-update: 76% → 71% (−5)
+- single-session-preference: 35% → 29% (−6)
+- temporal-reasoning: 75% → 69% (−6)
+
+**Diagnosis:** ReAct fires on the post-Reader verifier verdict. When the initial Reader answer is borderline correct, the verifier sometimes returns PARTIAL (correctly cautious), and ReAct re-runs, producing a *different* answer that's often worse. Most of the regression is from ReAct overwriting borderline-correct initial answers with confidently-wrong agent-loop conclusions. The trace also shows ~3% of answers leak literal tool markup (`[final_answer]{"answer": "17"}`) because gpt-4o-mini doesn't always honour the `[TOOL_USE]…[/TOOL_USE]` strict format.
+
+**Decision:** ship `--react` behind flag default OFF. To rescue: better verifier calibration (be less aggressive with PARTIAL on plausible answers), or only fire ReAct on a narrower set of questions (e.g. only when the Reader literally returns "I don't know"). Out of scope for this batch.
+
+## Programme summary
+
+| phase | items | net effect | shipped |
+|---|---|---|---|
+| A (item 1) | reader-model ablation | +0pp (stayed on gpt-4o-mini) | default reader = `gpt-4o-mini` |
+| B (items 2, 3) | decomposer wiring + temporal solver | decomposer **+1pp** (after gate tightening); solver net negative | `--decompose` ON; `--solver` flag OFF |
+| C (items 4, 5, 6) | tools + reextract + self-consistency | tools **+3pp**; others ~0 at n=50 | `--tools` ON; `--reextract` flag OFF; `--self-consistency` flag OFF |
+| D (items 7, 8) | ReAct + fine-tuned cross-encoder | both net negative | both flags default OFF |
+
+**Final shipped stack** (`gpt-4o-mini` reader + `--decompose` + `--tools`):
+- 100q stratified, judged by `gpt-4o-mini`: **68.0%** vs baseline 64.0% = **+4pp**
+- Per-category gains: knowledge-update +5pp, multi-session +6pp, single-session-preference +11pp, temporal-reasoning 0 (was 75% bare, 75% final)
+
+**Programme cost:** ~$25 + ~8 hours wall-clock across all smokes and the cross-encoder training run.
+
+**Honest positioning:** Engram with these techniques achieves +4pp over its prior bare-pipeline baseline on LongMemEval-S (n=100, judged). This is below the public leaderboard frontier (AgentMemory 96.2%). The biggest gaps remaining: a verifier that knows when not to second-guess; question-type-aware reranking; native Anthropic tool-use API to unlock Sonnet's potential edge. All documented for follow-up.
+
+**Items deliberately deferred (still useful future work):**
+- Native Anthropic tool-use API path → would unlock Sonnet at +5-10pp on tool-augmented runs
+- Question-type-aware cross-encoder training labels (different positive criteria per LongMemEval category)
+- Stricter solver pre-gate (require explicit anchor words in question)
+- Self-RAG style verifier calibration to reduce ReAct false-fires
