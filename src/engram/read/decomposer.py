@@ -12,8 +12,28 @@ from engram.read.prompts import DECOMPOSER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-_CONJUNCTION_RE = re.compile(
-    r"\b(and|or|both|either|while|whereas|along with|as well as)\b",
+# 'and' is the only conjunction we trust as a real compound signal in
+# LongMemEval. 'or' usually marks a comparison ("X or Y?") that should NOT
+# be split — splitting loses the comparison itself.
+_AND_RE = re.compile(r"\band\b", re.IGNORECASE)
+
+# Temporal / ordering / comparative markers — questions containing these
+# should NOT be decomposed because:
+#   - "first/last/before/after/between" mark ordering/comparison logic that
+#     atomic subqueries can't reproduce
+#   - "how long/many days/months" expect a single numeric/durational answer,
+#     not a fan-out
+#   - "when did" is a single-fact temporal query
+# Empirically (Phase B diagnostic), removing decomposition on these recovers
+# the -6pp temporal-reasoning regression seen in the unconstrained version.
+_TEMPORAL_SKIP_RE = re.compile(
+    r"\b("
+    r"first|last|earliest|latest|"
+    r"before|after|between|since|ago|prior\s+to|"
+    r"when\s+did|when\s+was|what\s+was\s+the\s+date|"
+    r"how\s+long|how\s+many\s+(days|weeks|months|years|hours|minutes|times)|"
+    r"how\s+often"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -21,14 +41,17 @@ _CONJUNCTION_RE = re.compile(
 def should_decompose(question: str) -> bool:
     """Cheap heuristic — return True if question is plausibly compound.
 
-    Avoids unnecessary LLM calls when a question is clearly atomic.
-    Compound when: more than one '?', OR ≥10 words AND a coordinating conjunction.
-    The 10-word floor is calibrated against LongMemEval, where most compound
-    questions are 10-15 words; 12+ would miss too many real cases.
+    Avoids unnecessary LLM calls when a question is clearly atomic, and
+    avoids breaking temporal/ordering questions that decompose poorly.
+
+    Compound when: more than one '?', OR ≥10 words AND contains 'and' AND
+    contains no temporal/ordering markers.
     """
+    if _TEMPORAL_SKIP_RE.search(question):
+        return False
     if question.count("?") > 1:
         return True
-    if len(question.split()) >= 10 and _CONJUNCTION_RE.search(question):
+    if len(question.split()) >= 10 and _AND_RE.search(question):
         return True
     return False
 

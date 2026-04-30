@@ -19,10 +19,12 @@ def test_two_question_marks_decomposes():
     assert should_decompose("What's my job? And where do I work?") is True
 
 
-def test_long_question_with_or_decomposes():
+def test_or_does_not_trigger_decomposition():
+    """'or' usually marks a comparison ('X or Y?') that should NOT be split —
+    splitting loses the comparison. Only 'and' is treated as a compound signal."""
     assert (
         should_decompose("Did I prefer espresso or filter coffee in the morning yesterday?")
-        is True
+        is False
     )
 
 
@@ -63,3 +65,41 @@ def test_rrf_handles_partial_overlap():
     # a in both lists at top; d only in second; c only in first
     fused = reciprocal_rank_fusion([[a, b, c], [a, d]], k=60)
     assert fused[0] == a  # appears highest in both
+
+
+# Tighter Phase B v2 gate — temporal/ordering markers skip decomposition
+def test_temporal_marker_first_skips():
+    assert should_decompose(
+        "Which event did I attend first, the workshop or the seminar?"
+    ) is False
+
+
+def test_temporal_marker_before_skips():
+    assert should_decompose(
+        "How many days before the team meeting did I attend the workshop?"
+    ) is False
+
+
+def test_temporal_marker_how_long_skips():
+    assert should_decompose(
+        "How long did I take to finish reading the book and the journal?"
+    ) is False
+
+
+def test_temporal_marker_how_many_days_skips():
+    assert should_decompose(
+        "How many days did I spend traveling in Hawaii and New York?"
+    ) is False
+
+
+def test_compound_and_without_temporal_marker_decomposes():
+    """Pure compound 'and' question with no temporal markers — should still split."""
+    assert should_decompose(
+        "Where do I live and what is my brother's name today?"
+    ) is True
+
+
+def test_when_did_skips():
+    assert should_decompose(
+        "When did I last visit the museum and the gallery together?"
+    ) is False
