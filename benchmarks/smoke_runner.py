@@ -71,6 +71,7 @@ def parse_args() -> SmokeFlags:
 class TraceRecord(TypedDict, total=False):
     qid: str
     category: str
+    solver_fired: bool
     decomposer: dict[str, Any]
     recall: list[dict[str, Any]]
     reader: dict[str, Any]
@@ -153,9 +154,11 @@ async def main() -> None:
     from engram.embedding.ollama import OllamaEmbedding
     from engram.llm.openai import OpenAILLM
     from engram.read.decomposer import should_decompose
-    from engram.read.reader import Reader
+    from engram.read.reader import Reader, ReaderConfig
     from engram.retrieve.base import RetrievalConfig
     from engram.retrieve.rerank import CrossEncoderReranker
+    from engram.scope import Scope
+    from engram.solve.temporal import TemporalSolver
 
     flags.out_dir.mkdir(parents=True, exist_ok=True)
     run_id = f"smoke_{int(time.time())}_{flags.reader.replace('/', '_')}"
@@ -194,8 +197,18 @@ async def main() -> None:
             today = (
                 _parse_haystack_date(q["question_date"]) if q.get("question_date") else None
             )
-            reader = Reader(tier.reader)
-            res = await reader.read(question=q["question"], context=ctx, today=today)
+            solver = (
+                TemporalSolver(store=memory._store, llm=tier.utility)
+                if flags.solver
+                else None
+            )
+            reader = Reader(tier.reader, config=ReaderConfig(solver=solver))
+            res = await reader.read(
+                question=q["question"],
+                context=ctx,
+                today=today,
+                scope=Scope(org_id="default", user_id="alice"),
+            )
             judged = await judge_one(
                 question=q["question"],
                 expected=str(q["answer"]),
@@ -209,6 +222,7 @@ async def main() -> None:
         rec: TraceRecord = {
             "qid": q["question_id"],
             "category": q["question_type"],
+            "solver_fired": res.solved_by == "solver",
             "decomposer": {"fired": decomposer_fired, "subqueries": [q["question"]]},
             "recall": [
                 {"sq": q["question"], "n_candidates": n_chunks, "top_k": 0, "fact_ids": []}
