@@ -383,3 +383,23 @@ Items deliberately deferred (memory file `project_engram_v2_progress.md` Tier 2 
 - Compositional decomposition with parallel per-subquery memory (different from §5.7 wiring; would need its own decomposer model)
 
 Any of these become candidates for a follow-up batch if M3 falls short of ceiling.
+
+## Changelog
+
+### Item 1 (reader ablation) — 2026-04-30
+
+100-q stratified smoke, official `gpt-4o-mini` judge. Embedder Ollama `nomic-embed-text`. No flags (bare reader pipeline).
+
+| reader | overall | knowledge-update | multi-session | single-session-assistant | single-session-preference | single-session-user | temporal-reasoning | wall-clock | est cost |
+|---|---|---|---|---|---|---|---|---|---|
+| `gpt-4o-mini` | **64.0%** | 71% | 53% | 88% | 24% | 75% | 75% | 408s | ~$0.50 |
+| `claude-haiku-4-5-20251001` | 61.0% | 65% | 53% | 88% | 41% | 69% | 50% | 544s | ~$1.00 |
+| `claude-sonnet-4-6` | **69.0%** | 82% | 53% | 94% | 41% | 69% | 75% | 957s | ~$2.00 |
+
+**Δ vs gpt-4o-mini:** Sonnet **+5.0pp** (right at promotion threshold), Haiku **-3.0pp**.
+
+**Decision:** Promotion **deferred**. `ModelTier.default()` stays on `gpt-4o-mini`.
+
+**Reasoning:** Sonnet hits the +5pp threshold exactly, but at n=100 the noise is roughly ±5pp — repeating the run could plausibly show 67% or 71%. More importantly, this is a *bare-reader* comparison; Sonnet's real edge is tool use, which item 4 introduces. Re-test all three readers after item 4 lands (with `--tools` enabled) to see whether the gap widens enough to justify ~30× cost. Sonnet also shows a regression on `single-session-user` (-6pp) that's worth understanding before locking it in. In the meantime, items 2-6 ablations run on cheap gpt-4o-mini (~$15-20 saved over the programme).
+
+**Re-test scheduled:** after item 4 lands. If Sonnet then shows ≥+5pp on the tool-augmented pipeline, promote.
