@@ -92,6 +92,8 @@ class Reader:
         self._reextractor: Any | None = None
         self._reextract_store: Any | None = None
         self._candidate_sessions_provider: Any | None = None
+        # Escalation rung (c) — wired by attach_react()
+        self._react: Any | None = None
         # Per-question category for self-consistency gating (set by caller)
         self._category: str | None = None
 
@@ -102,6 +104,15 @@ class Reader:
         where it pays off (temporal-reasoning, multi-session, knowledge-update).
         """
         self._category = category
+
+    def attach_react(self, react_agent: Any) -> None:
+        """Wire the ReAct fallback (escalation rung c).
+
+        Fires when post-self-consistency verdict is still PARTIAL/NO. The agent
+        gets a tool registry (typically the same one passed via ReaderConfig.tools)
+        and tries multi-hop retrieval to find an answer.
+        """
+        self._react = react_agent
 
     def attach_reextractor(
         self,
@@ -324,6 +335,22 @@ class Reader:
                 if len(samples) > 1:
                     answer = majority_vote(samples)
                     final_verdict = sc_verdict
+
+        # Escalation rung (c) — ReAct fallback (item 7 / Phase 11b)
+        if self._verifier_enabled and self._react is not None and scope is not None:
+            post_verdict, _ = await self._verify(
+                question, context + f"\n\nAnswer: {answer}"
+            )
+            if post_verdict in ("PARTIAL", "NO"):
+                try:
+                    agent_res = await self._react.answer(
+                        question=question, scope=scope, today=today
+                    )
+                    if not agent_res.abstained:
+                        answer = agent_res.answer
+                        final_verdict = "YES"
+                except Exception as e:
+                    logger.warning("ReAct fallback failed: %s", e)
 
         abstained = answer.lower().startswith("i don't know")
         return ReadResult(
