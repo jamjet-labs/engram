@@ -43,15 +43,18 @@ FACTS:
 
 QUESTION: {question}
 
-Output STRICT JSON of shape:
-{{"verdict": "YES" | "NO" | "PARTIAL", "missing": "<short hint OR null>"}}
+Output exactly two XML tags, no extra prose:
+<verdict>YES</verdict><missing>none</missing>
 
 Rules:
-- "YES": facts directly answer the question (no inference required, OR multi-fact direct support).
-- "PARTIAL": facts give partial information; one or more pieces are missing.
-- "NO": facts contain no relevant information at all.
-- For PARTIAL/NO, set "missing" to a short clue about what's needed.
-- For YES, set "missing" to null."""
+- verdict YES: facts directly answer the question (direct or multi-fact direct support).
+- verdict PARTIAL: facts give partial information; one or more pieces are missing.
+- verdict NO: facts contain no relevant information at all.
+- For PARTIAL/NO, replace "none" with a short clue about what's needed (max 80 chars).
+- For YES, keep missing as "none".
+- Output ONLY the two tags. Nothing else.
+
+We use XML rather than JSON because Anthropic models honor it more reliably."""
 
 
 # Query decomposition: split multi-part questions into sub-queries

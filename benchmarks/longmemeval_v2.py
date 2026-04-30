@@ -52,7 +52,8 @@ def _parse_haystack_date(raw: str) -> datetime:
     return datetime.strptime(head, "%Y/%m/%d").replace(tzinfo=UTC)
 
 
-async def _ingest(memory: Engram, q: dict[str, Any], user_id: str) -> int:
+async def _ingest_chunks(memory: Engram, q: dict[str, Any], user_id: str) -> int:
+    """Per-turn ingestion (default mode). Each turn becomes one Fact row."""
     n = 0
     for sid, sdate_raw, session in zip(
         q["haystack_session_ids"],
@@ -70,6 +71,70 @@ async def _ingest(memory: Engram, q: dict[str, Any], user_id: str) -> int:
             )
             n += 1
     return n
+
+
+async def _ingest_extracted(memory: Engram, q: dict[str, Any], user_id: str) -> int:
+    """LLM-extracted ingestion (Tier 2 mode).
+
+    Groups turns by session, calls Engram.extract once per session — yielding
+    canonical, deduplicated facts instead of raw per-turn chunks. Costs more
+    (~10 LLM calls per question) but should improve precision per the Phase 6
+    failure-mode analysis.
+    """
+    from engram.models import ChatMessage
+    from engram.scope import Scope
+
+    scope = Scope(org_id="default", user_id=user_id)
+    n_facts = 0
+    for sid, sdate_raw, session in zip(
+        q["haystack_session_ids"],
+        q["haystack_dates"],
+        q["haystack_sessions"],
+        strict=False,
+    ):
+        sdate = _parse_haystack_date(sdate_raw)
+        msgs = [
+            ChatMessage(
+                scope=scope,
+                session_id=sid,
+                role=turn["role"],
+                content=turn["content"],
+                timestamp=sdate,
+            )
+            for turn in session
+        ]
+        # Persist raw turns alongside extracted facts so SVO calendar / replay
+        # has access to source.
+        for m in msgs:
+            await memory.record_message(
+                content=m.content,
+                role=m.role,
+                session_id=sid,
+                user_id=user_id,
+                timestamp=m.timestamp,
+            )
+        try:
+            facts = await memory.extract(msgs, session_date=sdate, persist=True)
+            n_facts += len(facts)
+        except Exception as e:
+            # Extraction is brittle; if a session fails, fall back to per-turn
+            # chunks for that session so the question still has SOMETHING to retrieve.
+            print(f"  [extraction failed for session {sid}: {e}; falling back to chunks]")
+            for turn in session:
+                await memory.record(
+                    text=turn["content"],
+                    user_id=user_id,
+                    session_id=sid,
+                    event_date=sdate,
+                )
+                n_facts += 1
+    return n_facts
+
+
+async def _ingest(memory: Engram, q: dict[str, Any], user_id: str, extract: bool) -> int:
+    if extract:
+        return await _ingest_extracted(memory, q, user_id)
+    return await _ingest_chunks(memory, q, user_id)
 
 
 async def _answer(
@@ -91,11 +156,12 @@ def _correct(expected: Any, predicted: str) -> bool:
     return any(tok in p for tok in e.split() if len(tok) > 3)
 
 
-async def main(limit: int) -> None:
+async def main(limit: int, extract: bool) -> None:
     if "ANTHROPIC_API_KEY" not in os.environ:
         raise SystemExit("ANTHROPIC_API_KEY not set; export before running")
     if not ORACLE_PATH.exists():
         raise SystemExit(f"oracle dataset not found: {ORACLE_PATH}")
+    print(f"Mode: {'LLM-extracted facts (Tier 2)' if extract else 'per-turn chunks (default)'}")
 
     print("Loading dataset + reranker...")
     data = json.loads(ORACLE_PATH.read_text())
@@ -144,13 +210,12 @@ async def main(limit: int) -> None:
             retrieval_config=cfg,
         ) as memory:
             t0 = time.time()
-            n_chunks = await _ingest(memory, q, user_id="alice")
+            n_chunks = await _ingest(memory, q, user_id="alice", extract=extract)
             t_ingest = time.time() - t0
             t1 = time.time()
-            # Verifier disabled by default for Anthropic — its JSON mode is
-            # less reliable than OpenAI's, so verdict was always defaulting to
-            # PARTIAL anyway. Set ENGRAM_BENCH_VERIFIER=1 to re-enable.
-            verifier_on = os.environ.get("ENGRAM_BENCH_VERIFIER") == "1"
+            # Verifier on by default now that XML-based prompts work with Anthropic.
+            # Set ENGRAM_BENCH_VERIFIER=0 to disable.
+            verifier_on = os.environ.get("ENGRAM_BENCH_VERIFIER", "1") != "0"
             answer = await _answer(
                 memory,
                 reader=Reader(llm, verifier=verifier_on),
@@ -200,5 +265,10 @@ async def main(limit: int) -> None:
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--limit", type=int, default=10)
+    p.add_argument(
+        "--extract",
+        action="store_true",
+        help="Use LLM extraction per session (Tier 2 mode). Costs more but yields canonical facts.",
+    )
     args = p.parse_args()
-    asyncio.run(main(args.limit))
+    asyncio.run(main(args.limit, args.extract))

@@ -34,7 +34,9 @@ class RetrievalConfig(BaseModel):
     vector_weight: float = Field(default=0.55, ge=0.0, le=1.0)
     keyword_weight: float = Field(default=0.30, ge=0.0, le=1.0)
     temporal_weight: float = Field(default=0.15, ge=0.0, le=1.0)
-    candidate_pool_multiplier: int = Field(default=3, ge=1, le=10)
+    # Bumped 3 -> 5 (2026-04-30) to recover ~15% retrieval misses observed
+    # on the Phase 6 500-q run (relevant facts existed but didn't make top-10).
+    candidate_pool_multiplier: int = Field(default=5, ge=1, le=10)
     temporal_sigma_days: float = Field(default=30.0, gt=0.0)
 
     # Phase 9: two-stage retrieval. When True, retrieve top-K sessions first

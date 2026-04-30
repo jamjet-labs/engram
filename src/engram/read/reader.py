@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 from engram.errors import ExtractionError
 from engram.llm.base import LLMClient, LLMMessage
 from engram.read.prompts import READER_SYSTEM_PROMPT, TODAY_CLAUSE, VERIFIER_SYSTEM_PROMPT
+
+_VERDICT_RE = re.compile(r"<verdict>\s*(YES|NO|PARTIAL)\s*</verdict>", re.IGNORECASE)
+_MISSING_RE = re.compile(r"<missing>\s*(.*?)\s*</missing>", re.IGNORECASE | re.DOTALL)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,10 @@ class Reader:
         """Run the verifier.
 
         Returns (verdict, missing). On parse failure, returns ('PARTIAL', None).
+
+        Uses XML tags (verdict, missing) rather than JSON because Anthropic
+        models honor structured-text more reliably than JSON-mode for short
+        outputs like this. OpenAI/Ollama also handle XML fine.
         """
         try:
             resp = await self._llm.generate(
@@ -102,21 +109,27 @@ class Reader:
                     LLMMessage(role="user", content=question),
                 ],
                 temperature=0.0,
-                json_mode=True,
                 max_tokens=120,
             )
-            data = json.loads(resp.content.strip())
-            v = data.get("verdict", "PARTIAL").upper()
-            if v not in ("YES", "NO", "PARTIAL"):
-                v = "PARTIAL"
-            missing = data.get("missing")
-            if missing is not None and not isinstance(missing, str):
-                missing = None
-            # `v` is one of "YES"/"NO"/"PARTIAL" by virtue of the check above.
-            return (v, missing)
-        except (ExtractionError, json.JSONDecodeError, ValueError) as e:
-            logger.warning("verifier parse failed (%s); defaulting to PARTIAL", e)
+        except ExtractionError as e:
+            logger.warning("verifier LLM call failed (%s); defaulting to PARTIAL", e)
             return ("PARTIAL", None)
+
+        text = resp.content.strip()
+        m = _VERDICT_RE.search(text)
+        if m is None:
+            logger.warning("verifier missing <verdict> tag; defaulting to PARTIAL: %r", text[:120])
+            return ("PARTIAL", None)
+        v = m.group(1).upper()
+        verdict: Verdict = v if v in ("YES", "NO", "PARTIAL") else "PARTIAL"  # type: ignore[assignment]
+
+        missing: str | None = None
+        m2 = _MISSING_RE.search(text)
+        if m2 is not None:
+            raw = m2.group(1).strip()
+            if raw and raw.lower() != "none":
+                missing = raw[:200]
+        return (verdict, missing)
 
 
 def format_context_with_confidence(

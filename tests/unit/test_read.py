@@ -39,7 +39,7 @@ class _FakeLLM:
 async def test_reader_returns_answer_when_verifier_yes() -> None:
     llm = _FakeLLM(
         {
-            "verify": json.dumps({"verdict": "YES", "missing": None}),
+            "verify": "<verdict>YES</verdict><missing>none</missing>",
             "answer a question": "espresso",
         }
     )
@@ -51,7 +51,7 @@ async def test_reader_returns_answer_when_verifier_yes() -> None:
 
 
 async def test_reader_abstains_when_verifier_no() -> None:
-    llm = _FakeLLM({"verify": json.dumps({"verdict": "NO", "missing": "no preference fact found"})})
+    llm = _FakeLLM({"verify": "<verdict>NO</verdict><missing>no preference fact found</missing>"})
     reader = Reader(llm, verifier=True)
     result = await reader.read("what does alice prefer?", "- alice has a cat")
     assert result.answer == "I don't know"
@@ -74,7 +74,7 @@ async def test_reader_detects_idk_in_answer() -> None:
     """Reader should mark abstained when the model itself outputs 'I don't know'."""
     llm = _FakeLLM(
         {
-            "verify": json.dumps({"verdict": "PARTIAL", "missing": "weak"}),
+            "verify": "<verdict>PARTIAL</verdict><missing>weak</missing>",
             "answer a question": "I don't know",
         }
     )
@@ -83,10 +83,10 @@ async def test_reader_detects_idk_in_answer() -> None:
     assert result.abstained is True
 
 
-async def test_reader_handles_invalid_verifier_json_as_partial() -> None:
+async def test_reader_handles_missing_verdict_tag_as_partial() -> None:
     llm = _FakeLLM(
         {
-            "verify": "this is not json",
+            "verify": "this has no XML tags at all",
             "answer a question": "some answer",
         }
     )
@@ -95,6 +95,20 @@ async def test_reader_handles_invalid_verifier_json_as_partial() -> None:
     # Verifier defaults to PARTIAL, so we still call the reader
     assert result.verdict == "PARTIAL"
     assert result.answer == "some answer"
+
+
+async def test_reader_tolerates_chatty_verifier_output() -> None:
+    """Some models add prose around the tags. Regex extraction should still work."""
+    llm = _FakeLLM(
+        {
+            "verify": "Sure, here's my analysis: <verdict>YES</verdict><missing>none</missing>",
+            "answer a question": "the answer",
+        }
+    )
+    reader = Reader(llm, verifier=True)
+    result = await reader.read("?", "- ctx")
+    assert result.verdict == "YES"
+    assert result.answer == "the answer"
 
 
 # ── format_context_with_confidence ─────────────────────────────────
