@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from engram.errors import ExtractionError
 from engram.llm.base import LLMClient, LLMMessage
 from engram.read.prompts import READER_SYSTEM_PROMPT, TODAY_CLAUSE, VERIFIER_SYSTEM_PROMPT
+from engram.scope import Scope
 
 _VERDICT_RE = re.compile(r"<verdict>\s*(YES|NO|PARTIAL)\s*</verdict>", re.IGNORECASE)
 _MISSING_RE = re.compile(r"<missing>\s*(.*?)\s*</missing>", re.IGNORECASE | re.DOTALL)
@@ -29,30 +30,71 @@ class ReadResult(BaseModel):
     missing: str | None = None
     abstained: bool = False
     decomposed_subqueries: list[str] = Field(default_factory=list)
+    solved_by: Literal["solver", "reader"] | None = None
+
+
+class ReaderConfig(BaseModel):
+    """Optional pluggable behaviours for the Reader."""
+
+    # Use Any to dodge a circular import (engram.solve.temporal imports nothing
+    # from engram.read, but solve depends on store/llm which are heavy).
+    solver: Any = None
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class Reader:
-    """Reading layer with optional pre-verification.
+    """Reading layer with optional pre-verification + programmatic pre-pass.
 
     Pipeline:
-      1. (Optional) verifier checks if facts can answer the question
-      2. If verifier says NO, return abstention
-      3. Otherwise the reader generates an answer
+      1. (Optional) Programmatic solver pre-pass — if config.solver is set AND a
+         scope is provided AND the solver returns a deterministic answer, return
+         it immediately (verdict="YES", solved_by="solver"). No LLM call.
+      2. (Optional) verifier checks if facts can answer the question
+      3. If verifier says NO, return abstention
+      4. Otherwise the reader generates an answer
 
-    Set `verifier=False` to skip the verifier (saves one LLM call).
+    Set ``verifier=False`` to skip the verifier (saves one LLM call).
     """
 
-    def __init__(self, llm: LLMClient, verifier: bool = True) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        verifier: bool = True,
+        config: ReaderConfig | None = None,
+    ) -> None:
         self._llm = llm
         self._verifier_enabled = verifier
+        self._config = config or ReaderConfig()
 
     async def read(
         self,
         question: str,
         context: str,
         today: datetime | None = None,
+        scope: Scope | None = None,
     ) -> ReadResult:
-        """Answer `question` from `context`. Pass `today` to anchor temporal queries."""
+        """Answer `question` from `context`. Pass `today` to anchor temporal queries.
+
+        ``scope`` is required for the programmatic solver pre-pass; if omitted,
+        the solver is skipped even when configured.
+        """
+        # 1. Solver pre-pass (item 3 / N1)
+        if self._config.solver is not None and scope is not None:
+            try:
+                tq = await self._config.solver.parse(question, today=today)
+                if tq is not None:
+                    sr = await self._config.solver.solve(tq, scope)
+                    if sr is not None:
+                        return ReadResult(
+                            answer=str(sr.answer),
+                            verdict="YES",
+                            abstained=False,
+                            solved_by="solver",
+                        )
+            except Exception as e:  # never fail the read because the solver erred
+                logger.warning("solver pre-pass failed (%s); falling through to LLM", e)
+
         today_clause = TODAY_CLAUSE.format(today=today.date().isoformat()) if today else ""
 
         verdict: Verdict | None = None
@@ -65,6 +107,7 @@ class Reader:
                     verdict=verdict,
                     missing=missing,
                     abstained=True,
+                    solved_by="reader",
                 )
 
         # Generate answer
@@ -88,7 +131,13 @@ class Reader:
             raise ExtractionError(f"reader generate failed: {e}") from e
         answer = resp.content.strip()
         abstained = answer.lower().startswith("i don't know")
-        return ReadResult(answer=answer, verdict=verdict, missing=missing, abstained=abstained)
+        return ReadResult(
+            answer=answer,
+            verdict=verdict,
+            missing=missing,
+            abstained=abstained,
+            solved_by="reader",
+        )
 
     async def _verify(self, question: str, context: str) -> tuple[Verdict, str | None]:
         """Run the verifier.

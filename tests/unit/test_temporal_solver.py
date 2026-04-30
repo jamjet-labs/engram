@@ -6,6 +6,7 @@ import pytest
 
 from engram import Engram
 from engram.models import Event
+from engram.read.reader import Reader, ReaderConfig
 from engram.scope import Scope
 from engram.solve.temporal import SolverResult, TemporalQuery, TemporalSolver
 
@@ -204,3 +205,70 @@ async def test_solve_count_returns_none_without_verb_or_object(monkeypatch):
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
         q = TemporalQuery(op="count")
         assert await s.solve(q, scope) is None
+
+
+# 3.4: Reader pre-pass integration
+@pytest.mark.asyncio
+async def test_reader_uses_solver_when_it_returns_answer():
+    """When the solver answers, the LLM is never called."""
+    fake_llm = AsyncMock()
+    fake_solver = AsyncMock()
+    fake_solver.parse = AsyncMock(return_value=TemporalQuery(op="count", verb="run"))
+    fake_solver.solve = AsyncMock(return_value=SolverResult(answer=4, confidence=0.95))
+
+    reader = Reader(fake_llm, verifier=False, config=ReaderConfig(solver=fake_solver))
+    res = await reader.read(
+        question="How many marathons before Cure?",
+        context="some context",
+        today=datetime(2023, 8, 1, tzinfo=UTC),
+        scope=Scope(org_id="default", user_id="alice"),
+    )
+    assert res.answer == "4"
+    assert res.solved_by == "solver"
+    fake_llm.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reader_falls_through_when_solver_returns_none():
+    """When the solver can't handle the question, the LLM is invoked."""
+    fake_llm = AsyncMock()
+    fake_llm.generate.return_value.content = "fallback answer"
+    fake_solver = AsyncMock()
+    fake_solver.parse = AsyncMock(return_value=None)
+    fake_solver.solve = AsyncMock(return_value=None)
+
+    reader = Reader(fake_llm, verifier=False, config=ReaderConfig(solver=fake_solver))
+    res = await reader.read(
+        question="What's my favourite colour?",
+        context="context",
+        scope=Scope(org_id="default", user_id="alice"),
+    )
+    assert res.answer == "fallback answer"
+    assert res.solved_by == "reader"
+    fake_llm.generate.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_reader_skips_solver_without_scope():
+    """Without a scope, the solver pre-pass is skipped — back-compat."""
+    fake_llm = AsyncMock()
+    fake_llm.generate.return_value.content = "answer"
+    fake_solver = AsyncMock()
+    reader = Reader(fake_llm, verifier=False, config=ReaderConfig(solver=fake_solver))
+    res = await reader.read(question="?", context="ctx")
+    assert res.answer == "answer"
+    fake_solver.parse.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reader_solver_failure_does_not_break_read():
+    """If the solver raises, the reader still succeeds via the LLM path."""
+    fake_llm = AsyncMock()
+    fake_llm.generate.return_value.content = "fallback"
+    fake_solver = AsyncMock()
+    fake_solver.parse = AsyncMock(side_effect=RuntimeError("boom"))
+    reader = Reader(fake_llm, verifier=False, config=ReaderConfig(solver=fake_solver))
+    res = await reader.read(
+        question="?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+    )
+    assert res.answer == "fallback"
