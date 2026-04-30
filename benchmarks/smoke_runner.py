@@ -4,11 +4,9 @@ Produces JSONL traces for ablation analysis. Same selection algorithm
 as longmemeval_v2.py for comparable numbers across runs.
 """
 from __future__ import annotations
+
 import argparse
-import asyncio
 import json
-import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,7 +32,7 @@ def stratified_sample(oracle_path: str, n: int = 100) -> list[dict[str, Any]]:
 
 @dataclass
 class SmokeFlags:
-    reader: str = "gpt-4o-mini"          # gpt-4o-mini | claude-haiku-4-5-20251001 | claude-sonnet-4-6
+    reader: str = "gpt-4o-mini"  # gpt-4o-mini | claude-haiku | claude-sonnet-4-6
     decompose: bool = False
     solver: bool = False
     tools: bool = False
