@@ -279,8 +279,33 @@ async def main() -> None:
             )
             tools_reg = _build_tools(memory, solver, flags) if flags.tools else None
             reader = Reader(
-                tier.reader, config=ReaderConfig(solver=solver, tools=tools_reg)
+                tier.reader,
+                config=ReaderConfig(
+                    solver=solver,
+                    tools=tools_reg,
+                    enable_reextract=flags.reextract,
+                ),
             )
+            # Escalation rung (a) — re-extract on PARTIAL/NO. Pre-compute the
+            # candidate-session list so the sync provider in attach_reextractor
+            # can return it without an extra recall round trip.
+            if flags.reextract:
+                from engram.read.reextract import QueryConditionedReextractor
+
+                hits = await memory.recall(q["question"], user_id="alice", top_k=30)
+                cand_sids: list[str] = []
+                seen: set[str] = set()
+                for sf in hits:
+                    sid = sf.fact.session_id
+                    if sid and sid not in seen:
+                        cand_sids.append(sid)
+                        seen.add(sid)
+                rx = QueryConditionedReextractor(llm=tier.utility)
+                reader.attach_reextractor(
+                    reextractor=rx,
+                    store=memory._store,
+                    candidate_sessions_provider=lambda _q, _s=cand_sids: _s,
+                )
             res = await reader.read(
                 question=q["question"],
                 context=ctx,
