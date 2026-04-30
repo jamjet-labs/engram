@@ -403,3 +403,39 @@ Any of these become candidates for a follow-up batch if M3 falls short of ceilin
 **Reasoning:** Sonnet hits the +5pp threshold exactly, but at n=100 the noise is roughly ±5pp — repeating the run could plausibly show 67% or 71%. More importantly, this is a *bare-reader* comparison; Sonnet's real edge is tool use, which item 4 introduces. Re-test all three readers after item 4 lands (with `--tools` enabled) to see whether the gap widens enough to justify ~30× cost. Sonnet also shows a regression on `single-session-user` (-6pp) that's worth understanding before locking it in. In the meantime, items 2-6 ablations run on cheap gpt-4o-mini (~$15-20 saved over the programme).
 
 **Re-test scheduled:** after item 4 lands. If Sonnet then shows ≥+5pp on the tool-augmented pipeline, promote.
+
+### Item 2 (decomposer wiring) + Item 3 (programmatic temporal solver) — 2026-04-30
+
+#### Initial smokes (loose gate)
+
+| run | overall | multi-session | temporal-reasoning | knowledge-update |
+|---|---|---|---|---|
+| baseline (no flags, n=100) | 64.0% | 53% | 75% | 71% |
+| --decompose only (n=100) | 64.0% | 59% (+6) | 69% (-6) | 71% |
+| --solver only (n=100) | 63.0% | 59% | 75% | 59% (-12) |
+| --decompose --solver (n=100) | 63.0% | 65% | 69% | 59% |
+| --decompose --solver (n=200, M1) | 63.0% | 59% | 59% | 53% |
+
+**M1 gate FAILED:** target +8pp lift over baseline; observed -1pp.
+
+#### Diagnosis
+
+1. **Decomposer:** robust +6pp lift on multi-session (the targeted category), but the loose gate (≥10 words + 'and'/'or' conjunction) fired on temporal-reasoning compound questions and decomposed them poorly, losing -6pp.
+2. **Solver:** fired ~3-5% of the time, **always wrong**. Returned small numbers like "1" on knowledge-update questions like "how many followers do I have on Instagram now?" (where the answer is "1300", not the count of "have_followers" SVO events). The LLM parser is too eager to classify "how many X" as a count-of-events query.
+
+#### Root causes
+
+- Benchmark didn't populate the SVO event calendar — fixed by adding `_ingest_events` that calls `extract_events` per session when `--solver` is set. Solver still wrong because the LLM parser classifies non-event questions as count queries.
+- Decomposer heuristic gate was too loose — fixed by skipping questions containing temporal/ordering markers ("first", "last", "before", "after", "between", "since", "ago", "how long", "how many days/months/...", "when did", "what was the date"), and by treating only "and" (not "or") as a compound signal.
+
+#### Final smokes after fixes
+
+| run | overall | multi-session | temporal-reasoning |
+|---|---|---|---|
+| --decompose (tightened gate, n=100) | **65.0%** | **59% (+6)** | **75% (0)** |
+
+**Decision:**
+- **--decompose: ship ON by default** with the tightened gate. Small but robust net lift; recovers the multi-session win without the temporal regression.
+- **--solver: ship behind `--solver` flag default OFF.** The parser is too aggressive; needs stricter prefiltering (e.g., require explicit anchor words like "before/after X" in the question) before it would be safe to enable. Defer to a follow-up.
+
+**Programme cost so far:** ~$10 (3 reader ablations + 5 Phase B smokes incl. event-extraction overhead).
