@@ -19,7 +19,7 @@ This spec covers the next implementation batch: **8 work items** (5 from the exi
 - Land all 8 work items behind config flags
 - Validate each on a 100-q smoke with the official `gpt-4o-mini` judge before stacking
 - Deliver M3 (final) full-500 judged accuracy ≥ 85% (floor); 88-92% target
-- Keep cost per full-500 run ≤ $15 with Sonnet reader, ≤ $5 with gpt-4o-mini reader
+- Keep cost per full-500 run ≤ $5 with the default (gpt-4o-mini) reader; ≤ $15 if the ablation in item 1 promotes Sonnet 4.6 to default
 - Produce ablation traces sufficient to attribute lift per item
 
 ### Non-goals
@@ -35,7 +35,7 @@ The eight items fall in three buckets:
 
 **From original Tier 2/3:**
 1. **Wire `QueryDecomposer` into retrieval** (#5) — class exists in `src/engram/read/decomposer.py`, never called by `Engram.context()` or the benchmark
-2. **Switch reader to Sonnet 4.6** (#6) — currently Haiku 4.5
+2. **Reader-model ablation** (#6) — current reader is Haiku 4.5. Ablate Haiku 4.5 / gpt-4o-mini / Sonnet 4.6 on a 100-q smoke; promote whichever wins on accuracy-per-dollar to default. Default starting point is gpt-4o-mini (cheapest).
 3. **Adaptive self-consistency** (#8) — N=3 reader samples + vote, gated by verifier verdict
 4. **ReAct retrieval agent over SVO event calendar** (#4 / Phase 11b) — new module, brain on `gpt-4o-mini`
 5. **Fine-tune cross-encoder on LongMemEval-style queries** (#7) — offline training pipeline, swap into rerank step
@@ -50,12 +50,12 @@ The eight items fall in three buckets:
 ### 4.1 Pipeline shape
 
 ```
-record → extract → store ─┬─► recall ─► classifier ─► context ─► READER (Sonnet 4.6, tool-augmented)
+record → extract → store ─┬─► recall ─► classifier ─► context ─► READER (gpt-4o-mini default; Sonnet 4.6 if ablation promotes it; tool-augmented)
                           │                              ▲             │
                           │                       Decomposer (#5)      ├─► tool calls dispatched via ToolRegistry
                           │                       splits compound      │
                           │                       Q → k subqueries     ▼
-                          │                       (parallel recall)   verifier (gpt-4o-mini)
+                          │                       (parallel recall)   verifier (utility tier)
                           │                                            │ if PARTIAL/NO + low confidence:
                           │                                            ├─► (a) query-time re-extraction (N2)
                           │                                            ├─► (b) self-consistency N=3 (#8)
@@ -66,7 +66,7 @@ record → extract → store ─┬─► recall ─► classifier ─► contex
 
 ### 4.2 Cross-cutting changes
 
-- **`ModelTier` config** — `reader` (Sonnet 4.6 default) + `utility` (gpt-4o-mini for verifier, decomposer, classifier, event extraction, ReAct brain, re-extraction)
+- **`ModelTier` config** — `reader` (gpt-4o-mini default; promoted to Sonnet 4.6 if item 1's ablation shows it earns its keep) + `utility` (gpt-4o-mini for verifier, decomposer, classifier, event extraction, ReAct brain, re-extraction)
 - **`Tool` protocol + `ToolRegistry`** — single tool implementation shared between tool-aug reader and ReAct agent
 - **`TemporalSolver`** — used as a tool by the reader and by ReAct
 - **Adaptive self-consistency** — internal to `Reader`, no caller change
@@ -78,22 +78,34 @@ After the initial reader+verifier turn, escalation fires only on `verdict ≠ YE
 | Rung | Trigger | Cap | Cost |
 |---|---|---|---|
 | (a) Re-extract | verdict ∈ {PARTIAL, NO}; top-3 sessions exist | 1 attempt | +1 utility call (~$0.001) |
-| (b) Self-consistency | post-(a) verdict ≠ YES; category ∈ {temporal, multi-session, knowledge-update} | N=3 reader samples | +2 reader calls (~$0.04 Sonnet) |
+| (b) Self-consistency | post-(a) verdict ≠ YES; category ∈ {temporal, multi-session, knowledge-update} | N=3 reader samples | +2 reader calls (~$0.001 with gpt-4o-mini, ~$0.04 with Sonnet) |
 | (c) ReAct fallback | post-(b) verdict ≠ YES | max_hops=4, hop_timeout=15s, total_budget=60s | +up to 4 utility calls + tool I/O |
 | (d) Abstain | all three fail | — | 0 |
 
-Verifier runs after each rung. Worst-case per question ~$0.05 (Sonnet); easy questions exit at rung 0 at ~$0.005. Predicted average ~$0.012/q → ~$6/full-500.
+Verifier runs after each rung. Worst-case per question ~$0.005 (gpt-4o-mini reader) or ~$0.05 (Sonnet reader); easy questions exit at rung 0. Predicted average:
+- gpt-4o-mini reader path: ~$0.003/q → ~$1.5/full-500
+- Sonnet reader path: ~$0.012/q → ~$6/full-500
 
 ## 5. Component interfaces
 
 ### 5.1 `ModelTier` (`src/engram/llm/tier.py`)
 ```python
 class ModelTier(BaseModel):
-    reader: LLMClient            # Sonnet 4.6 default; ablate-able
-    utility: LLMClient           # gpt-4o-mini default
+    reader: LLMClient            # gpt-4o-mini default; ablate-able to Haiku 4.5 / Sonnet 4.6
+    utility: LLMClient           # gpt-4o-mini
 
     @classmethod
     def default(cls) -> "ModelTier":
+        # Cost-optimised default. Promote reader to Sonnet 4.6 only if item 1's
+        # ablation shows the accuracy delta justifies the ~30x cost increase.
+        return cls(
+            reader=OpenAILLM("gpt-4o-mini"),
+            utility=OpenAILLM("gpt-4o-mini"),
+        )
+
+    @classmethod
+    def sonnet_reader(cls) -> "ModelTier":
+        # Upgrade tier — used only after item 1's ablation justifies it.
         return cls(
             reader=AnthropicLLM("claude-sonnet-4-6"),
             utility=OpenAILLM("gpt-4o-mini"),
@@ -229,7 +241,7 @@ Output: model card + weights pushed to private HF Hub. Loaded by `CrossEncoderRe
 3. For each subq: recall + rerank → top_k facts (parallel `asyncio.gather`)
 4. RRF fuse → context_string (truncated to category budget)
 5. `reader.read(question, context, today, scope, tools=registry)`
-   - Sonnet generates answer; may emit tool_use blocks
+   - Reader model (per `ModelTier.reader`) generates answer; may emit tool_use blocks
    - Each tool_use dispatched via `ToolRegistry`, result appended, continue
    - Final answer text
 6. `verifier.verify(question, context, answer)` → YES/PARTIAL/NO (utility LLM)
@@ -272,7 +284,7 @@ Every benchmark run writes a per-question JSONL trace (~5KB/q, ~2.5MB total/500q
 
 | Order | Item | Effort | Smoke gate |
 |---|---|---|---|
-| 1 | Model tier + Sonnet 4.6 reader (#6) | 0.5 day | Δ ≥ 0 vs Haiku baseline |
+| 1 | Model tier scaffolding + reader-model ablation (#6): Haiku 4.5 vs gpt-4o-mini vs Sonnet 4.6 on the same 100-q set | 1 day | Default reader = winner on accuracy-per-dollar (cost normalised to gpt-4o-mini = 1.0). Promote Sonnet only if Δaccuracy ≥ +5pp vs gpt-4o-mini. |
 | 2 | Decomposer wiring (#5) | 0.5 day | Δ ≥ 0; lift on multi-session |
 | 3 | Programmatic temporal solver (N1) | 2 days | Δ ≥ +2pp on temporal-reasoning |
 | 4 | Tool-aug reader (N5) | 1 day | Δ ≥ 0 overall |
@@ -281,7 +293,7 @@ Every benchmark run writes a per-question JSONL trace (~5KB/q, ~2.5MB total/500q
 | 7 | ReAct agent (#4) | 2-3 days | Δ ≥ +2pp on multi-session/temporal |
 | 8 | Fine-tuned cross-encoder (#7) | 2-3 days | Δ ≥ +1pp overall |
 
-**Gate-fail handling:** if smoke shows Δ < threshold, the item still merges, but its config flag defaults to `off` — except for item 1, where "fail" means the default `reader` in `ModelTier.default()` stays Haiku 4.5 (or switches to gpt-4o-mini if that smoke-tested better). In all cases write a negative-result note in the spec changelog (one paragraph) and continue to the next item. Do NOT block the train.
+**Gate-fail handling:** if smoke shows Δ < threshold, the item still merges, but its config flag defaults to `off`. (Item 1 is special: it has no "off" — the smoke result simply determines which reader becomes the default in `ModelTier.default()`.) In all cases write a negative-result note in the spec changelog (one paragraph) and continue to the next item. Do NOT block the train.
 
 ## 8. Test strategy
 
@@ -319,23 +331,27 @@ Per smoke and milestone:
 
 ## 9. Cost budget
 
+Item 1's reader ablation requires three readers tested on the same 100q (~$5 with Sonnet leg dominating). Subsequent smokes use whichever reader item 1 promotes to default.
+
 | Phase | Smokes | Milestones | One-time | Subtotal |
 |---|---|---|---|---|
-| Items 1-3 | 3 × $1 | M1 × $10 | — | $13 |
-| Items 4-6 | 3 × $1 | M2 × $10 | — | $13 |
-| Items 7-8 | 2 × $1 | M3 × $10 | $10 (cross-encoder fine-tune via OpenAI Batch API, 50% off) | $22 |
-| **Total** | | | | **~$48** |
+| Item 1 (3-way reader ablation) | 3 × $1-2 | — | — | ~$5 |
+| Items 2-3 | 2 × $1 | M1 × $3 (gpt-4o-mini) or $10 (Sonnet) | — | $5-12 |
+| Items 4-6 | 3 × $1 | M2 × $3 or $10 | — | $6-13 |
+| Items 7-8 | 2 × $1 | M3 × $3 or $10 | $10 (cross-encoder fine-tune via OpenAI Batch API, 50% off) | $15-22 |
+| **Total — gpt-4o-mini default path** | | | | **~$31** |
+| **Total — Sonnet promoted path** | | | | **~$52** |
 
 Operational cost per full-500 run after this batch:
-- Sonnet path: ~$8 reader + ~$1.5 judge = **~$10/run**
-- gpt-4o-mini-reader path: ~$1.5 reader + ~$1.5 judge = **~$3/run**
+- gpt-4o-mini reader (default unless item 1 says otherwise): ~$1.5 reader + ~$1.5 judge = **~$3/run**
+- Sonnet 4.6 reader (only if item 1's ablation promotes it): ~$8 reader + ~$1.5 judge = **~$10/run**
 
 ## 10. Definition of done
 
 Programme is complete when **all of**:
 - [ ] M3 judged accuracy ≥ 85% (ceiling target 90%+; floor 85%)
 - [ ] All 8 items merged on `main` with tests + flags
-- [ ] Cost-per-full-run ≤ $15 (Sonnet path) or ≤ $5 (gpt-4o-mini-reader path)
+- [ ] Cost-per-full-run ≤ $5 on the default (gpt-4o-mini) path; ≤ $15 if item 1 promoted Sonnet
 - [ ] `benchmarks/PROGRESS.md` reflects all milestones
 - [ ] Spec doc + per-item negative-result notes committed
 - [ ] One ablation README per smoke at `benchmarks/reports/`
@@ -346,7 +362,8 @@ If the ceiling is hit early, the programme stops early and ships.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Sonnet 4.6 reader doesn't beat Haiku 4.5 substantively | medium | medium | Ablation in item 1 surfaces this; fall back to gpt-4o-mini reader (cheaper anyway) |
+| Sonnet 4.6 reader doesn't beat gpt-4o-mini by ≥+5pp (the promotion threshold) | high | low | Default stays gpt-4o-mini (~30× cheaper). The whole point of item 1's ablation is to discover this rather than assume — Sonnet not winning is a feature of the process, not a failure |
+| gpt-4o-mini reader hallucinates more on tool-augmented turns than Sonnet | medium | medium | Item 4 (tool-aug reader) smoke specifically watches for this regression on temporal/numerical category. If observed, Sonnet's promotion threshold drops to +3pp |
 | ReAct agent loops or burns budget without terminating | medium | high | Multiple termination conditions (§6.3); per-question total_budget_s=60 hard cap; trace logging makes loop diagnosis easy |
 | Programmatic temporal solver DSL doesn't cover enough question shapes | medium | medium | `parse` returning `None` falls through to LLM reader — solver is additive, can't regress |
 | Synthetic training data for cross-encoder is too noisy | medium | medium | nDCG@10 eval on held-out before swap; gate fails → ship behind flag off |
