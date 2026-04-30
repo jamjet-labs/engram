@@ -50,8 +50,19 @@ class ReaderConfig(BaseModel):
     tools: ToolRegistry | None = None
     # Escalation rung (a) — query-time re-extraction (item 5 / N2)
     enable_reextract: bool = True
+    # Escalation rung (b) — adaptive self-consistency (item 6 / #8). When > 1
+    # AND verdict is PARTIAL AND category is eligible, sample N reader responses
+    # and majority-vote. N=1 disables.
+    self_consistency_on_partial: int = 1
 
     model_config = {"arbitrary_types_allowed": True}
+
+
+# Categories where reader nondeterminism most often hurts and self-consistency
+# pays off (per spec §3.2). Restricting to these cuts the cost ~50%.
+ELIGIBLE_SC_CATEGORIES = frozenset(
+    {"temporal-reasoning", "multi-session", "knowledge-update"}
+)
 
 
 class Reader:
@@ -81,6 +92,16 @@ class Reader:
         self._reextractor: Any | None = None
         self._reextract_store: Any | None = None
         self._candidate_sessions_provider: Any | None = None
+        # Per-question category for self-consistency gating (set by caller)
+        self._category: str | None = None
+
+    def set_category(self, category: str | None) -> None:
+        """Inform the reader of the question category before ``read()``.
+
+        Used by escalation rung (b) to gate self-consistency to the categories
+        where it pays off (temporal-reasoning, multi-session, knowledge-update).
+        """
+        self._category = category
 
     def attach_reextractor(
         self,
@@ -269,6 +290,40 @@ class Reader:
                             )[0]
                         except ExtractionError as e:
                             logger.warning("reextract re-read failed: %s", e)
+
+        # Escalation rung (b) — adaptive self-consistency (item 6 / #8)
+        if (
+            self._verifier_enabled
+            and self._config.self_consistency_on_partial > 1
+            and self._category in ELIGIBLE_SC_CATEGORIES
+        ):
+            sc_verdict, _ = await self._verify(
+                question, context + f"\n\nAnswer: {answer}"
+            )
+            if sc_verdict in ("PARTIAL", "NO"):
+                from engram.read.voting import majority_vote
+
+                n = self._config.self_consistency_on_partial
+                samples: list[str] = [answer]
+                sys_prompt_sc = READER_SYSTEM_PROMPT.format(
+                    today_clause=today_clause, context=context, question=question,
+                )
+                for _ in range(n - 1):
+                    try:
+                        resp = await self._llm.generate(
+                            [
+                                LLMMessage(role="system", content=sys_prompt_sc),
+                                LLMMessage(role="user", content=question),
+                            ],
+                            temperature=0.4,  # diversity
+                            max_tokens=300,
+                        )
+                        samples.append(resp.content.strip())
+                    except ExtractionError as e:
+                        logger.warning("self-consistency sample failed: %s", e)
+                if len(samples) > 1:
+                    answer = majority_vote(samples)
+                    final_verdict = sc_verdict
 
         abstained = answer.lower().startswith("i don't know")
         return ReadResult(
