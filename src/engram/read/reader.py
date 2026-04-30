@@ -48,6 +48,8 @@ class ReaderConfig(BaseModel):
     # [TOOL_USE]{name, input}[/TOOL_USE] blocks; the registry dispatches them
     # and feeds the result back as [TOOL_RESULT]…[/TOOL_RESULT] for the next turn.
     tools: ToolRegistry | None = None
+    # Escalation rung (a) — query-time re-extraction (item 5 / N2)
+    enable_reextract: bool = True
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -75,6 +77,27 @@ class Reader:
         self._llm = llm
         self._verifier_enabled = verifier
         self._config = config or ReaderConfig()
+        # Escalation rung (a) — wired by attach_reextractor()
+        self._reextractor: Any | None = None
+        self._reextract_store: Any | None = None
+        self._candidate_sessions_provider: Any | None = None
+
+    def attach_reextractor(
+        self,
+        reextractor: Any,
+        store: Any,
+        candidate_sessions_provider: Any,
+    ) -> None:
+        """Wire the query-time re-extraction rung.
+
+        ``candidate_sessions_provider`` is a sync callable ``str -> list[str]``
+        that maps a question to the top-K candidate session IDs (typically derived
+        from the recall result for that question). Passing a cached map lets the
+        caller pre-compute candidates per question and inject them.
+        """
+        self._reextractor = reextractor
+        self._reextract_store = store
+        self._candidate_sessions_provider = candidate_sessions_provider
 
     async def read(
         self,
@@ -188,10 +211,69 @@ class Reader:
                 answer = resp.content.strip()
                 break
 
+        # Escalation rung (a) — query-time conditioned re-extraction (item 5 / N2)
+        final_verdict: Verdict | None = verdict
+        if (
+            self._verifier_enabled
+            and self._config.enable_reextract
+            and self._reextractor is not None
+            and self._candidate_sessions_provider is not None
+            and self._reextract_store is not None
+            and scope is not None
+        ):
+            post_verdict, _ = await self._verify(
+                question, context + f"\n\nAnswer: {answer}"
+            )
+            final_verdict = post_verdict
+            if post_verdict in ("PARTIAL", "NO"):
+                sids = self._candidate_sessions_provider(question)
+                if sids:
+                    try:
+                        ephemeral = await self._reextractor.reextract(
+                            question=question,
+                            candidate_session_ids=sids,
+                            store=self._reextract_store,
+                            scope=scope,
+                        )
+                    except Exception as e:
+                        logger.warning("reextract failed: %s", e)
+                        ephemeral = []
+                    if ephemeral:
+                        extra_ctx = "\n".join(
+                            f"- {f.text} [confidence: {f.confidence:.2f}]"
+                            for f in ephemeral
+                        )
+                        new_context = (
+                            context + "\n\n[Re-extracted facts]\n" + extra_ctx
+                        )
+                        sys_prompt2 = READER_SYSTEM_PROMPT.format(
+                            today_clause=today_clause,
+                            context=new_context,
+                            question=question,
+                        )
+                        try:
+                            resp = await self._llm.generate(
+                                [
+                                    LLMMessage(role="system", content=sys_prompt2),
+                                    LLMMessage(role="user", content=question),
+                                ],
+                                temperature=0.0,
+                                max_tokens=300,
+                            )
+                            answer = resp.content.strip()
+                            final_verdict = (
+                                await self._verify(
+                                    question,
+                                    new_context + f"\n\nAnswer: {answer}",
+                                )
+                            )[0]
+                        except ExtractionError as e:
+                            logger.warning("reextract re-read failed: %s", e)
+
         abstained = answer.lower().startswith("i don't know")
         return ReadResult(
             answer=answer,
-            verdict=verdict,
+            verdict=final_verdict,
             missing=missing,
             abstained=abstained,
             solved_by="reader",
