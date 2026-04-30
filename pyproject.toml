@@ -67,7 +67,8 @@ packages = ["src/engram"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "training"]
+pythonpath = ["."]
 addopts = "-ra --strict-markers"
 
 [tool.ruff]
