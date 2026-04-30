@@ -138,6 +138,44 @@ async def _ingest_chunks(memory: Any, q: dict[str, Any], user_id: str) -> int:
     return n
 
 
+async def _ingest_events(memory: Any, q: dict[str, Any], user_id: str) -> int:
+    """Populate the SVO event calendar by calling extract_events per session.
+
+    Required when --solver is enabled — the temporal solver needs SVO events
+    to query against. One LLM call per session (utility tier).
+
+    Returns the total number of events extracted across all sessions.
+    """
+    from engram.models import ChatMessage
+    from engram.scope import Scope
+
+    scope = Scope(org_id="default", user_id=user_id)
+    n_events = 0
+    for sid, sdate_raw, session in zip(
+        q["haystack_session_ids"],
+        q["haystack_dates"],
+        q["haystack_sessions"],
+        strict=False,
+    ):
+        sdate = _parse_haystack_date(sdate_raw)
+        msgs = [
+            ChatMessage(
+                scope=scope,
+                session_id=sid,
+                role=turn["role"],
+                content=turn["content"],
+                timestamp=sdate,
+            )
+            for turn in session
+        ]
+        try:
+            events = await memory.extract_events(msgs, session_date=sdate, persist=True)
+            n_events += len(events)
+        except Exception as e:
+            print(f"  [event extraction failed for session {sid}: {e}]")
+    return n_events
+
+
 async def main() -> None:
     flags = parse_args()
     if "OPENAI_API_KEY" not in os.environ:
@@ -188,6 +226,12 @@ async def main() -> None:
             retrieval_config=cfg,
         ) as memory:
             n_chunks = await _ingest_chunks(memory, q, user_id="alice")
+            # When --solver is enabled, also populate the SVO event calendar
+            # so the temporal solver has data to query against.
+            if flags.solver:
+                n_events = await _ingest_events(memory, q, user_id="alice")
+            else:
+                n_events = 0
             ctx = await memory.context(
                 query=q["question"],
                 user_id="alice",
@@ -225,7 +269,13 @@ async def main() -> None:
             "solver_fired": res.solved_by == "solver",
             "decomposer": {"fired": decomposer_fired, "subqueries": [q["question"]]},
             "recall": [
-                {"sq": q["question"], "n_candidates": n_chunks, "top_k": 0, "fact_ids": []}
+                {
+                    "sq": q["question"],
+                    "n_candidates": n_chunks,
+                    "n_events": n_events,
+                    "top_k": 0,
+                    "fact_ids": [],
+                }
             ],
             "reader": {
                 "model": flags.reader,

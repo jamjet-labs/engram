@@ -202,8 +202,43 @@ async def test_solve_count_returns_none_without_verb_or_object(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
     async with await Engram.open(":memory:") as memory:
+        # Need at least one event in the store so the empty-store guard passes.
+        await _seed_events(
+            memory, scope, verb="x", object_canonical="y",
+            dates=[datetime(2023, 1, 1, tzinfo=UTC)],
+        )
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
         q = TemporalQuery(op="count")
+        assert await s.solve(q, scope) is None
+
+
+@pytest.mark.asyncio
+async def test_solve_returns_none_when_event_store_empty(monkeypatch):
+    """Fail-closed: empty SVO calendar means we can't answer; don't return 0."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    scope = Scope(org_id="default", user_id="alice")
+    async with await Engram.open(":memory:") as memory:
+        s = TemporalSolver(store=memory._store, llm=AsyncMock())
+        q = TemporalQuery(op="count", verb="run", object="marathon")
+        # No events seeded → solver must return None, not SolverResult(answer=0).
+        assert await s.solve(q, scope) is None
+
+
+@pytest.mark.asyncio
+async def test_solve_returns_none_when_count_is_zero(monkeypatch):
+    """Defer to LLM when count=0 — in LongMemEval the user has usually done
+    the thing, so 0 means our SVO extraction missed the relevant events."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    scope = Scope(org_id="default", user_id="alice")
+    async with await Engram.open(":memory:") as memory:
+        # Seed an unrelated event so the empty-store guard passes.
+        await _seed_events(
+            memory, scope, verb="cook", object_canonical="dinner",
+            dates=[datetime(2023, 1, 1, tzinfo=UTC)],
+        )
+        s = TemporalSolver(store=memory._store, llm=AsyncMock())
+        # Count for "run marathon" — no matches exist.
+        q = TemporalQuery(op="count", verb="run", object="marathon")
         assert await s.solve(q, scope) is None
 
 

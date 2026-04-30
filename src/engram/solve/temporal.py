@@ -113,6 +113,14 @@ class TemporalSolver:
             return None
 
     async def solve(self, q: TemporalQuery, scope: Scope) -> SolverResult | None:
+        # Fail-closed: if the SVO event calendar is empty for this scope,
+        # we cannot answer ANY temporal query. Returning 0 from a count would
+        # be a confident-but-wrong answer that the Reader trusts as final.
+        # Cheap probe — limit=1 short-circuits.
+        any_events = await self._store.search_events("", scope, limit=1)
+        if not any_events:
+            return None
+
         # Resolve anchor → time bound
         anchor_dt: datetime | None = None
         if q.anchor_event:
@@ -171,6 +179,12 @@ class TemporalSolver:
             if q.window:
                 lo, hi = q.window
                 events = [e for e in events if lo <= e.time_start <= hi]
+            # Defer to the LLM when we'd answer 0 — in LongMemEval-style questions
+            # the asker has usually done the thing they're asking about, so 0
+            # almost always means our SVO extraction missed the relevant events
+            # (the canonical verb/object differed from what the parser produced).
+            if len(events) == 0:
+                return None
             return SolverResult(
                 answer=len(events),
                 confidence=0.95,
