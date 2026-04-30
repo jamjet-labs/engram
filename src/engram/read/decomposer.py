@@ -4,12 +4,33 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from engram.errors import ExtractionError
 from engram.llm.base import LLMClient, LLMMessage
 from engram.read.prompts import DECOMPOSER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_CONJUNCTION_RE = re.compile(
+    r"\b(and|or|both|either|while|whereas|along with|as well as)\b",
+    re.IGNORECASE,
+)
+
+
+def should_decompose(question: str) -> bool:
+    """Cheap heuristic — return True if question is plausibly compound.
+
+    Avoids unnecessary LLM calls when a question is clearly atomic.
+    Compound when: more than one '?', OR ≥10 words AND a coordinating conjunction.
+    The 10-word floor is calibrated against LongMemEval, where most compound
+    questions are 10-15 words; 12+ would miss too many real cases.
+    """
+    if question.count("?") > 1:
+        return True
+    if len(question.split()) >= 10 and _CONJUNCTION_RE.search(question):
+        return True
+    return False
 
 
 class QueryDecomposer:
