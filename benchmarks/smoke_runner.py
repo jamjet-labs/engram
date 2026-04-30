@@ -176,6 +176,28 @@ async def _ingest_events(memory: Any, q: dict[str, Any], user_id: str) -> int:
     return n_events
 
 
+def _build_tools(memory: Any, solver: Any, flags: SmokeFlags) -> Any:
+    """Construct a ToolRegistry with all 6 built-in tools wired up."""
+    from engram.scope import Scope
+    from engram.tools.base import ToolRegistry
+    from engram.tools.count_between import CountBetweenTool
+    from engram.tools.dates import AddDaysTool, DaysBetweenTool
+    from engram.tools.search_events import SearchEventsTool
+    from engram.tools.search_facts import SearchFactsTool
+    from engram.tools.solve_temporal import SolveTemporalTool
+
+    scope = Scope(org_id="default", user_id="alice")
+    reg = ToolRegistry()
+    reg.register(SearchFactsTool(engram=memory, scope=scope))
+    reg.register(SearchEventsTool(engram=memory, scope=scope))
+    if solver is not None:
+        reg.register(SolveTemporalTool(solver=solver, scope=scope))
+    reg.register(CountBetweenTool(engram=memory, scope=scope))
+    reg.register(AddDaysTool())
+    reg.register(DaysBetweenTool())
+    return reg
+
+
 async def main() -> None:
     flags = parse_args()
     if "OPENAI_API_KEY" not in os.environ:
@@ -255,7 +277,10 @@ async def main() -> None:
                 if flags.solver
                 else None
             )
-            reader = Reader(tier.reader, config=ReaderConfig(solver=solver))
+            tools_reg = _build_tools(memory, solver, flags) if flags.tools else None
+            reader = Reader(
+                tier.reader, config=ReaderConfig(solver=solver, tools=tools_reg)
+            )
             res = await reader.read(
                 question=q["question"],
                 context=ctx,
