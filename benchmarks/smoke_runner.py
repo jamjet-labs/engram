@@ -176,6 +176,29 @@ async def _ingest_events(memory: Any, q: dict[str, Any], user_id: str) -> int:
     return n_events
 
 
+def _register_final_answer_tool(reg: Any) -> None:
+    """Register a final_answer tool used by the ReAct agent to terminate."""
+    from typing import ClassVar
+
+    from engram.tools.base import ToolResult
+
+    class _FinalAnswerTool:
+        name: ClassVar[str] = "final_answer"
+        description: ClassVar[str] = (
+            "Emit the final answer to the user. Always call this when you have the answer."
+        )
+        input_schema: ClassVar[dict[str, Any]] = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+
+        async def __call__(self, answer: str) -> ToolResult:
+            return ToolResult(content=answer, raw=answer)
+
+    reg.register(_FinalAnswerTool())
+
+
 def _build_tools(memory: Any, solver: Any, flags: SmokeFlags) -> Any:
     """Construct a ToolRegistry with all 6 built-in tools wired up."""
     from engram.scope import Scope
@@ -257,9 +280,10 @@ async def main() -> None:
             retrieval_config=cfg,
         ) as memory:
             n_chunks = await _ingest_chunks(memory, q, user_id="alice")
-            # When --solver is enabled, also populate the SVO event calendar
-            # so the temporal solver has data to query against.
-            if flags.solver:
+            # When --solver or --react is enabled, also populate the SVO event
+            # calendar so the temporal solver / ReAct agent's search_events
+            # tool has data to query against.
+            if flags.solver or flags.react:
                 n_events = await _ingest_events(memory, q, user_id="alice")
             else:
                 n_events = 0
@@ -277,7 +301,22 @@ async def main() -> None:
                 if flags.solver
                 else None
             )
+            # When --react is set, we always need a tool registry (ReAct uses
+            # it for its tool calls). If the user didn't pass --tools, build one
+            # for the agent privately. The reader itself only sees the registry
+            # when --tools is explicitly set.
             tools_reg = _build_tools(memory, solver, flags) if flags.tools else None
+            react_tools_reg = (
+                tools_reg
+                if tools_reg is not None
+                else (_build_tools(memory, solver, flags) if flags.react else None)
+            )
+            # The ReAct agent needs a final_answer tool too, regardless of mode.
+            if react_tools_reg is not None and "final_answer" not in (
+                react_tools_reg.names() if hasattr(react_tools_reg, "names") else []
+            ):
+                _register_final_answer_tool(react_tools_reg)
+
             reader = Reader(
                 tier.reader,
                 config=ReaderConfig(
@@ -288,6 +327,11 @@ async def main() -> None:
                 ),
             )
             reader.set_category(q["question_type"])
+            if flags.react and react_tools_reg is not None:
+                from engram.agent.react import ReActAgent
+
+                react = ReActAgent(tier=tier, tools=react_tools_reg, max_hops=4)
+                reader.attach_react(react)
             # Escalation rung (a) — re-extract on PARTIAL/NO. Pre-compute the
             # candidate-session list so the sync provider in attach_reextractor
             # can return it without an extra recall round trip.
