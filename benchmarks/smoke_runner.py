@@ -261,7 +261,19 @@ async def main() -> None:
     selected = stratified_sample(str(ORACLE), n=flags.n)
     tier = _build_tier(flags.reader)
     embedder = OllamaEmbedding(model="nomic-embed-text", dim=768)
-    reranker = CrossEncoderReranker()
+    if flags.ft_cross_encoder:
+        ft_path = os.environ.get(
+            "ENGRAM_FT_CE_PATH", "training/cross_encoder/checkpoints/v1"
+        )
+        if not Path(ft_path).exists():  # noqa: ASYNC240 — sync stat is fine here
+            raise SystemExit(
+                f"--ft-cross-encoder set but model not found at {ft_path}. "
+                "Train via: uv run python -m training.cross_encoder.train ..."
+            )
+        print(f"Using fine-tuned cross-encoder: {ft_path}")
+        reranker = CrossEncoderReranker(model_name=ft_path)
+    else:
+        reranker = CrossEncoderReranker()
     classifier = RuleBasedClassifier()
     judge_llm = OpenAILLM(model="gpt-4o-mini")
     cfg = RetrievalConfig(enable_two_stage=True, two_stage_top_sessions=3)
