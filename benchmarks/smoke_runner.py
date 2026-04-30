@@ -199,7 +199,16 @@ async def main() -> None:
     from engram.solve.temporal import TemporalSolver
 
     flags.out_dir.mkdir(parents=True, exist_ok=True)
-    run_id = f"smoke_{int(time.time())}_{flags.reader.replace('/', '_')}"
+    # Include flag fingerprint in run_id so concurrent smokes with different
+    # configs don't collide on the same timestamp.
+    flag_tag = "".join(
+        c for c, v in [
+            ("d", flags.decompose), ("s", flags.solver), ("t", flags.tools),
+            ("x", flags.reextract), ("c", flags.self_consistency),
+            ("r", flags.react), ("f", flags.ft_cross_encoder),
+        ] if v
+    ) or "base"
+    run_id = f"smoke_{int(time.time())}_{flags.reader.replace('/', '_')}_{flag_tag}_n{flags.n}"
     trace_path = flags.out_dir / f"{run_id}.jsonl"
     report_path = flags.out_dir / f"{run_id}.md"
 
