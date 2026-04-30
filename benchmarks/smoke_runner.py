@@ -152,6 +152,7 @@ async def main() -> None:
     from engram.classify.rules import RuleBasedClassifier
     from engram.embedding.ollama import OllamaEmbedding
     from engram.llm.openai import OpenAILLM
+    from engram.read.decomposer import should_decompose
     from engram.read.reader import Reader
     from engram.retrieve.base import RetrievalConfig
     from engram.retrieve.rerank import CrossEncoderReranker
@@ -185,7 +186,10 @@ async def main() -> None:
         ) as memory:
             n_chunks = await _ingest_chunks(memory, q, user_id="alice")
             ctx = await memory.context(
-                query=q["question"], user_id="alice", classifier=classifier
+                query=q["question"],
+                user_id="alice",
+                classifier=classifier,
+                decompose=flags.decompose,
             )
             today = (
                 _parse_haystack_date(q["question_date"]) if q.get("question_date") else None
@@ -201,10 +205,11 @@ async def main() -> None:
             )
         n_correct += int(judged.correct)
         by_cat.setdefault(q["question_type"], []).append(judged.correct)
+        decomposer_fired = flags.decompose and should_decompose(q["question"])
         rec: TraceRecord = {
             "qid": q["question_id"],
             "category": q["question_type"],
-            "decomposer": {"fired": False, "subqueries": [q["question"]]},
+            "decomposer": {"fired": decomposer_fired, "subqueries": [q["question"]]},
             "recall": [
                 {"sq": q["question"], "n_candidates": n_chunks, "top_k": 0, "fact_ids": []}
             ],
