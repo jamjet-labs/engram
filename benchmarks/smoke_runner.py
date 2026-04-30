@@ -284,8 +284,10 @@ async def main() -> None:
                     solver=solver,
                     tools=tools_reg,
                     enable_reextract=flags.reextract,
+                    self_consistency_on_partial=3 if flags.self_consistency else 1,
                 ),
             )
+            reader.set_category(q["question_type"])
             # Escalation rung (a) — re-extract on PARTIAL/NO. Pre-compute the
             # candidate-session list so the sync provider in attach_reextractor
             # can return it without an extra recall round trip.
