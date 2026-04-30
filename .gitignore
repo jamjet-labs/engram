@@ -23,7 +23,7 @@ service-account.json
 *.sqlite3-journal
 engram*.db
 benchmarks/run_*.json
-benchmarks/phase_*_results.json
+benchmarks/phase_*.json
 /tmp/engram_*
 
 # IDE
