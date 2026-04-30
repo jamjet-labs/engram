@@ -459,3 +459,21 @@ All three items use `--decompose` baseline (65%, gpt-4o-mini, n=100 from item 2 
 **M2 milestone skipped** per cost-discipline review — Phase B taught us intermediate milestones don't change decisions when individual gates are clear. Real validation happens at M3 on full 500q.
 
 **Cumulative programme cost:** ~$15. Item 4 was the first clear win in Phase C; items 5 and 6 ship as available-but-default-off configurability.
+
+### Item 1 reader re-test (after item 4 / tools landed) — 2026-04-30
+
+Per the deferred decision in the original item-1 changelog, re-tested all three readers with `--decompose --tools` enabled.
+
+| reader | bare | + --decompose --tools | Δ from tools | Notes |
+|---|---|---|---|---|
+| `gpt-4o-mini` | 64% | **68%** | **+4pp** ✓ | text-protocol tools fit the training distribution |
+| `claude-haiku-4-5-20251001` | 61% | 47% | **-14pp** ✗ | produces planning text ("I need to find X") instead of tool calls |
+| `claude-sonnet-4-6` | 69% | 64% | -5pp | follows protocol but still regresses |
+
+**Decision: gpt-4o-mini stays default reader.** Sonnet promotion threshold required +5pp over gpt-4o-mini; with tools we observed -4pp instead.
+
+**Root cause:** my tool implementation uses a provider-agnostic text-protocol (`[TOOL_USE]{...}[/TOOL_USE]` markers in the LLM output). gpt-4o-mini handles this well because it was trained on similar function-calling formats. Anthropic models expect their native `tool_use` content blocks via the Messages API; emulating that with text protocol significantly degrades their accuracy, especially on temporal-reasoning (Sonnet -19pp on this category, Haiku -69pp).
+
+**Future work (deferred):** add a native-tool-use code path in `AnthropicLLM` that uses the proper `tools=` parameter and `tool_use` content blocks. Would unlock Sonnet's potential edge with this pipeline. Out of scope for this batch.
+
+**Final reader configuration:** `ModelTier.default()` continues to return gpt-4o-mini for both reader and utility. Sonnet/Haiku alternates remain available via `ModelTier.sonnet_reader()` / `ModelTier.haiku_reader()` for users whose pipelines don't use the text-protocol tools path.
