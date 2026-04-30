@@ -9,7 +9,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 
 def stratified_sample(oracle_path: str, n: int = 100) -> list[dict[str, Any]]:
@@ -62,3 +62,21 @@ def parse_args() -> SmokeFlags:
         reextract=a.reextract, self_consistency=a.self_consistency,
         react=a.react, ft_cross_encoder=a.ft_cross_encoder, n=a.n, out_dir=a.out_dir,
     )
+
+
+class TraceRecord(TypedDict, total=False):
+    qid: str
+    category: str
+    decomposer: dict[str, Any]
+    recall: list[dict[str, Any]]
+    reader: dict[str, Any]
+    verifier: dict[str, Any]
+    escalation: list[dict[str, Any]]
+    react: dict[str, Any] | None
+    final: dict[str, Any]
+
+
+def write_trace_line(path: Path, rec: TraceRecord) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(rec) + "\n")

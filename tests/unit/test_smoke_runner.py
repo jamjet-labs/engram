@@ -20,3 +20,24 @@ def test_stratified_sample_covers_all_categories(tmp_path):
     for cat in {"temporal-reasoning", "multi-session", "single-session-user",
                 "single-session-assistant", "knowledge-update", "single-session-preference"}:
         assert types.count(cat) >= 10, f"{cat}: {types.count(cat)}"
+
+
+from benchmarks.smoke_runner import write_trace_line, TraceRecord
+
+def test_trace_record_round_trip(tmp_path):
+    p = tmp_path / "trace.jsonl"
+    rec: TraceRecord = {
+        "qid": "abc", "category": "temporal-reasoning",
+        "decomposer": {"fired": False, "subqueries": ["Q?"]},
+        "recall": [{"sq": "Q?", "n_candidates": 50, "top_k": 5, "fact_ids": []}],
+        "reader": {"model": "gpt-4o-mini", "tool_calls": [], "answer": "A", "tokens": {"in": 10, "out": 5}},
+        "verifier": {"verdict": "YES", "missing": None},
+        "escalation": [],
+        "react": None,
+        "final": {"answer": "A", "abstained": False, "judge_verdict": None, "cost_usd": 0.001},
+    }
+    write_trace_line(p, rec)
+    line = p.read_text().strip()
+    parsed = json.loads(line)
+    assert parsed["qid"] == "abc"
+    assert parsed["final"]["cost_usd"] == 0.001
