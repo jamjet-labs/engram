@@ -48,6 +48,12 @@ dev = [
 rerank = [
     "sentence-transformers>=3",
 ]
+training = [
+    "sentence-transformers>=3",
+    "torch>=2.0",
+    "datasets>=2.14",
+    "accelerate>=1.1",
+]
 
 [project.urls]
 Homepage = "https://jamjet.dev/engram"
@@ -70,6 +76,9 @@ asyncio_mode = "auto"
 testpaths = ["tests", "training"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
+markers = [
+    "slow: marks tests as slow (downloads models, trains, etc.); run with -m slow",
+]
 
 [tool.ruff]
 line-length = 100
