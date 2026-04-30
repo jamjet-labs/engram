@@ -7,8 +7,10 @@ steps downstream of it.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 
 def dataset_hash(oracle_path: str) -> str:
@@ -37,3 +39,39 @@ class IngestionCache:
 
     def restore(self, out_path: Path, dataset_hash: str, extract_mode: bool) -> None:
         shutil.copy2(snapshot_path(dataset_hash, extract_mode, self._dir), out_path)
+
+
+class ReaderCache:
+    """Content-addressed reader response cache. Hits = $0."""
+
+    def __init__(self, cache_dir: Path) -> None:
+        self._dir = cache_dir
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def key(
+        self,
+        *,
+        model: str,
+        system: str,
+        context: str,
+        question: str,
+        tools_signature: str,
+        n_sample_index: int,
+    ) -> str:
+        h = hashlib.sha256()
+        h.update(
+            f"{model}|{system}|{context}|{question}|{tools_signature}|{n_sample_index}".encode()
+        )
+        return h.hexdigest()
+
+    def _path(self, key: str) -> Path:
+        return self._dir / f"reader_{key[:16]}.json"
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        p = self._path(key)
+        if not p.exists():
+            return None
+        return json.loads(p.read_text())  # type: ignore[no-any-return]
+
+    def put(self, key: str, value: dict[str, Any]) -> None:
+        self._path(key).write_text(json.dumps(value))
