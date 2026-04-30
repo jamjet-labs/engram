@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import re
 from datetime import datetime
@@ -13,9 +14,13 @@ from engram.errors import ExtractionError
 from engram.llm.base import LLMClient, LLMMessage
 from engram.read.prompts import READER_SYSTEM_PROMPT, TODAY_CLAUSE, VERIFIER_SYSTEM_PROMPT
 from engram.scope import Scope
+from engram.tools.base import ToolRegistry, ToolResult
 
 _VERDICT_RE = re.compile(r"<verdict>\s*(YES|NO|PARTIAL)\s*</verdict>", re.IGNORECASE)
 _MISSING_RE = re.compile(r"<missing>\s*(.*?)\s*</missing>", re.IGNORECASE | re.DOTALL)
+_TOOL_USE_RE = re.compile(r"\[TOOL_USE\](\{.*?\})\[/TOOL_USE\]", re.DOTALL)
+
+_MAX_TOOL_CALLS = 5
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,10 @@ class ReaderConfig(BaseModel):
     # Use Any to dodge a circular import (engram.solve.temporal imports nothing
     # from engram.read, but solve depends on store/llm which are heavy).
     solver: Any = None
+    # Tool-augmented reading (item 4 / N5): when set, the reader can emit
+    # [TOOL_USE]{name, input}[/TOOL_USE] blocks; the registry dispatches them
+    # and feeds the result back as [TOOL_RESULT]…[/TOOL_RESULT] for the next turn.
+    tools: ToolRegistry | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -110,26 +119,75 @@ class Reader:
                     solved_by="reader",
                 )
 
-        # Generate answer
-        try:
-            resp = await self._llm.generate(
-                [
-                    LLMMessage(
-                        role="system",
-                        content=READER_SYSTEM_PROMPT.format(
-                            today_clause=today_clause,
-                            context=context,
-                            question=question,
-                        ),
-                    ),
-                    LLMMessage(role="user", content=question),
-                ],
-                temperature=0.0,
-                max_tokens=300,
+        # Generate answer — with optional tool loop
+        sys_prompt = READER_SYSTEM_PROMPT.format(
+            today_clause=today_clause,
+            context=context,
+            question=question,
+        )
+        if self._config.tools is not None:
+            sys_prompt += (
+                "\n\nYou have access to tools. To call one, output exactly:\n"
+                "[TOOL_USE]{\"name\": \"...\", \"input\": {...}}[/TOOL_USE]\n"
+                "Available tools:\n"
+                + "\n".join(
+                    f"- {t['name']}: {t['description']}"
+                    for t in self._config.tools.for_anthropic()
+                )
             )
-        except ExtractionError as e:
-            raise ExtractionError(f"reader generate failed: {e}") from e
-        answer = resp.content.strip()
+
+        history: list[LLMMessage] = [
+            LLMMessage(role="system", content=sys_prompt),
+            LLMMessage(role="user", content=question),
+        ]
+        answer = ""
+        tool_calls = 0
+        for _ in range(_MAX_TOOL_CALLS + 1):
+            try:
+                resp = await self._llm.generate(history, temperature=0.0, max_tokens=500)
+            except ExtractionError as e:
+                raise ExtractionError(f"reader generate failed: {e}") from e
+
+            text = resp.content.strip()
+            m = _TOOL_USE_RE.search(text) if self._config.tools is not None else None
+            if not m:
+                answer = text
+                break
+
+            # If the model produced text content BEFORE the tool call, treat
+            # that as the final answer ("first answer wins" rule).
+            before_tool = text[: m.start()].strip()
+            if before_tool:
+                answer = before_tool
+                break
+
+            try:
+                call = _json.loads(m.group(1))
+                tool_name = call["name"]
+                tool_input = call.get("input", {})
+            except (KeyError, _json.JSONDecodeError):
+                answer = text  # malformed tool call — accept as final
+                break
+
+            try:
+                result = await self._config.tools.dispatch(tool_name, tool_input)
+            except Exception as e:
+                result = ToolResult(content=f"(tool {tool_name} error: {e})")
+
+            history.append(LLMMessage(role="assistant", content=text))
+            history.append(
+                LLMMessage(
+                    role="user",
+                    content=f"[TOOL_RESULT]{result.content}[/TOOL_RESULT]",
+                )
+            )
+            tool_calls += 1
+            if tool_calls >= _MAX_TOOL_CALLS:
+                # One final call to let the model produce a real answer.
+                resp = await self._llm.generate(history, temperature=0.0, max_tokens=300)
+                answer = resp.content.strip()
+                break
+
         abstained = answer.lower().startswith("i don't know")
         return ReadResult(
             answer=answer,
