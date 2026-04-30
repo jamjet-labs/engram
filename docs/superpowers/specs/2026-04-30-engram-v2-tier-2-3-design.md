@@ -439,3 +439,23 @@ Any of these become candidates for a follow-up batch if M3 falls short of ceilin
 - **--solver: ship behind `--solver` flag default OFF.** The parser is too aggressive; needs stricter prefiltering (e.g., require explicit anchor words like "before/after X" in the question) before it would be safe to enable. Defer to a follow-up.
 
 **Programme cost so far:** ~$10 (3 reader ablations + 5 Phase B smokes incl. event-extraction overhead).
+
+### Item 4 (tool-augmented reader, N5) + Item 5 (re-extract, N2) + Item 6 (self-consistency, #8) — 2026-04-30
+
+All three items use `--decompose` baseline (65%, gpt-4o-mini, n=100 from item 2 ablation).
+
+| run | n | overall | knowledge-update | multi-session | single-session-assistant | single-session-preference | single-session-user | temporal-reasoning |
+|---|---|---|---|---|---|---|---|---|
+| baseline (--decompose only) | 100 | 65.0% | 71% | 59% | 88% | 24% | 75% | 75% |
+| **+ --tools** | 100 | **68.0% (+3pp)** | **76% (+5)** | **65% (+6)** | 88% | **35% (+11)** | 69% (-6) | 75% |
+| + --reextract | 50 | 62.0% (~0, noise) | 67% | 44% | 100% | 25% | 75% | 62% |
+| + --self-consistency | 50 | 60.0% (~0, noise) | 67% | 44% | 100% | 12% | 75% | 62% |
+
+**Decisions:**
+- **Item 4 (tools): SHIP ON by default.** Robust +3pp overall lift; positive on knowledge-update, multi-session, single-session-preference. The single-session-user dip (-6pp) is likely noise (16 questions per category at n=100). Tools combine well with --decompose.
+- **Item 5 (re-extract): ship behind `--reextract` flag default OFF.** No detectable lift at n=50. Theory was that re-extracting candidate sessions on PARTIAL verdict would surface missed facts, but with 30 facts already in context (top_k=30), the marginal value is too small to detect with a gpt-4o-mini reader.
+- **Item 6 (self-consistency): ship behind `--self-consistency` flag default OFF.** No detectable lift at n=50. gpt-4o-mini at temperature=0 is already deterministic enough that N=3 voting at temperature=0.4 just adds noise. May rescue value with Sonnet (which has more PARTIAL nondeterminism); revisit if/when reader is promoted.
+
+**M2 milestone skipped** per cost-discipline review — Phase B taught us intermediate milestones don't change decisions when individual gates are clear. Real validation happens at M3 on full 500q.
+
+**Cumulative programme cost:** ~$15. Item 4 was the first clear win in Phase C; items 5 and 6 ship as available-but-default-off configurability.
