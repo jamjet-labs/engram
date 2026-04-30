@@ -113,4 +113,70 @@ class TemporalSolver:
             return None
 
     async def solve(self, q: TemporalQuery, scope: Scope) -> SolverResult | None:
-        raise NotImplementedError("implemented in 3.3")
+        # Resolve anchor → time bound
+        anchor_dt: datetime | None = None
+        if q.anchor_event:
+            anchor_events = await self._store.search_events(
+                q.anchor_event, scope, limit=5
+            )
+            # Sanity check: store can fall back to "list all" when the FTS query
+            # is filtered out by sanitisation (e.g. all-hyphen tokens). Require at
+            # least one shared word between the requested anchor name and the
+            # candidate event's subject/verb/object/aliases — otherwise treat as
+            # unknown anchor.
+            anchor_words = {
+                w.lower() for w in q.anchor_event.replace("-", " ").split() if len(w) > 2
+            }
+            anchor_events = [
+                e
+                for e in anchor_events
+                if anchor_words
+                & {
+                    w.lower()
+                    for piece in (e.subject_canonical, e.verb, e.object_canonical, *e.aliases)
+                    for w in piece.replace("-", " ").split()
+                }
+            ]
+            if not anchor_events:
+                return None  # unknown anchor → fall through to LLM
+            # Highest-confidence match wins; ties broken by earliest time.
+            anchor_dt = max(
+                anchor_events, key=lambda e: (e.confidence, -e.time_start.timestamp())
+            ).time_start
+
+        if q.op == "count":
+            # Need at least a verb or object to filter on
+            if not (q.verb or q.object):
+                return None
+            # FTS retrieval — fetch a wide candidate set, then post-filter in Python.
+            # We do NOT push the anchor bound into the store's `time_end` parameter
+            # because that filters by the event's own time_end (which is NULL for
+            # instantaneous events) — semantically different from "events before X".
+            query_text = " ".join(filter(None, [q.verb, q.object]))
+            events = await self._store.search_events(query_text, scope, limit=200)
+            # Strict verb/object match — FTS gives candidates, exact match enforces semantics.
+            if q.verb:
+                events = [e for e in events if e.verb.lower() == q.verb.lower()]
+            if q.object:
+                obj_lc = q.object.lower()
+                events = [e for e in events if obj_lc in e.object_canonical.lower()]
+            # Anchor bound + don't count the anchor itself.
+            if anchor_dt:
+                events = [e for e in events if e.time_start != anchor_dt]
+                if q.bound == "before":
+                    events = [e for e in events if e.time_start < anchor_dt]
+                elif q.bound == "after":
+                    events = [e for e in events if e.time_start > anchor_dt]
+            # Optional explicit window
+            if q.window:
+                lo, hi = q.window
+                events = [e for e in events if lo <= e.time_start <= hi]
+            return SolverResult(
+                answer=len(events),
+                confidence=0.95,
+                evidence_event_ids=[e.id for e in events],
+            )
+
+        # Other ops fall through to LLM for now — parser still parses them
+        # so downstream can route to richer solvers in a follow-up.
+        return None
