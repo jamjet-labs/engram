@@ -42,5 +42,20 @@ def test_modeltier_construction_with_explicit_clients(monkeypatch):
     assert tier.utility is b
 
 
-@pytest.mark.skip(reason="placeholder for the test added in 1.2")
-def test_engram_open_accepts_tier(): ...
+@pytest.mark.asyncio
+async def test_engram_open_accepts_tier(monkeypatch):
+    from engram import Engram
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    tier = ModelTier.default()
+    async with await Engram.open(":memory:", tier=tier) as memory:
+        assert memory.tier is tier
+
+
+@pytest.mark.asyncio
+async def test_engram_open_without_tier_keeps_back_compat(monkeypatch):
+    from engram import Engram
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    async with await Engram.open(":memory:") as memory:
+        assert memory.tier is None

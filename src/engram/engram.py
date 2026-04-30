@@ -21,6 +21,7 @@ from engram.embedding.synthetic import SyntheticEmbedding
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.llm.base import LLMClient
+from engram.llm.tier import ModelTier
 from engram.models import ChatMessage, Event, ExtractedFact, Fact, MemoryTier, Polarity
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.hybrid import HybridRetriever
@@ -47,6 +48,7 @@ class Engram:
         retriever: HybridRetriever,
         extraction: ExtractionPipeline | None = None,
         event_extractor: EventExtractor | None = None,
+        tier: ModelTier | None = None,
     ) -> None:
         self._store = store
         self._vec = vector_store
@@ -54,6 +56,7 @@ class Engram:
         self._retrieve = retriever
         self._extract = extraction
         self._events = event_extractor
+        self.tier = tier
 
     @classmethod
     async def open(
@@ -63,6 +66,7 @@ class Engram:
         llm: LLMClient | None = None,
         reranker: Reranker | None = None,
         retrieval_config: RetrievalConfig | None = None,
+        tier: ModelTier | None = None,
     ) -> Engram:
         """Open an Engram instance backed by SQLite + in-memory HNSW.
 
@@ -71,6 +75,9 @@ class Engram:
           Pass an OllamaEmbedding or OpenAIEmbedding for real semantics.
         - llm: None — extraction unavailable until provided.
         - reranker: None — set to a CrossEncoderReranker for higher precision.
+        - tier: None — pass a ``ModelTier`` to split reader (answer generation)
+          from utility (verifier, decomposer, ReAct brain). When ``tier`` is set
+          and ``llm`` is not, ``tier.utility`` is used for extraction/event work.
         """
         store = await SqliteStore.open(path)
         embedder = embedder or SyntheticEmbedding(dim=384)
@@ -82,9 +89,10 @@ class Engram:
             config=retrieval_config,
             reranker=reranker,
         )
-        extraction = ExtractionPipeline(llm) if llm is not None else None
-        events = EventExtractor(llm) if llm is not None else None
-        return cls(store, vec, embedder, retriever, extraction, events)
+        effective_llm = llm or (tier.utility if tier else None)
+        extraction = ExtractionPipeline(effective_llm) if effective_llm is not None else None
+        events = EventExtractor(effective_llm) if effective_llm is not None else None
+        return cls(store, vec, embedder, retriever, extraction, events, tier=tier)
 
     async def close(self) -> None:
         await self._vec.close()
