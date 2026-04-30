@@ -6,8 +6,12 @@ as longmemeval_v2.py for comparable numbers across runs.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -80,3 +84,179 @@ def write_trace_line(path: Path, rec: TraceRecord) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         f.write(json.dumps(rec) + "\n")
+
+
+# ── Runnable harness ────────────────────────────────────────────────────────
+
+ORACLE = Path(
+    os.environ.get(
+        "LONGMEMEVAL_ORACLE",
+        "../jamjet-research/paper/experiments/longmemeval_repo/data/longmemeval_oracle.json",
+    )
+).expanduser().resolve()
+
+
+def _build_tier(reader: str) -> Any:
+    """Construct a ModelTier for the named reader.
+
+    Imported lazily so unit tests of stratified_sample / writer don't pay
+    the import cost or the OPENAI_API_KEY assertion.
+    """
+    from engram.llm.tier import ModelTier
+
+    if reader == "gpt-4o-mini":
+        return ModelTier.default()
+    if reader == "claude-sonnet-4-6":
+        return ModelTier.sonnet_reader()
+    if reader == "claude-haiku-4-5-20251001":
+        return ModelTier.haiku_reader()
+    raise SystemExit(f"unknown --reader: {reader}")
+
+
+def _parse_haystack_date(raw: str) -> datetime:
+    return datetime.strptime(raw.split(" (")[0], "%Y/%m/%d").replace(tzinfo=UTC)
+
+
+async def _ingest_chunks(memory: Any, q: dict[str, Any], user_id: str) -> int:
+    n = 0
+    for sid, sdate_raw, session in zip(
+        q["haystack_session_ids"],
+        q["haystack_dates"],
+        q["haystack_sessions"],
+        strict=False,
+    ):
+        sdate = _parse_haystack_date(sdate_raw)
+        for turn in session:
+            await memory.record(
+                text=turn["content"],
+                user_id=user_id,
+                session_id=sid,
+                event_date=sdate,
+            )
+            n += 1
+    return n
+
+
+async def main() -> None:
+    flags = parse_args()
+    if "OPENAI_API_KEY" not in os.environ:
+        raise SystemExit("OPENAI_API_KEY not set (judge requires it)")
+    if "claude" in flags.reader and "ANTHROPIC_API_KEY" not in os.environ:
+        raise SystemExit("ANTHROPIC_API_KEY not set for Anthropic reader")
+    if not ORACLE.exists():
+        raise SystemExit(f"oracle not found: {ORACLE}")
+
+    # Lazy imports — keep the unit-test surface light.
+    from benchmarks.judge import judge_one
+    from engram import Engram
+    from engram.classify.rules import RuleBasedClassifier
+    from engram.embedding.ollama import OllamaEmbedding
+    from engram.llm.openai import OpenAILLM
+    from engram.read.reader import Reader
+    from engram.retrieve.base import RetrievalConfig
+    from engram.retrieve.rerank import CrossEncoderReranker
+
+    flags.out_dir.mkdir(parents=True, exist_ok=True)
+    run_id = f"smoke_{int(time.time())}_{flags.reader.replace('/', '_')}"
+    trace_path = flags.out_dir / f"{run_id}.jsonl"
+    report_path = flags.out_dir / f"{run_id}.md"
+
+    print(f"Loading dataset + reranker (reader={flags.reader}, n={flags.n})...")
+    selected = stratified_sample(str(ORACLE), n=flags.n)
+    tier = _build_tier(flags.reader)
+    embedder = OllamaEmbedding(model="nomic-embed-text", dim=768)
+    reranker = CrossEncoderReranker()
+    classifier = RuleBasedClassifier()
+    judge_llm = OpenAILLM(model="gpt-4o-mini")
+    cfg = RetrievalConfig(enable_two_stage=True, two_stage_top_sessions=3)
+
+    n_correct = 0
+    by_cat: dict[str, list[bool]] = {}
+    t0 = time.time()
+    for i, q in enumerate(selected, 1):
+        print(f"\n=== [{i}/{len(selected)}] {q['question_type']} ===")
+        print(f"Q: {q['question'][:120]}")
+        async with await Engram.open(
+            ":memory:",
+            embedder=embedder,
+            tier=tier,
+            reranker=reranker,
+            retrieval_config=cfg,
+        ) as memory:
+            n_chunks = await _ingest_chunks(memory, q, user_id="alice")
+            ctx = await memory.context(
+                query=q["question"], user_id="alice", classifier=classifier
+            )
+            today = (
+                _parse_haystack_date(q["question_date"]) if q.get("question_date") else None
+            )
+            reader = Reader(tier.reader)
+            res = await reader.read(question=q["question"], context=ctx, today=today)
+            judged = await judge_one(
+                question=q["question"],
+                expected=str(q["answer"]),
+                predicted=res.answer,
+                category=q["question_type"],
+                llm=judge_llm,
+            )
+        n_correct += int(judged.correct)
+        by_cat.setdefault(q["question_type"], []).append(judged.correct)
+        rec: TraceRecord = {
+            "qid": q["question_id"],
+            "category": q["question_type"],
+            "decomposer": {"fired": False, "subqueries": [q["question"]]},
+            "recall": [
+                {"sq": q["question"], "n_candidates": n_chunks, "top_k": 0, "fact_ids": []}
+            ],
+            "reader": {
+                "model": flags.reader,
+                "tool_calls": [],
+                "answer": res.answer,
+                "tokens": {"in": 0, "out": 0},
+            },
+            "verifier": {"verdict": res.verdict, "missing": res.missing},
+            "escalation": [],
+            "react": None,
+            "final": {
+                "answer": res.answer,
+                "abstained": res.abstained,
+                "judge_verdict": "correct" if judged.correct else "incorrect",
+                "cost_usd": 0.0,
+            },
+        }
+        write_trace_line(trace_path, rec)
+        print(f"Expected: {q['answer']}")
+        print(f"Predicted: {res.answer}")
+        print(f"judged={judged.correct}")
+
+    pct = 100 * n_correct / max(1, len(selected))
+    elapsed = time.time() - t0
+    cat_lines = []
+    for cat, lst in sorted(by_cat.items()):
+        c = sum(lst)
+        cat_lines.append(f"- `{cat}`: {c}/{len(lst)} = {100 * c / len(lst):.0f}%")
+    report_path.write_text(
+        f"# Smoke {run_id}\n\n"
+        f"## Configuration\n\n"
+        f"- reader: `{flags.reader}`\n"
+        f"- decompose: {flags.decompose}\n"
+        f"- solver: {flags.solver}\n"
+        f"- tools: {flags.tools}\n"
+        f"- reextract: {flags.reextract}\n"
+        f"- self_consistency: {flags.self_consistency}\n"
+        f"- react: {flags.react}\n"
+        f"- ft_cross_encoder: {flags.ft_cross_encoder}\n"
+        f"- n: {flags.n}\n\n"
+        f"## Result\n\n"
+        f"**{n_correct}/{len(selected)} = {pct:.1f}%** "
+        f"(judge: gpt-4o-mini) in {elapsed:.0f}s\n\n"
+        f"### Per-category\n\n"
+        + "\n".join(cat_lines)
+        + f"\n\nTrace: `{trace_path.name}`\n"
+    )
+    print(f"\n=== {n_correct}/{len(selected)} = {pct:.1f}% in {elapsed:.0f}s ===")
+    print(f"Report: {report_path}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
