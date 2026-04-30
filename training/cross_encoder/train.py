@@ -53,6 +53,9 @@ def train(
         output_path=str(out_dir),
         show_progress_bar=show_progress,
     )
+    # Newer sentence-transformers releases don't always save under output_path
+    # via .fit() — explicit save guarantees the checkpoint lands.
+    model.save(str(out_dir))
 
 
 def main() -> None:
