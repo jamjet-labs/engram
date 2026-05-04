@@ -249,3 +249,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Git worktrees
+.worktrees/
+
+# Engram benchmark caches + training artefacts
+.cache/engram-bench/
+training/cross_encoder/checkpoints/
+benchmarks/reports/*.jsonl

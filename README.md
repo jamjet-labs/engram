@@ -140,6 +140,65 @@ Tools: `memory_record`, `memory_recall`, `memory_context` (names match Rust v0.5
         + supersede filter)
 ```
 
+## Benchmarks — LongMemEval-S
+
+Engram's reference benchmark is [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) (Wu et al., 2024) — 500 questions about a long synthetic chat history. We use the official `gpt-4o-mini` judge for scoring.
+
+### Latest result
+
+**68.0%** on a 100-question stratified subset, configuration:
+
+- Reader: `gpt-4o-mini` (default)
+- Embedder: Ollama `nomic-embed-text` (768-dim, local)
+- Reranker: `cross-encoder/ms-marco-MiniLM-L-6-v2` (base, no fine-tune — see ablation notes)
+- Pipeline flags: `--decompose --tools`
+
+| category | score | n |
+|---|---|---|
+| `single-session-assistant` | 88% | 17 |
+| `knowledge-update` | 76% | 17 |
+| `temporal-reasoning` | 75% | 16 |
+| `single-session-user` | 69% | 16 |
+| `multi-session` | 65% | 17 |
+| `single-session-preference` | 35% | 17 |
+| **overall** | **68%** | **100** |
+
+This is **+4pp over the bare-pipeline baseline** (no `--decompose`, no `--tools`). For comparison, [AgentMemory](https://arxiv.org/abs/2501.00309) reports 96.2% on this benchmark — Engram is currently well behind that frontier; documented follow-up work below.
+
+### Reproduce
+
+```bash
+set -a && source /path/to/.env && set +a    # OPENAI_API_KEY required
+export LONGMEMEVAL_ORACLE=/path/to/longmemeval_oracle.json
+uv run python -m benchmarks.smoke_runner --n 100 --decompose --tools
+```
+
+The runner writes a per-question JSONL trace + a markdown report under `benchmarks/reports/`.
+
+### What we tried, what worked, what didn't
+
+Full programme write-up: [`docs/superpowers/specs/2026-04-30-engram-v2-tier-2-3-design.md`](docs/superpowers/specs/2026-04-30-engram-v2-tier-2-3-design.md). 8 items implemented and ablated independently:
+
+| item | what it does | shipped | net |
+|---|---|---|---|
+| Model tier scaffolding | split reader / utility LLMs | ✓ default | gpt-4o-mini stays default; Sonnet alternate available |
+| Decomposer wiring (`--decompose`) | split compound questions, RRF fuse | ✓ ON | +1pp overall, +6pp multi-session |
+| Tool-augmented reader (`--tools`) | text-protocol tool calls (search_facts, search_events, solve_temporal, count_between, add_days, days_between) | ✓ ON | +3pp overall |
+| Programmatic temporal solver (`--solver`) | parse to DSL, deterministic SVO calendar lookup | flag, default OFF | parser too eager; misfires on knowledge-update |
+| Query-time re-extraction (`--reextract`) | re-extract candidate sessions on PARTIAL verdict | flag, default OFF | no detectable lift at n=50 |
+| Adaptive self-consistency (`--self-consistency`) | N=3 reader samples + vote on PARTIAL | flag, default OFF | gpt-4o-mini already too deterministic |
+| ReAct retrieval agent (`--react`) | multi-hop tool-using agent fallback | flag, default OFF | overwrites borderline-correct answers with worse ones |
+| Fine-tuned cross-encoder (`--ft-cross-encoder`) | LongMemEval-trained MiniLM | flag, default OFF | +3 nDCG@10 but -7pp downstream — labels misaligned with multi-session task structure |
+
+The negative results are as informative as the positive ones — the spec doc explains the diagnosis for each.
+
+### Documented follow-up work
+
+- Native Anthropic tool-use API path (would unlock Sonnet at +5-10pp on tool-augmented runs)
+- Question-type-aware cross-encoder training labels (different positive criteria per LongMemEval category)
+- Stricter solver pre-gate (require explicit anchor words like "before"/"after")
+- Verifier calibration to reduce ReAct false-fires
+
 ## Reproducible runs
 
 For benchmarks / comparison runs, set:

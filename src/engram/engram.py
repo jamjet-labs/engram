@@ -9,6 +9,7 @@ For HTTP / MCP service exposure, see `engram.server`.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -21,9 +22,12 @@ from engram.embedding.synthetic import SyntheticEmbedding
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.llm.base import LLMClient
+from engram.llm.tier import ModelTier
 from engram.models import ChatMessage, Event, ExtractedFact, Fact, MemoryTier, Polarity
+from engram.read.decomposer import QueryDecomposer, should_decompose
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.hybrid import HybridRetriever
+from engram.retrieve.rrf import reciprocal_rank_fusion
 from engram.scope import Scope
 from engram.store.sqlite import SqliteStore
 from engram.vector.hnsw import HnswVectorStore
@@ -47,6 +51,7 @@ class Engram:
         retriever: HybridRetriever,
         extraction: ExtractionPipeline | None = None,
         event_extractor: EventExtractor | None = None,
+        tier: ModelTier | None = None,
     ) -> None:
         self._store = store
         self._vec = vector_store
@@ -54,6 +59,12 @@ class Engram:
         self._retrieve = retriever
         self._extract = extraction
         self._events = event_extractor
+        self.tier = tier
+        # Decomposer is constructed when a tier is supplied (uses utility LLM).
+        # Caller can replace with `engram._decomposer = ...` for tests.
+        self._decomposer: QueryDecomposer | None = (
+            QueryDecomposer(tier.utility) if tier is not None else None
+        )
 
     @classmethod
     async def open(
@@ -63,6 +74,7 @@ class Engram:
         llm: LLMClient | None = None,
         reranker: Reranker | None = None,
         retrieval_config: RetrievalConfig | None = None,
+        tier: ModelTier | None = None,
     ) -> Engram:
         """Open an Engram instance backed by SQLite + in-memory HNSW.
 
@@ -71,6 +83,9 @@ class Engram:
           Pass an OllamaEmbedding or OpenAIEmbedding for real semantics.
         - llm: None — extraction unavailable until provided.
         - reranker: None — set to a CrossEncoderReranker for higher precision.
+        - tier: None — pass a ``ModelTier`` to split reader (answer generation)
+          from utility (verifier, decomposer, ReAct brain). When ``tier`` is set
+          and ``llm`` is not, ``tier.utility`` is used for extraction/event work.
         """
         store = await SqliteStore.open(path)
         embedder = embedder or SyntheticEmbedding(dim=384)
@@ -82,9 +97,10 @@ class Engram:
             config=retrieval_config,
             reranker=reranker,
         )
-        extraction = ExtractionPipeline(llm) if llm is not None else None
-        events = EventExtractor(llm) if llm is not None else None
-        return cls(store, vec, embedder, retriever, extraction, events)
+        effective_llm = llm or (tier.utility if tier else None)
+        extraction = ExtractionPipeline(effective_llm) if effective_llm is not None else None
+        events = EventExtractor(effective_llm) if effective_llm is not None else None
+        return cls(store, vec, embedder, retriever, extraction, events, tier=tier)
 
     async def close(self) -> None:
         await self._vec.close()
@@ -304,21 +320,48 @@ class Engram:
         token_budget: int | None = None,
         chars_per_token: int = 4,
         classifier: QuestionClassifier | None = None,
+        decompose: bool = False,
     ) -> str:
         """Assemble a context string from top-N facts that fit `token_budget`.
 
-        Crude char-based budgeting: assumes ~4 chars/token. Phase 6 will replace
-        with a proper tokenizer.
+        Crude char-based budgeting: assumes ~4 chars/token.
 
         Phase 10: if `classifier` is provided AND `token_budget` is None,
         auto-pick the budget per the LongMemEval category (1.5K-7.5K from
         AgentMemory's calibration).
+
+        Item 2 (decomposer wiring): when ``decompose=True`` AND a decomposer is
+        attached AND the question looks compound (heuristic gate), split the
+        question into sub-queries, retrieve top-15 per sub-query in parallel,
+        and fuse via reciprocal rank fusion.
         """
         if token_budget is None:
             qt = await classifier.classify(query) if classifier is not None else None
             token_budget = budget_for(qt)
         char_budget = token_budget * chars_per_token
-        candidates = await self.recall(query, user_id=user_id, org_id=org_id, top_k=30)
+
+        candidates: list[ScoredFact]
+        if decompose and self._decomposer is not None and should_decompose(query):
+            subqueries = await self._decomposer.decompose(query)
+        else:
+            subqueries = [query]
+
+        if len(subqueries) == 1:
+            candidates = await self.recall(
+                subqueries[0], user_id=user_id, org_id=org_id, top_k=30
+            )
+        else:
+            per_q = await asyncio.gather(
+                *[
+                    self.recall(sq, user_id=user_id, org_id=org_id, top_k=15)
+                    for sq in subqueries
+                ]
+            )
+            ranked_lists = [[sf.fact.id for sf in lst] for lst in per_q]
+            fused_ids = reciprocal_rank_fusion(ranked_lists, k=60)
+            by_id: dict[UUID, ScoredFact] = {sf.fact.id: sf for lst in per_q for sf in lst}
+            candidates = [by_id[fid] for fid in fused_ids if fid in by_id]
+
         lines: list[str] = []
         running = 0
         for sf in candidates:
