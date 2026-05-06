@@ -6,13 +6,13 @@
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-🚧 **v0.1.0a — Phase 1 of the Python rewrite is shipping.** Repo currently private; goes public at v0.1.0 GA. See `CHANGELOG.md` for what landed when.
+**v0.1.0 GA** — Engram is the Python rewrite of jamjet's memory layer. See `CHANGELOG.md` for the release history.
 
 The Rust v0.5.x implementation is in maintenance mode at [jamjet-labs/jamjet](https://github.com/jamjet-labs/jamjet/tree/main/runtime/engram).
 
 ---
 
-## What's in here today
+## Features
 
 - ✅ Phase 1 — Pydantic schemas (`Fact`, `ChatMessage`, `Scope`, ...) + async SQLite + FTS5
 - ✅ Phase 2 — Embedding providers (Ollama, OpenAI, Synthetic) + hnswlib vector index
@@ -24,8 +24,9 @@ The Rust v0.5.x implementation is in maintenance mode at [jamjet-labs/jamjet](ht
 - ✅ Phase 10 — Question classifier (rule-based + LLM) + per-category token budgets
 - ✅ Phase 12 — Reading layer (verifier-backed abstention, query decomposer, confidence-aware context)
 - ✅ Phase 13 — Active fact-versioning (`supersede` API + retrieval filter) + determinism
+- ✅ v0.1.0 — Per-category routing API: `Engram.record(role=...)`, `Engram.context(role_filter=...)`, `Reader(mode="recall" | "synthesis")`. Public re-exports for the full library surface. Lifted LongMemEval-S `single-session-preference` from 29% to 71%.
 
-309 tests, mypy `--strict`, ruff clean.
+309 tests, mypy `--strict`, ruff clean. CI gates on coverage (`--cov-fail-under=79`) and downstream `py.typed` compatibility.
 
 **Getting started:** see [`docs/quickstart.md`](docs/quickstart.md).
 
@@ -45,16 +46,21 @@ Engram is async-first SQLite + hnswlib by default. For multi-tenant deployments,
 
 **Per-category routing (v0.1.0).** For preference/recommendation questions, route to `Reader(mode="synthesis")` with `Engram.context(role_filter=("user",))`. Other categories take the default fact-recall reader. See [docs/quickstart.md](docs/quickstart.md#per-category-routing-preferences) for the canonical pattern.
 
-## Status
+## Roadmap
 
-Functional parity with Rust v0.5.x: target **Week 7**.
-LongMemEval ≥96%: target **Week 13**.
+- 🎯 **LongMemEval-S ≥96%** (currently 71%) — frontier comparison is AgentMemory at 96.2% (full set). Documented gap-closing work in the benchmark section below.
+- 🎯 Postgres backend (currently SQLite-only)
+- 🎯 Performance benchmarks: recall latency + throughput
+- 🎯 Migration guide from Rust v0.5.x
 
-## Install (when 0.1.0 ships)
+## Install
 
 ```bash
-pip install jamjet-engram
+uv add jamjet-engram                # or: pip install jamjet-engram
+uv add 'jamjet-engram[rerank]'      # optional cross-encoder reranker
 ```
+
+Requires Python 3.12+.
 
 ## Quickstart
 
