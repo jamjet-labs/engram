@@ -147,6 +147,20 @@ async with mcp.server.stdio.stdio_server() as streams:
 
 ---
 
+## Use with JamJet
+
+Engram is the memory layer for agents built on **[JamJet](https://github.com/jamjet-labs/jamjet)** — JamJet Labs' durable execution runtime. The two projects share design DNA: Apache 2.0, MCP-native, multi-tenant by default. Engram handles "what does the agent remember?"; JamJet handles "what happens when the process restarts mid-execution?"
+
+Three composition patterns:
+
+- **Python agent + Engram (this library) + JamJet [Python SDK](https://pypi.org/project/jamjet)** — standalone Python stack. See [`examples/06_with_jamjet.py`](examples/06_with_jamjet.py).
+- **Java/Spring agent + [`engram-spring-boot-starter`](https://central.sonatype.com/artifact/dev.jamjet/engram-spring-boot-starter) + [JamJet Java Runtime](https://github.com/jamjet-labs/jamjet-runtime-java)** — JVM stack. The Spring starter wraps Engram's HTTP/MCP API as a Spring AI `ChatMemoryRepository`.
+- **Anything-MCP-aware** — Claude Code, Cursor, custom agents — point at Engram's [MCP server](#run-as-an-mcp-server-for-claude-code-cursor-etc) and JamJet's runtime separately. They compose at the protocol layer.
+
+Engram works fine standalone if you're not using JamJet. But if you're building durable AI agents on the JVM or Python, the two-piece stack saves you from reinventing memory.
+
+---
+
 ## Core concepts
 
 | Concept | What it is | Why you care |
