@@ -159,6 +159,13 @@ Three composition patterns:
 
 Engram works fine standalone if you're not using JamJet. But if you're building durable AI agents on the JVM or Python, the two-piece stack saves you from reinventing memory.
 
+> **Quick disambiguations** (the ecosystem has accumulated some name overlap):
+> - **`pip install jamjet-engram`** (this library) — the standalone Python memory library.
+> - **`pip install jamjet`** — JamJet's Python SDK for the runtime; *not* this library.
+> - **"Durable" in JamJet** means *durable execution* (your agent process can crash and resume from a checkpoint).
+> - **"Durable" in Engram** means *durable memory* (your stored facts persist across runs and version cleanly).
+> - The two are orthogonal capabilities — both apply to the same agent.
+
 ---
 
 ## Core concepts
@@ -327,7 +334,7 @@ If any of these are interesting, open an issue and let's talk.
 - **License:** Apache 2.0 — see [LICENSE](LICENSE).
 - **Security:** Report privately to security@jamjet.dev. See [SECURITY.md](SECURITY.md).
 - **Changelog:** [CHANGELOG.md](CHANGELOG.md).
-- **Rust v0.5.x runtime:** in maintenance mode at [jamjet-labs/jamjet/runtime/engram](https://github.com/jamjet-labs/jamjet/tree/main/runtime/engram). Wire protocol stays compatible.
+- **Other distributions:** Engram also ships as a [Rust crate](https://crates.io/crates/jamjet-engram) (bundled into the [JamJet runtime](https://github.com/jamjet-labs/jamjet)), an [MCP server](https://registry.modelcontextprotocol.io/servers/io.github.jamjet-labs/engram-server) (Docker · GHCR), and a [Spring AI ChatMemoryRepository](https://central.sonatype.com/artifact/dev.jamjet/engram-spring-boot-starter). All distributions share the wire protocol; this Python library is the newest.
 - **Examples:** [`examples/`](examples/) — start with `01_quickstart.py`.
 - **Architecture deep-dive:** `docs/architecture.md` (forthcoming).
 
