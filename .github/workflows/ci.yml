@@ -49,3 +49,85 @@ jobs:
         with:
           name: coverage-${{ matrix.python }}
           path: coverage.xml
+
+  downstream-typecheck:
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Install wheel in fresh venv
+        run: |
+          uv venv /tmp/downstream-venv
+          /tmp/downstream-venv/bin/pip install dist/*.whl mypy
+
+      - name: Write stub importing public API
+        run: |
+          cat > /tmp/downstream_stub.py <<'PY'
+          from engram import (
+              ChatMessage,
+              Engram,
+              EngramError,
+              ExtractionError,
+              Fact,
+              is_preference_question,
+              LLMClient,
+              LLMMessage,
+              LLMResponse,
+              MemoryTier,
+              NotFoundError,
+              Polarity,
+              QuestionType,
+              Reader,
+              ReaderConfig,
+              RetrievalConfig,
+              RuleBasedClassifier,
+              Scope,
+              StoreError,
+              Tool,
+              ToolRegistry,
+              ToolResult,
+          )
+
+          # Smoke-reference symbols so unused-import lint doesn't fire.
+          # (A tuple reference avoids mypy --strict truthy-function errors that
+          # `assert Engram and Scope and ...` would trigger on callables.)
+          _NAMES = (
+              ChatMessage,
+              Engram,
+              EngramError,
+              ExtractionError,
+              Fact,
+              is_preference_question,
+              LLMClient,
+              LLMMessage,
+              LLMResponse,
+              MemoryTier,
+              NotFoundError,
+              Polarity,
+              QuestionType,
+              Reader,
+              ReaderConfig,
+              RetrievalConfig,
+              RuleBasedClassifier,
+              Scope,
+              StoreError,
+              Tool,
+              ToolRegistry,
+              ToolResult,
+          )
+          PY
+
+      - name: mypy --strict on stub
+        run: /tmp/downstream-venv/bin/mypy --strict /tmp/downstream_stub.py
