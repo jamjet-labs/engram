@@ -6,7 +6,7 @@ All notable changes to Engram v2.0 (the Python rewrite) are documented here. For
 
 (none)
 
-## [0.1.0] - 2026-05-XX (forthcoming GA)
+## [0.1.0] - 2026-05-06
 
 ### Added
 
