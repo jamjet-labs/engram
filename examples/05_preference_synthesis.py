@@ -27,7 +27,6 @@ from engram import (
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.llm.tier import ModelTier
 
-
 CHAT_HISTORY = [
     {
         "role": "user",
@@ -35,7 +34,10 @@ CHAT_HISTORY = [
     },
     {
         "role": "assistant",
-        "content": "Both are iconic. Strats are bright and snappy, Les Pauls are thicker and warmer.",
+        "content": (
+            "Both are iconic. Strats are bright and snappy, "
+            "Les Pauls are thicker and warmer."
+        ),
     },
     {
         "role": "user",
@@ -43,13 +45,16 @@ CHAT_HISTORY = [
     },
     {
         "role": "assistant",
-        "content": "For low-volume blues/rock, a Les Paul into a small tube combo or modeler shines.",
+        "content": (
+            "For low-volume blues/rock, a Les Paul into a small tube combo or "
+            "modeler shines."
+        ),
     },
 ]
 
 QUESTIONS = [
     "Any tips on what to look for in a new guitar?",  # preference / recommendation
-    "What guitar do I currently own?",                # plain recall
+    "What guitar do I currently own?",  # plain recall
 ]
 
 
