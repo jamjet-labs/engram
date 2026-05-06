@@ -60,7 +60,9 @@ async def test_reextract_skipped_when_post_verdict_yes():
     reader = Reader(fake_llm, verifier=True, config=ReaderConfig(enable_reextract=True))
     reader.attach_reextractor(fake_reextractor, fake_store, lambda q: ["s1"])
     res = await reader.read(
-        question="?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     fake_reextractor.reextract.assert_not_called()
     assert res.answer == "answer"

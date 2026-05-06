@@ -97,9 +97,7 @@ class ReActAgent:
         tool_list = "\n".join(
             f"- {t['name']}: {t['description']}" for t in self._tools.for_anthropic()
         )
-        sys = REACT_SYSTEM.format(
-            tool_list=tool_list, today=today_str, question=question
-        )
+        sys = REACT_SYSTEM.format(tool_list=tool_list, today=today_str, question=question)
         history: list[LLMMessage] = [
             LLMMessage(role="system", content=sys),
             LLMMessage(role="user", content=question),
@@ -114,9 +112,7 @@ class ReActAgent:
             t0 = time.time()
             try:
                 resp = await asyncio.wait_for(
-                    self._tier.utility.generate(
-                        history, temperature=0.0, max_tokens=400
-                    ),
+                    self._tier.utility.generate(history, temperature=0.0, max_tokens=400),
                     timeout=self._hop_timeout_s,
                 )
             except TimeoutError:  # asyncio.TimeoutError is now a builtin alias
@@ -133,21 +129,15 @@ class ReActAgent:
             m = _TOOL_USE_RE.search(text)
             if not m:
                 # Free-text answer — accept it as the final answer.
-                trace.append(
-                    AgentStep(hop=hop, text_emitted=text, elapsed_s=time.time() - t0)
-                )
-                return AgentResult(
-                    answer=text, abstained=False, trace=trace, n_hops=hop
-                )
+                trace.append(AgentStep(hop=hop, text_emitted=text, elapsed_s=time.time() - t0))
+                return AgentResult(answer=text, abstained=False, trace=trace, n_hops=hop)
 
             try:
                 call = json.loads(m.group(1))
                 tool_name = call["name"]
                 tool_input = call.get("input", {})
             except (KeyError, json.JSONDecodeError):
-                trace.append(
-                    AgentStep(hop=hop, text_emitted=text, elapsed_s=time.time() - t0)
-                )
+                trace.append(AgentStep(hop=hop, text_emitted=text, elapsed_s=time.time() - t0))
                 return AgentResult(
                     answer="(malformed tool call)",
                     abstained=True,
@@ -180,9 +170,7 @@ class ReActAgent:
                         elapsed_s=time.time() - t0,
                     )
                 )
-                return AgentResult(
-                    answer=ans, abstained=False, trace=trace, n_hops=hop
-                )
+                return AgentResult(answer=ans, abstained=False, trace=trace, n_hops=hop)
 
             try:
                 result = await self._tools.dispatch(tool_name, tool_input)
@@ -211,6 +199,4 @@ class ReActAgent:
                 )
             )
 
-        return AgentResult(
-            answer="I don't know", abstained=True, trace=trace, n_hops=len(trace)
-        )
+        return AgentResult(answer="I don't know", abstained=True, trace=trace, n_hops=len(trace))

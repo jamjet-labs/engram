@@ -347,15 +347,10 @@ class Engram:
             subqueries = [query]
 
         if len(subqueries) == 1:
-            candidates = await self.recall(
-                subqueries[0], user_id=user_id, org_id=org_id, top_k=30
-            )
+            candidates = await self.recall(subqueries[0], user_id=user_id, org_id=org_id, top_k=30)
         else:
             per_q = await asyncio.gather(
-                *[
-                    self.recall(sq, user_id=user_id, org_id=org_id, top_k=15)
-                    for sq in subqueries
-                ]
+                *[self.recall(sq, user_id=user_id, org_id=org_id, top_k=15) for sq in subqueries]
             )
             ranked_lists = [[sf.fact.id for sf in lst] for lst in per_q]
             fused_ids = reciprocal_rank_fusion(ranked_lists, k=60)

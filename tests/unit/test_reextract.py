@@ -16,7 +16,7 @@ async def test_reextract_calls_llm_per_session_and_returns_facts():
     )
     fake_store = AsyncMock()
     scope = Scope(org_id="default", user_id="alice")
-    fake_store.list_messages_by_session = AsyncMock(
+    fake_store.list_messages = AsyncMock(
         return_value=[
             ChatMessage(
                 scope=scope,
@@ -43,7 +43,7 @@ async def test_reextract_returns_empty_on_malformed_json():
     fake_llm = AsyncMock()
     fake_llm.generate.return_value.content = "not json"
     fake_store = AsyncMock()
-    fake_store.list_messages_by_session = AsyncMock(
+    fake_store.list_messages = AsyncMock(
         return_value=[
             ChatMessage(
                 scope=Scope(org_id="d", user_id="a"),
@@ -69,7 +69,7 @@ async def test_reextract_caps_at_max_sessions():
     fake_llm = AsyncMock()
     fake_llm.generate.return_value.content = '{"facts": []}'
     fake_store = AsyncMock()
-    fake_store.list_messages_by_session = AsyncMock(return_value=[])
+    fake_store.list_messages = AsyncMock(return_value=[])
     rx = QueryConditionedReextractor(llm=fake_llm, max_sessions=2)
     await rx.reextract(
         question="?",
@@ -78,14 +78,14 @@ async def test_reextract_caps_at_max_sessions():
         scope=Scope(org_id="d", user_id="a"),
     )
     # Only 2 sessions queried (max_sessions=2), even though 5 ids passed.
-    assert fake_store.list_messages_by_session.await_count == 2
+    assert fake_store.list_messages.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_reextract_skips_sessions_with_no_messages():
     fake_llm = AsyncMock()
     fake_store = AsyncMock()
-    fake_store.list_messages_by_session = AsyncMock(return_value=[])
+    fake_store.list_messages = AsyncMock(return_value=[])
     rx = QueryConditionedReextractor(llm=fake_llm)
     facts = await rx.reextract(
         question="?",

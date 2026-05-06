@@ -37,6 +37,4 @@ class SearchFactsTool:
         if not scored:
             return ToolResult(content="(no facts found)", raw=[])
         lines = [f"- {sf.fact.text}" for sf in scored]
-        return ToolResult(
-            content="\n".join(lines), raw=[str(sf.fact.id) for sf in scored]
-        )
+        return ToolResult(content="\n".join(lines), raw=[str(sf.fact.id) for sf in scored])

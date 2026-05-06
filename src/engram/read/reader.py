@@ -60,9 +60,7 @@ class ReaderConfig(BaseModel):
 
 # Categories where reader nondeterminism most often hurts and self-consistency
 # pays off (per spec §3.2). Restricting to these cuts the cost ~50%.
-ELIGIBLE_SC_CATEGORIES = frozenset(
-    {"temporal-reasoning", "multi-session", "knowledge-update"}
-)
+ELIGIBLE_SC_CATEGORIES = frozenset({"temporal-reasoning", "multi-session", "knowledge-update"})
 
 
 class Reader:
@@ -183,11 +181,10 @@ class Reader:
         if self._config.tools is not None:
             sys_prompt += (
                 "\n\nYou have access to tools. To call one, output exactly:\n"
-                "[TOOL_USE]{\"name\": \"...\", \"input\": {...}}[/TOOL_USE]\n"
+                '[TOOL_USE]{"name": "...", "input": {...}}[/TOOL_USE]\n'
                 "Available tools:\n"
                 + "\n".join(
-                    f"- {t['name']}: {t['description']}"
-                    for t in self._config.tools.for_anthropic()
+                    f"- {t['name']}: {t['description']}" for t in self._config.tools.for_anthropic()
                 )
             )
 
@@ -224,6 +221,10 @@ class Reader:
                 answer = text  # malformed tool call — accept as final
                 break
 
+            # Narrow Optional[ToolRegistry] for mypy: we only reach here after
+            # `m` matched, which requires self._config.tools is not None
+            # (per the guard at the top of the loop body).
+            assert self._config.tools is not None
             try:
                 result = await self._config.tools.dispatch(tool_name, tool_input)
             except Exception as e:
@@ -253,9 +254,7 @@ class Reader:
             and self._reextract_store is not None
             and scope is not None
         ):
-            post_verdict, _ = await self._verify(
-                question, context + f"\n\nAnswer: {answer}"
-            )
+            post_verdict, _ = await self._verify(question, context + f"\n\nAnswer: {answer}")
             final_verdict = post_verdict
             if post_verdict in ("PARTIAL", "NO"):
                 sids = self._candidate_sessions_provider(question)
@@ -272,12 +271,9 @@ class Reader:
                         ephemeral = []
                     if ephemeral:
                         extra_ctx = "\n".join(
-                            f"- {f.text} [confidence: {f.confidence:.2f}]"
-                            for f in ephemeral
+                            f"- {f.text} [confidence: {f.confidence:.2f}]" for f in ephemeral
                         )
-                        new_context = (
-                            context + "\n\n[Re-extracted facts]\n" + extra_ctx
-                        )
+                        new_context = context + "\n\n[Re-extracted facts]\n" + extra_ctx
                         sys_prompt2 = READER_SYSTEM_PROMPT.format(
                             today_clause=today_clause,
                             context=new_context,
@@ -308,16 +304,16 @@ class Reader:
             and self._config.self_consistency_on_partial > 1
             and self._category in ELIGIBLE_SC_CATEGORIES
         ):
-            sc_verdict, _ = await self._verify(
-                question, context + f"\n\nAnswer: {answer}"
-            )
+            sc_verdict, _ = await self._verify(question, context + f"\n\nAnswer: {answer}")
             if sc_verdict in ("PARTIAL", "NO"):
                 from engram.read.voting import majority_vote
 
                 n = self._config.self_consistency_on_partial
                 samples: list[str] = [answer]
                 sys_prompt_sc = READER_SYSTEM_PROMPT.format(
-                    today_clause=today_clause, context=context, question=question,
+                    today_clause=today_clause,
+                    context=context,
+                    question=question,
                 )
                 for _ in range(n - 1):
                     try:
@@ -338,9 +334,7 @@ class Reader:
 
         # Escalation rung (c) — ReAct fallback (item 7 / Phase 11b)
         if self._verifier_enabled and self._react is not None and scope is not None:
-            post_verdict, _ = await self._verify(
-                question, context + f"\n\nAnswer: {answer}"
-            )
+            post_verdict, _ = await self._verify(question, context + f"\n\nAnswer: {answer}")
             if post_verdict in ("PARTIAL", "NO"):
                 try:
                     agent_res = await self._react.answer(
