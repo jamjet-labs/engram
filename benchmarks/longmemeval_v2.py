@@ -40,9 +40,9 @@ from engram.read.reader import Reader
 from engram.retrieve.base import RetrievalConfig
 from engram.retrieve.rerank import CrossEncoderReranker
 
-_DEFAULT_ORACLE = (
-    "../jamjet-research/paper/experiments/longmemeval_repo/data/longmemeval_oracle.json"
-)
+# Oracle path: set LONGMEMEVAL_ORACLE to point at LongMemEval-S's longmemeval_oracle.json
+# (download from https://github.com/xiaowu0162/LongMemEval). Default falls back to cwd.
+_DEFAULT_ORACLE = "./longmemeval_oracle.json"
 ORACLE_PATH = Path(os.environ.get("LONGMEMEVAL_ORACLE", _DEFAULT_ORACLE)).expanduser().resolve()
 
 
