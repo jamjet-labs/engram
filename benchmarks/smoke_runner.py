@@ -15,8 +15,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
-from engram.read.prompts import SYNTHESIS_PROMPT  # re-export (transitional)
-
 
 def stratified_sample(oracle_path: str, n: int = 100) -> list[dict[str, Any]]:
     data = json.loads(Path(oracle_path).read_text())
@@ -119,49 +117,15 @@ def _build_tier(reader: str) -> Any:
     raise SystemExit(f"unknown --reader: {reader}")
 
 
-async def _synthesis_read(tier: Any, context: str, question: str) -> str:
-    """Synthesis-mode read for preference questions.
-
-    Bypasses the Reader pipeline (no verifier, no tool loop, no escalation
-    rungs). Calls tier.reader.generate directly with SYNTHESIS_PROMPT.
-
-    Returns the model's answer string (trimmed). On any ExtractionError,
-    returns "I don't know" so a single bad LLM call does not crash a 100-q
-    smoke.
-    """
-    from engram.errors import ExtractionError
-    from engram.llm.base import LLMMessage
-
-    sys_prompt = SYNTHESIS_PROMPT.format(context=context, question=question)
-    try:
-        resp = await tier.reader.generate(
-            [
-                LLMMessage(role="system", content=sys_prompt),
-                LLMMessage(role="user", content=question),
-            ],
-            temperature=0.0,
-            max_tokens=400,
-        )
-    except ExtractionError:
-        return "I don't know"
-    return resp.content.strip()
-
-
 def _parse_haystack_date(raw: str) -> datetime:
     return datetime.strptime(raw.split(" (")[0], "%Y/%m/%d").replace(tzinfo=UTC)
 
 
-async def _ingest_chunks(
-    memory: Any,
-    q: dict[str, Any],
-    user_id: str,
-    role_filter: tuple[str, ...] | None = None,
-) -> int:
-    """Ingest haystack chunks into memory.
+async def _ingest_chunks(memory: Any, q: dict[str, Any], user_id: str) -> int:
+    """Ingest haystack chunks. Each turn's role propagates to fact metadata.
 
-    When ``role_filter`` is provided, only turns whose role is in the filter
-    are ingested. ``None`` (default) ingests everything — backward-compatible
-    with the previous signature.
+    Retrieval-time filtering happens via ``Engram.context(role_filter=...)``;
+    ingest is unconditional (every turn stored, with role tag).
     """
     n = 0
     for sid, sdate_raw, session in zip(
@@ -172,10 +136,9 @@ async def _ingest_chunks(
     ):
         sdate = _parse_haystack_date(sdate_raw)
         for turn in session:
-            if role_filter is not None and turn.get("role") not in role_filter:
-                continue
             await memory.record(
                 text=turn["content"],
+                role=turn.get("role"),
                 user_id=user_id,
                 session_id=sid,
                 event_date=sdate,
@@ -345,30 +308,27 @@ async def main() -> None:
         ) as memory:
             if is_pref:
                 # ── Synthesis path ─────────────────────────────────────────
-                # Filter to user turns only — embedding similarity ranks
-                # info-dense assistant explanations above terse user
-                # preferences if both are ingested.
-                n_chunks = await _ingest_chunks(
-                    memory, q, user_id="alice", role_filter=("user",)
-                )
+                n_chunks = await _ingest_chunks(memory, q, user_id="alice")
                 n_events = 0
                 ctx = await memory.context(
-                    query=q["question"], user_id="alice", token_budget=3500
+                    query=q["question"],
+                    user_id="alice",
+                    token_budget=3500,
+                    role_filter=("user",),
                 )
                 synthesis_used = True
-                synth_answer = await _synthesis_read(tier, ctx, q["question"])
-                synth_abstained = synth_answer.lower().startswith("i don't know")
-                # Normalize to ReadResult-shaped locals for trace consistency
-                res_answer = synth_answer
-                res_verdict = None
-                res_missing = None
-                res_abstained = synth_abstained
-                res_solved_by = "synthesis"
                 today = (
                     _parse_haystack_date(q["question_date"])
                     if q.get("question_date")
                     else None
                 )
+                reader = Reader(tier.reader, mode="synthesis")
+                res = await reader.read(question=q["question"], context=ctx)
+                res_answer = res.answer
+                res_verdict = res.verdict
+                res_missing = res.missing
+                res_abstained = res.abstained
+                res_solved_by = res.solved_by
             else:
                 # ── Existing path (unchanged) ──────────────────────────────
                 synthesis_used = False
