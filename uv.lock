@@ -709,7 +709,7 @@ wheels = [
 
 [[package]]
 name = "jamjet-engram"
-version = "0.1.0a0"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

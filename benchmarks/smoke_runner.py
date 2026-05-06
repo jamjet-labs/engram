@@ -92,12 +92,9 @@ def write_trace_line(path: Path, rec: TraceRecord) -> None:
 
 # ── Runnable harness ────────────────────────────────────────────────────────
 
-ORACLE = Path(
-    os.environ.get(
-        "LONGMEMEVAL_ORACLE",
-        "../jamjet-research/paper/experiments/longmemeval_repo/data/longmemeval_oracle.json",
-    )
-).expanduser().resolve()
+_ORACLE_ENV = "LONGMEMEVAL_ORACLE"
+_ORACLE_DEFAULT = "./longmemeval_oracle.json"  # relative to cwd; set LONGMEMEVAL_ORACLE to override
+ORACLE = Path(os.environ.get(_ORACLE_ENV, _ORACLE_DEFAULT)).expanduser().resolve()
 
 
 def _build_tier(reader: str) -> Any:

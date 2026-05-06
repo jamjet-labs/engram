@@ -257,6 +257,7 @@ __marimo__/
 .cache/engram-bench/
 training/cross_encoder/checkpoints/
 benchmarks/reports/*.jsonl
+benchmarks/reports/*.md
 
 # Local AI/editor agent config — never commit Claude/skill artifacts
 .claude/

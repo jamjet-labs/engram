@@ -3,7 +3,7 @@ name = "jamjet-engram"
 version = "0.1.0"
 description = "Engram — durable memory layer for AI agents. Temporal knowledge graph, semantic search, and MCP-native tools."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [
     { name = "Sunil Prakash", email = "sunil@jamjet.dev" },
 ]
@@ -11,7 +11,7 @@ keywords = ["agent", "memory", "knowledge-graph", "mcp", "llm", "ai"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

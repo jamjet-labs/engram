@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/jamjet-labs/engram/actions/workflows/ci.yml/badge.svg)](https://github.com/jamjet-labs/engram/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://www.python.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![PyPI](https://img.shields.io/badge/pypi-jamjet--engram-orange)](https://pypi.org/project/jamjet-engram)
 
 ```python
@@ -310,7 +310,7 @@ If any of these are interesting, open an issue and let's talk.
 
 ## Project meta
 
-- **License:** MIT — see [LICENSE](LICENSE).
+- **License:** Apache 2.0 — see [LICENSE](LICENSE).
 - **Security:** Report privately to security@jamjet.dev. See [SECURITY.md](SECURITY.md).
 - **Changelog:** [CHANGELOG.md](CHANGELOG.md).
 - **Rust v0.5.x runtime:** in maintenance mode at [jamjet-labs/jamjet/runtime/engram](https://github.com/jamjet-labs/jamjet/tree/main/runtime/engram). Wire protocol stays compatible.
