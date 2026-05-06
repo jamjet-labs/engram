@@ -328,6 +328,7 @@ class Engram:
         chars_per_token: int = 4,
         classifier: QuestionClassifier | None = None,
         decompose: bool = False,
+        role_filter: tuple[str, ...] | None = None,
     ) -> str:
         """Assemble a context string from top-N facts that fit `token_budget`.
 
@@ -341,6 +342,11 @@ class Engram:
         attached AND the question looks compound (heuristic gate), split the
         question into sub-queries, retrieve top-15 per sub-query in parallel,
         and fuse via reciprocal rank fusion.
+
+        ``role_filter``: optional tuple of role names (e.g. ``("user",)``).
+        When provided, retrieved candidates are filtered to those whose
+        ``fact.metadata["role"]`` is in the tuple. Filter is applied AFTER
+        recall but BEFORE the token-budget loop.
         """
         if token_budget is None:
             qt = await classifier.classify(query) if classifier is not None else None
@@ -363,6 +369,10 @@ class Engram:
             fused_ids = reciprocal_rank_fusion(ranked_lists, k=60)
             by_id: dict[UUID, ScoredFact] = {sf.fact.id: sf for lst in per_q for sf in lst}
             candidates = [by_id[fid] for fid in fused_ids if fid in by_id]
+
+        # Role filter — applied AFTER recall, BEFORE the token-budget loop.
+        if role_filter is not None:
+            candidates = [c for c in candidates if c.fact.metadata.get("role") in role_filter]
 
         lines: list[str] = []
         running = 0
