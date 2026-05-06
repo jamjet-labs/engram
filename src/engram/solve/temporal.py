@@ -72,9 +72,7 @@ class TemporalSolver:
         self._store = store
         self._llm = llm
 
-    async def parse(
-        self, question: str, today: datetime | None = None
-    ) -> TemporalQuery | None:
+    async def parse(self, question: str, today: datetime | None = None) -> TemporalQuery | None:
         today_str = today.date().isoformat() if today else "unknown"
         prompt = PARSE_PROMPT.format(today=today_str, question=question)
         try:
@@ -124,9 +122,7 @@ class TemporalSolver:
         # Resolve anchor → time bound
         anchor_dt: datetime | None = None
         if q.anchor_event:
-            anchor_events = await self._store.search_events(
-                q.anchor_event, scope, limit=5
-            )
+            anchor_events = await self._store.search_events(q.anchor_event, scope, limit=5)
             # Sanity check: store can fall back to "list all" when the FTS query
             # is filtered out by sanitisation (e.g. all-hyphen tokens). Require at
             # least one shared word between the requested anchor name and the

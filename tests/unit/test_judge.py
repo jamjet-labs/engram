@@ -40,6 +40,10 @@ async def test_judge_handles_messy_response():
     fake_llm = AsyncMock()
     fake_llm.generate.return_value.content = "  Yes.  "
     res = await judge_one(
-        question="Q?", expected="42", predicted="42", category="x", llm=fake_llm,
+        question="Q?",
+        expected="42",
+        predicted="42",
+        category="x",
+        llm=fake_llm,
     )
     assert res.correct is True

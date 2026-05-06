@@ -45,7 +45,9 @@ async def test_reader_no_tools_passes_through():
     fake_llm.generate.return_value = MagicMock(content="direct answer")
     reader = Reader(fake_llm, verifier=False, config=ReaderConfig(tools=None))
     res = await reader.read(
-        question="Q?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="Q?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     assert res.answer == "direct answer"
     assert fake_llm.generate.await_count == 1
@@ -63,7 +65,9 @@ async def test_reader_first_answer_wins_when_text_before_tool():
     reg.register(_StaticTool())
     reader = Reader(fake_llm, verifier=False, config=ReaderConfig(tools=reg))
     res = await reader.read(
-        question="Q?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="Q?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     assert "7" in res.answer
     assert fake_llm.generate.await_count == 1
@@ -74,16 +78,16 @@ async def test_reader_handles_unknown_tool_gracefully():
     """Tool dispatch failure shouldn't crash the read; error is fed back as result."""
     fake_llm = AsyncMock()
     fake_llm.generate.side_effect = [
-        MagicMock(
-            content='[TOOL_USE]{"name": "missing", "input": {}}[/TOOL_USE]'
-        ),
+        MagicMock(content='[TOOL_USE]{"name": "missing", "input": {}}[/TOOL_USE]'),
         MagicMock(content="Recovered answer"),
     ]
     reg = ToolRegistry()
     reg.register(_StaticTool())
     reader = Reader(fake_llm, verifier=False, config=ReaderConfig(tools=reg))
     res = await reader.read(
-        question="Q?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="Q?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     assert res.answer == "Recovered answer"
 
@@ -109,7 +113,9 @@ async def test_reader_caps_tool_calls_at_max():
         MagicMock(content="Forced final answer"),  # the post-cap call
     ]
     res = await reader.read(
-        question="Q?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="Q?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     assert res.answer == "Forced final answer"
     assert fake_llm.generate.await_count == 6  # 5 tool calls + 1 forced final

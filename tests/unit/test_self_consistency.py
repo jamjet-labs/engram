@@ -52,7 +52,9 @@ async def test_self_consistency_fires_on_eligible_category():
     reader = Reader(fake_llm, verifier=True, config=cfg)
     reader.set_category("temporal-reasoning")
     res = await reader.read(
-        question="Q?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="Q?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     assert res.answer == "42"  # majority vote
 
@@ -69,7 +71,9 @@ async def test_self_consistency_skipped_for_ineligible_category():
     reader = Reader(fake_llm, verifier=True, config=cfg)
     reader.set_category("single-session-preference")
     res = await reader.read(
-        question="Q?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="Q?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     assert res.answer == "answer"
     # No additional samples drawn

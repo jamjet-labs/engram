@@ -21,9 +21,7 @@ async def test_react_fires_when_post_verdict_partial():
     ]
     fake_react = AsyncMock()
     fake_react.answer = AsyncMock(
-        return_value=MagicMock(
-            answer="ReAct found it: 4", abstained=False, n_hops=2, trace=[]
-        )
+        return_value=MagicMock(answer="ReAct found it: 4", abstained=False, n_hops=2, trace=[])
     )
     reader = Reader(
         fake_llm,
@@ -73,9 +71,7 @@ async def test_react_abstains_does_not_overwrite_answer():
     ]
     fake_react = AsyncMock()
     fake_react.answer = AsyncMock(
-        return_value=MagicMock(
-            answer="I don't know", abstained=True, n_hops=4, trace=[]
-        )
+        return_value=MagicMock(answer="I don't know", abstained=True, n_hops=4, trace=[])
     )
     reader = Reader(
         fake_llm,
@@ -85,7 +81,9 @@ async def test_react_abstains_does_not_overwrite_answer():
     reader.set_category("temporal-reasoning")
     reader.attach_react(fake_react)
     res = await reader.read(
-        question="?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     # ReAct was tried but abstained; original answer is kept
     assert res.answer == "original answer"

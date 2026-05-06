@@ -1,42 +1,67 @@
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from benchmarks.smoke_runner import stratified_sample
+from benchmarks.smoke_runner import (
+    TraceRecord,
+    stratified_sample,
+    write_trace_line,
+)
 from engram.errors import ExtractionError
 from engram.llm.base import LLMResponse
 
+
 def test_stratified_sample_covers_all_categories(tmp_path):
     fake_oracle = [
-        {"question_id": f"q{i}", "question_type": t,
-         "haystack_sessions": [[{"role": "user", "content": "x"}]],
-         "haystack_session_ids": ["s1"], "haystack_dates": ["2024/01/01 (Mon) 10:00"],
-         "question": "Q?", "question_date": "2024/06/01 (Sat) 10:00", "answer": "x"}
-        for i, t in enumerate(["temporal-reasoning"] * 50 + ["multi-session"] * 50 +
-                              ["single-session-user"] * 50 + ["single-session-assistant"] * 50 +
-                              ["knowledge-update"] * 50 + ["single-session-preference"] * 50)
+        {
+            "question_id": f"q{i}",
+            "question_type": t,
+            "haystack_sessions": [[{"role": "user", "content": "x"}]],
+            "haystack_session_ids": ["s1"],
+            "haystack_dates": ["2024/01/01 (Mon) 10:00"],
+            "question": "Q?",
+            "question_date": "2024/06/01 (Sat) 10:00",
+            "answer": "x",
+        }
+        for i, t in enumerate(
+            ["temporal-reasoning"] * 50
+            + ["multi-session"] * 50
+            + ["single-session-user"] * 50
+            + ["single-session-assistant"] * 50
+            + ["knowledge-update"] * 50
+            + ["single-session-preference"] * 50
+        )
     ]
     p = tmp_path / "oracle.json"
     p.write_text(json.dumps(fake_oracle))
     sample = stratified_sample(str(p), n=100)
     assert len(sample) == 100
     types = [q["question_type"] for q in sample]
-    for cat in {"temporal-reasoning", "multi-session", "single-session-user",
-                "single-session-assistant", "knowledge-update", "single-session-preference"}:
+    for cat in {
+        "temporal-reasoning",
+        "multi-session",
+        "single-session-user",
+        "single-session-assistant",
+        "knowledge-update",
+        "single-session-preference",
+    }:
         assert types.count(cat) >= 10, f"{cat}: {types.count(cat)}"
 
-
-from benchmarks.smoke_runner import write_trace_line, TraceRecord
 
 def test_trace_record_round_trip(tmp_path):
     p = tmp_path / "trace.jsonl"
     rec: TraceRecord = {
-        "qid": "abc", "category": "temporal-reasoning",
+        "qid": "abc",
+        "category": "temporal-reasoning",
         "decomposer": {"fired": False, "subqueries": ["Q?"]},
         "recall": [{"sq": "Q?", "n_candidates": 50, "top_k": 5, "fact_ids": []}],
-        "reader": {"model": "gpt-4o-mini", "tool_calls": [], "answer": "A", "tokens": {"in": 10, "out": 5}},
+        "reader": {
+            "model": "gpt-4o-mini",
+            "tool_calls": [],
+            "answer": "A",
+            "tokens": {"in": 10, "out": 5},
+        },
         "verifier": {"verdict": "YES", "missing": None},
         "escalation": [],
         "react": None,
@@ -56,7 +81,7 @@ def test_trace_record_round_trip(tmp_path):
 async def test_synthesis_read_formats_prompt_and_returns_answer():
     """_synthesis_read calls tier.reader.generate with SYNTHESIS_PROMPT formatted
     around context+question and returns the trimmed reader output."""
-    from benchmarks.smoke_runner import SYNTHESIS_PROMPT, _synthesis_read  # noqa: F401
+    from benchmarks.smoke_runner import _synthesis_read
 
     captured = {"system": None, "user": None}
     fake_reader = AsyncMock()
@@ -107,12 +132,14 @@ async def test_ingest_chunks_role_filter_user_only_skips_assistant_turns():
     fake_q = {
         "haystack_session_ids": ["s1"],
         "haystack_dates": ["2026/05/06 (Wed)"],
-        "haystack_sessions": [[
-            {"role": "user", "content": "u1"},
-            {"role": "assistant", "content": "a1"},
-            {"role": "user", "content": "u2"},
-            {"role": "assistant", "content": "a2"},
-        ]],
+        "haystack_sessions": [
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+                {"role": "assistant", "content": "a2"},
+            ]
+        ],
     }
 
     n = await _ingest_chunks(fake_memory, fake_q, "alice", role_filter=("user",))
@@ -138,10 +165,12 @@ async def test_ingest_chunks_no_role_filter_keeps_existing_behavior():
     fake_q = {
         "haystack_session_ids": ["s1"],
         "haystack_dates": ["2026/05/06 (Wed)"],
-        "haystack_sessions": [[
-            {"role": "user", "content": "u1"},
-            {"role": "assistant", "content": "a1"},
-        ]],
+        "haystack_sessions": [
+            [
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+            ]
+        ],
     }
 
     n = await _ingest_chunks(fake_memory, fake_q, "alice")  # no role_filter

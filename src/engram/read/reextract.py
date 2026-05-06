@@ -51,7 +51,7 @@ class QueryConditionedReextractor:
     ) -> list[Fact]:
         out: list[Fact] = []
         for sid in candidate_session_ids[: self._max_sessions]:
-            msgs = await store.list_messages_by_session(sid, scope, limit=200)
+            msgs = await store.list_messages(sid, scope, limit=200)
             if not msgs:
                 continue
             convo = "\n".join(f"[{m.role}] {m.content}" for m in msgs)

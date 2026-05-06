@@ -8,13 +8,16 @@ from engram.classify.base import QuestionType
 from engram.read.preference_gate import is_preference_question
 
 
-@pytest.mark.parametrize("query", [
-    "Can you recommend a show or movie for me to watch tonight?",
-    "Any tips on what to look for in a new guitar?",
-    "I was thinking of trying a new coffee creamer recipe. Any recommendations?",
-    "Can you recommend some recent publications I might find interesting?",
-    "What should I cook for dinner?",
-])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Can you recommend a show or movie for me to watch tonight?",
+        "Any tips on what to look for in a new guitar?",
+        "I was thinking of trying a new coffee creamer recipe. Any recommendations?",
+        "Can you recommend some recent publications I might find interesting?",
+        "What should I cook for dinner?",
+    ],
+)
 def test_implicit_preference_questions_detected(query: str):
     qt = QuestionType.SINGLE_SESSION_USER  # what classifier returns for these
     assert is_preference_question(query, qt) is True
@@ -28,18 +31,14 @@ def test_explicit_preference_via_classifier():
 def test_multi_session_takes_priority():
     qt = QuestionType.MULTI_SESSION
     assert (
-        is_preference_question(
-            "Across all my conversations, any tips you remember giving me?", qt
-        )
+        is_preference_question("Across all my conversations, any tips you remember giving me?", qt)
         is False
     )
 
 
 def test_temporal_takes_priority():
     qt = QuestionType.TEMPORAL_REASONING
-    assert (
-        is_preference_question("What did you recommend before March 1?", qt) is False
-    )
+    assert is_preference_question("What did you recommend before March 1?", qt) is False
 
 
 def test_no_preference_signal_returns_false():
@@ -65,8 +64,5 @@ def test_negative_guards():
     # Multi-session classifier label blocks marker words
     qt_multi = QuestionType.MULTI_SESSION
     assert (
-        is_preference_question(
-            "How many recipes did I try across all sessions?", qt_multi
-        )
-        is False
+        is_preference_question("How many recipes did I try across all sessions?", qt_multi) is False
     )

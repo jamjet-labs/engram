@@ -83,9 +83,7 @@ async def test_react_terminates_on_final_answer():
     fake.generate.return_value = MagicMock(
         content='[TOOL_USE]{"name": "final_answer", "input": {"answer": "42"}}[/TOOL_USE]'
     )
-    agent = ReActAgent(
-        tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4
-    )
+    agent = ReActAgent(tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4)
     res = await agent.answer("Q?", scope=Scope(org_id="d", user_id="a"))
     assert res.answer == "42"
     assert res.n_hops == 1
@@ -99,9 +97,7 @@ async def test_react_terminates_at_max_hops():
     fake.generate.return_value = MagicMock(
         content='[TOOL_USE]{"name": "dummy", "input": {"x": "loop"}}[/TOOL_USE]'
     )
-    agent = ReActAgent(
-        tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=2
-    )
+    agent = ReActAgent(tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=2)
     res = await agent.answer("Q?", scope=Scope(org_id="d", user_id="a"))
     assert res.abstained is True
 
@@ -112,9 +108,7 @@ async def test_react_loop_detection_same_args_twice():
     fake.generate.return_value = MagicMock(
         content='[TOOL_USE]{"name": "dummy", "input": {"x": "same"}}[/TOOL_USE]'
     )
-    agent = ReActAgent(
-        tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=10
-    )
+    agent = ReActAgent(tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=10)
     res = await agent.answer("Q?", scope=Scope(org_id="d", user_id="a"))
     # First call goes through; second call with identical args triggers loop detection
     assert res.n_hops <= 2
@@ -126,9 +120,7 @@ async def test_react_accepts_free_text_as_answer():
     """If the LLM emits free text without TOOL_USE, accept it as the final answer."""
     fake = AsyncMock()
     fake.generate.return_value = MagicMock(content="The answer is direct text.")
-    agent = ReActAgent(
-        tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4
-    )
+    agent = ReActAgent(tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4)
     res = await agent.answer("Q?", scope=Scope(org_id="d", user_id="a"))
     assert "direct text" in res.answer
     assert res.n_hops == 1
@@ -137,17 +129,12 @@ async def test_react_accepts_free_text_as_answer():
 @pytest.mark.asyncio
 async def test_react_handles_unknown_tool_gracefully():
     fake = AsyncMock()
-    final_call = (
-        '[TOOL_USE]{"name": "final_answer", '
-        '"input": {"answer": "recovered"}}[/TOOL_USE]'
-    )
+    final_call = '[TOOL_USE]{"name": "final_answer", "input": {"answer": "recovered"}}[/TOOL_USE]'
     fake.generate.side_effect = [
         MagicMock(content='[TOOL_USE]{"name": "nonexistent", "input": {}}[/TOOL_USE]'),
         MagicMock(content=final_call),
     ]
-    agent = ReActAgent(
-        tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4
-    )
+    agent = ReActAgent(tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4)
     res = await agent.answer("Q?", scope=Scope(org_id="d", user_id="a"))
     assert "recovered" in res.answer
 
@@ -155,11 +142,7 @@ async def test_react_handles_unknown_tool_gracefully():
 @pytest.mark.asyncio
 async def test_react_handles_malformed_tool_call():
     fake = AsyncMock()
-    fake.generate.return_value = MagicMock(
-        content='[TOOL_USE]{"bad json}[/TOOL_USE]'
-    )
-    agent = ReActAgent(
-        tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4
-    )
+    fake.generate.return_value = MagicMock(content='[TOOL_USE]{"bad json}[/TOOL_USE]')
+    agent = ReActAgent(tier=_build_tier_with_mock(fake), tools=_build_registry(), max_hops=4)
     res = await agent.answer("Q?", scope=Scope(org_id="d", user_id="a"))
     assert res.abstained is True

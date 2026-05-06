@@ -111,18 +111,27 @@ async def test_solve_count_before_anchor(monkeypatch):
     scope = Scope(org_id="default", user_id="alice")
     async with await Engram.open(":memory:") as memory:
         await _seed_events(
-            memory, scope, verb="run", object_canonical="marathon",
+            memory,
+            scope,
+            verb="run",
+            object_canonical="marathon",
             dates=[datetime(2023, m, 1, tzinfo=UTC) for m in (1, 3, 5, 7)],
         )
         anchor_dt = datetime(2023, 8, 1, tzinfo=UTC)
         await _seed_events(
-            memory, scope, verb="participate", object_canonical="charity gala",
+            memory,
+            scope,
+            verb="participate",
+            object_canonical="charity gala",
             dates=[anchor_dt],
         )
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
         q = TemporalQuery(
-            op="count", verb="run", object="marathon",
-            anchor_event="charity gala", bound="before",
+            op="count",
+            verb="run",
+            object="marathon",
+            anchor_event="charity gala",
+            bound="before",
         )
         result = await s.solve(q, scope)
         assert result is not None
@@ -137,14 +146,20 @@ async def test_solve_rejects_anchor_with_no_word_overlap(monkeypatch):
     scope = Scope(org_id="default", user_id="alice")
     async with await Engram.open(":memory:") as memory:
         await _seed_events(
-            memory, scope, verb="run", object_canonical="marathon",
+            memory,
+            scope,
+            verb="run",
+            object_canonical="marathon",
             dates=[datetime(2023, 1, 1, tzinfo=UTC)],
         )
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
         # Anchor name has nothing in common with seeded events; sanitiser would
         # drop the dashes entirely, so the store would otherwise return marathons.
         q = TemporalQuery(
-            op="count", verb="run", anchor_event="--", bound="before",
+            op="count",
+            verb="run",
+            anchor_event="--",
+            bound="before",
         )
         assert await s.solve(q, scope) is None
 
@@ -156,7 +171,10 @@ async def test_solve_returns_none_for_unknown_anchor(monkeypatch):
     async with await Engram.open(":memory:") as memory:
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
         q = TemporalQuery(
-            op="count", verb="run", anchor_event="nonexistent-event", bound="before",
+            op="count",
+            verb="run",
+            anchor_event="nonexistent-event",
+            bound="before",
         )
         assert await s.solve(q, scope) is None
 
@@ -167,18 +185,27 @@ async def test_solve_count_after_anchor(monkeypatch):
     scope = Scope(org_id="default", user_id="alice")
     async with await Engram.open(":memory:") as memory:
         await _seed_events(
-            memory, scope, verb="run", object_canonical="marathon",
+            memory,
+            scope,
+            verb="run",
+            object_canonical="marathon",
             dates=[datetime(2023, m, 1, tzinfo=UTC) for m in (1, 3, 9, 11)],
         )
         anchor_dt = datetime(2023, 5, 1, tzinfo=UTC)
         await _seed_events(
-            memory, scope, verb="run", object_canonical="anchor-event",
+            memory,
+            scope,
+            verb="run",
+            object_canonical="anchor-event",
             dates=[anchor_dt],
         )
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
         q = TemporalQuery(
-            op="count", verb="run", object="marathon",
-            anchor_event="anchor-event", bound="after",
+            op="count",
+            verb="run",
+            object="marathon",
+            anchor_event="anchor-event",
+            bound="after",
         )
         result = await s.solve(q, scope)
         assert result is not None
@@ -204,7 +231,10 @@ async def test_solve_count_returns_none_without_verb_or_object(monkeypatch):
     async with await Engram.open(":memory:") as memory:
         # Need at least one event in the store so the empty-store guard passes.
         await _seed_events(
-            memory, scope, verb="x", object_canonical="y",
+            memory,
+            scope,
+            verb="x",
+            object_canonical="y",
             dates=[datetime(2023, 1, 1, tzinfo=UTC)],
         )
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
@@ -233,7 +263,10 @@ async def test_solve_returns_none_when_count_is_zero(monkeypatch):
     async with await Engram.open(":memory:") as memory:
         # Seed an unrelated event so the empty-store guard passes.
         await _seed_events(
-            memory, scope, verb="cook", object_canonical="dinner",
+            memory,
+            scope,
+            verb="cook",
+            object_canonical="dinner",
             dates=[datetime(2023, 1, 1, tzinfo=UTC)],
         )
         s = TemporalSolver(store=memory._store, llm=AsyncMock())
@@ -304,6 +337,8 @@ async def test_reader_solver_failure_does_not_break_read():
     fake_solver.parse = AsyncMock(side_effect=RuntimeError("boom"))
     reader = Reader(fake_llm, verifier=False, config=ReaderConfig(solver=fake_solver))
     res = await reader.read(
-        question="?", context="ctx", scope=Scope(org_id="d", user_id="a"),
+        question="?",
+        context="ctx",
+        scope=Scope(org_id="d", user_id="a"),
     )
     assert res.answer == "fallback"

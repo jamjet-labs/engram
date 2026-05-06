@@ -131,9 +131,7 @@ async def test_search_facts_tool(monkeypatch):
     async with await Engram.open(":memory:") as memory:
         await memory.record(text="I love espresso", user_id="alice")
         scope = Scope(org_id="default", user_id="alice")
-        res = await SearchFactsTool(engram=memory, scope=scope)(
-            query="coffee preference", top_k=3
-        )
+        res = await SearchFactsTool(engram=memory, scope=scope)(query="coffee preference", top_k=3)
         assert "espresso" in res.content.lower()
 
 
@@ -178,12 +176,10 @@ async def test_search_events_tool(monkeypatch):
 async def test_solve_temporal_tool_dispatches_to_solver():
     fake_solver = AsyncMock(spec=TemporalSolver)
     fake_solver.parse = AsyncMock(return_value=TemporalQuery(op="count"))
-    fake_solver.solve = AsyncMock(
-        return_value=SolverResult(answer=4, confidence=0.95)
+    fake_solver.solve = AsyncMock(return_value=SolverResult(answer=4, confidence=0.95))
+    res = await SolveTemporalTool(solver=fake_solver, scope=Scope(org_id="d", user_id="a"))(
+        query="How many marathons before Cure?"
     )
-    res = await SolveTemporalTool(
-        solver=fake_solver, scope=Scope(org_id="d", user_id="a")
-    )(query="How many marathons before Cure?")
     assert "4" in res.content
 
 
@@ -191,9 +187,9 @@ async def test_solve_temporal_tool_dispatches_to_solver():
 async def test_solve_temporal_tool_unparseable_returns_message():
     fake_solver = AsyncMock(spec=TemporalSolver)
     fake_solver.parse = AsyncMock(return_value=None)
-    res = await SolveTemporalTool(
-        solver=fake_solver, scope=Scope(org_id="d", user_id="a")
-    )(query="What's my favourite colour?")
+    res = await SolveTemporalTool(solver=fake_solver, scope=Scope(org_id="d", user_id="a"))(
+        query="What's my favourite colour?"
+    )
     assert "could not solve" in res.content.lower()
 
 
