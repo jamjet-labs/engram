@@ -12,7 +12,12 @@ from pydantic import BaseModel, Field
 
 from engram.errors import ExtractionError
 from engram.llm.base import LLMClient, LLMMessage
-from engram.read.prompts import READER_SYSTEM_PROMPT, TODAY_CLAUSE, VERIFIER_SYSTEM_PROMPT
+from engram.read.prompts import (
+    READER_SYSTEM_PROMPT,
+    SYNTHESIS_PROMPT,
+    TODAY_CLAUSE,
+    VERIFIER_SYSTEM_PROMPT,
+)
 from engram.scope import Scope
 from engram.tools.base import ToolRegistry, ToolResult
 
@@ -35,7 +40,7 @@ class ReadResult(BaseModel):
     missing: str | None = None
     abstained: bool = False
     decomposed_subqueries: list[str] = Field(default_factory=list)
-    solved_by: Literal["solver", "reader"] | None = None
+    solved_by: Literal["solver", "reader", "synthesis"] | None = None
 
 
 class ReaderConfig(BaseModel):
@@ -82,10 +87,12 @@ class Reader:
         llm: LLMClient,
         verifier: bool = True,
         config: ReaderConfig | None = None,
+        mode: Literal["recall", "synthesis"] = "recall",
     ) -> None:
         self._llm = llm
         self._verifier_enabled = verifier
         self._config = config or ReaderConfig()
+        self._mode = mode
         # Escalation rung (a) — wired by attach_reextractor()
         self._reextractor: Any | None = None
         self._reextract_store: Any | None = None
@@ -140,7 +147,15 @@ class Reader:
 
         ``scope`` is required for the programmatic solver pre-pass; if omitted,
         the solver is skipped even when configured.
+
+        When ``mode="synthesis"`` was passed to the constructor, this short-circuits
+        to a synthesis-only branch (SYNTHESIS_PROMPT + no verifier + no tool loop +
+        no escalation). Use for preference/recommendation questions where the
+        judge rewards grounded synthesis over literal fact-recall.
         """
+        if self._mode == "synthesis":
+            return await self._read_synthesis(question, context)
+
         # 1. Solver pre-pass (item 3 / N1)
         if self._config.solver is not None and scope is not None:
             try:
@@ -353,6 +368,36 @@ class Reader:
             missing=missing,
             abstained=abstained,
             solved_by="reader",
+        )
+
+    async def _read_synthesis(self, question: str, context: str) -> ReadResult:
+        """Synthesis-mode branch — direct LLM call, skips verifier/tool/escalation.
+
+        Bypasses the entire fact-recall pipeline. Calibrated for preference/
+        recommendation questions where the answer is a synthesis grounded in
+        stored user statements, not a literal fact retrieval.
+        """
+        sys_prompt = SYNTHESIS_PROMPT.format(context=context, question=question)
+        try:
+            resp = await self._llm.generate(
+                [
+                    LLMMessage(role="system", content=sys_prompt),
+                    LLMMessage(role="user", content=question),
+                ],
+                temperature=0.0,
+                max_tokens=400,
+            )
+        except ExtractionError:
+            return ReadResult(
+                answer="I don't know",
+                abstained=True,
+                solved_by="synthesis",
+            )
+        answer = resp.content.strip()
+        return ReadResult(
+            answer=answer,
+            abstained=answer.lower().startswith("i don't know"),
+            solved_by="synthesis",
         )
 
     async def _verify(self, question: str, context: str) -> tuple[Verdict, str | None]:
