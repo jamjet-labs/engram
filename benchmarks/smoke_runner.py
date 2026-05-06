@@ -163,7 +163,18 @@ def _parse_haystack_date(raw: str) -> datetime:
     return datetime.strptime(raw.split(" (")[0], "%Y/%m/%d").replace(tzinfo=UTC)
 
 
-async def _ingest_chunks(memory: Any, q: dict[str, Any], user_id: str) -> int:
+async def _ingest_chunks(
+    memory: Any,
+    q: dict[str, Any],
+    user_id: str,
+    role_filter: tuple[str, ...] | None = None,
+) -> int:
+    """Ingest haystack chunks into memory.
+
+    When ``role_filter`` is provided, only turns whose role is in the filter
+    are ingested. ``None`` (default) ingests everything — backward-compatible
+    with the previous signature.
+    """
     n = 0
     for sid, sdate_raw, session in zip(
         q["haystack_session_ids"],
@@ -173,6 +184,8 @@ async def _ingest_chunks(memory: Any, q: dict[str, Any], user_id: str) -> int:
     ):
         sdate = _parse_haystack_date(sdate_raw)
         for turn in session:
+            if role_filter is not None and turn.get("role") not in role_filter:
+                continue
             await memory.record(
                 text=turn["content"],
                 user_id=user_id,
