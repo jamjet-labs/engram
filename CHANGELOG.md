@@ -1,8 +1,12 @@
 # Changelog
 
-All notable changes to Engram v2.0 are documented here.
+All notable changes to Engram v2.0 (the Python rewrite) are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and Engram adheres to [Semantic Versioning](https://semver.org/) from v0.1.0 onward.
 
-## [Unreleased] (v0.1.0a, 2026-04-30)
+## [Unreleased]
+
+(none)
+
+## [0.1.0] - 2026-05-06
 
 ### Added
 
@@ -65,5 +69,47 @@ All notable changes to Engram v2.0 are documented here.
 - `source_span` round-trip through SQLite verified
 - Determinism smoke test: same seed + same insertion order → same top-K
 
+#### Tier 2-3 ablation programme (April 2026)
+- 8 retrieval/reading techniques implemented and ablated independently on LongMemEval-S 100q
+- 5 shipped behind flags default OFF (`--solver`, `--reextract`, `--self-consistency`, `--react`, `--ft-cross-encoder`)
+- 3 shipped default ON (model tier, `--decompose`, `--tools`)
+- Net: 64% → 68% on LongMemEval-S 100q
+- Detailed write-up in commit history (PR #1)
+
+#### Preference uplift v1 (May 2026, rolled back)
+- `feat/preference-uplift` (tagged `preference-uplift-attempt-1`) shipped a `PreferenceExpander` + `SearchPreferencesTool` + reader-prompt preamble
+- n=100 result: 29% → 29% (no change). Rolled back, kept for reference
+- Diagnostic: verifier short-circuited the new path before tools fired
+- Lesson: verifier-gated readers are hostile to "retrieve-more" rungs (saved to project memory)
+
+#### Preference uplift v2 (May 2026, shipped — PR #2)
+- `is_preference_question` permissive predicate at `engram.read.preference_gate`
+- Smoke-runner-only synthesis path (recommendation-grounded reader prompt, user-only ingest, verifier off)
+- n=100 result: 29% → 65% on `single-session-preference`; 64% → 71% overall; zero per-category regressions
+- The architectural insight: LongMemEval preference questions are recommendation tasks, not fact-recall tasks — different judge criteria need a different read path
+
+#### CI green (PR #3)
+- mypy `--strict` now passes (was 2 errors in `read/reader.py` and `read/reextract.py`)
+- ruff check + ruff format both clean across `src/engram` and `tests/`
+- Latent runtime bug fixed: `read/reextract.py` was calling `list_messages_by_session` which didn't exist on the store; renamed to `list_messages` (the actual method)
+
+#### Per-category routing API (PR #4 — v0.1.0 GA)
+- `Engram.record(role=...)` propagates role to `metadata["role"]`
+- `Engram.context(role_filter=...)` filters recall by stored role
+- `Reader(mode="recall" | "synthesis")` coupled package: synthesis mode uses `SYNTHESIS_PROMPT`, skips verifier, skips tool loop, skips escalation
+- `SYNTHESIS_PROMPT` constant in `src/engram/read/prompts.py`
+- Public re-exports in `engram/__init__.py` (22 symbols): `Engram`, `Scope`, `Fact`, `ChatMessage`, `Reader`, `ReaderConfig`, `RetrievalConfig`, `QuestionType`, `RuleBasedClassifier`, `Polarity`, `MemoryTier`, `is_preference_question`, `Tool`, `ToolRegistry`, `ToolResult`, `LLMClient`, `LLMMessage`, `LLMResponse`, `EngramError`, `ExtractionError`, `NotFoundError`, `StoreError`
+- Smoke runner refactored to use the new public APIs
+- Quickstart docs at `docs/quickstart.md`
+- New example `examples/05_preference_synthesis.py`
+- `CONTRIBUTING.md`, `SECURITY.md`
+
+### CI
+- Coverage gate (`--cov-fail-under=79`)
+- Downstream `py.typed` smoke-check job — builds wheel, installs in fresh venv, runs `mypy --strict` on a stub importing all 22 public re-exports
+
 ### Tests
-164 tests. mypy `--strict` clean. ruff + ruff format clean. CI green on Python 3.12 + 3.13.
+~280 tests (units + integration). mypy `--strict` clean. ruff + ruff format clean. CI green on Python 3.12 + 3.13.
+
+[unreleased]: https://github.com/jamjet-labs/engram/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jamjet-labs/engram/releases/tag/v0.1.0

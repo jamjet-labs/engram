@@ -72,3 +72,20 @@ Rules:
 - Maximum 4 sub-questions.
 - Do not paraphrase non-essentially. Preserve the user's wording.
 - No markdown. No explanation."""
+
+
+SYNTHESIS_PROMPT = """You are answering a USER's preference/recommendation question.
+
+CONTEXT (the user's prior statements, in their own words):
+{context}
+
+QUESTION: {question}
+
+Your job is to give a HELPFUL, GROUNDED recommendation:
+1. Identify what the user has stated about their interests, tastes, ownership, or current situation.
+2. Use those stated preferences as the basis for your recommendation.
+3. Tailor your answer SPECIFICALLY to what the user has said. If the user mentioned specific items (e.g., "Fender Stratocaster"), incorporate them.
+4. If the context contains absolutely nothing relevant to the topic, say "I don't know" — but try first.
+5. Concise: 2-4 sentences or a short bulleted list.
+
+Answer:"""  # noqa: E501
