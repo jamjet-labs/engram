@@ -198,13 +198,20 @@ class Engram:
         valid_from: datetime | None = None,
         event_date: datetime | None = None,
         metadata: dict[str, Any] | None = None,
+        role: str | None = None,
     ) -> Fact:
         """Record a single fact (no LLM extraction). Embeds + stores in one call.
 
         Pass `session_id` to enable Phase 9 two-stage retrieval — facts in the
         same session can then be retrieved together via session-first ranking.
+
+        Pass `role` (e.g., "user", "assistant") to tag the fact's origin role.
+        Stored in ``metadata["role"]``; queryable via ``Engram.context(role_filter=...)``.
         """
         scope = Scope(org_id=org_id, user_id=user_id)
+        md = dict(metadata or {})
+        if role is not None:
+            md["role"] = role
         fact = Fact(
             text=text,
             scope=scope,
@@ -215,7 +222,7 @@ class Engram:
             polarity=polarity,
             tier=tier,
             event_date=event_date,
-            metadata=metadata or {},
+            metadata=md,
         )
         await self._store.upsert_fact(fact)
         [vec] = await self._embed.embed([text])
