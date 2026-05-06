@@ -2,6 +2,10 @@
 
 > Durable memory layer for AI agents. Temporal knowledge graph, semantic search, and MCP-native tools.
 
+[![CI](https://github.com/jamjet-labs/engram/actions/workflows/ci.yml/badge.svg)](https://github.com/jamjet-labs/engram/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://www.python.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 🚧 **v0.1.0a — Phase 1 of the Python rewrite is shipping.** Repo currently private; goes public at v0.1.0 GA. See `CHANGELOG.md` for what landed when.
 
 The Rust v0.5.x implementation is in maintenance mode at [jamjet-labs/jamjet](https://github.com/jamjet-labs/jamjet/tree/main/runtime/engram).
@@ -21,7 +25,25 @@ The Rust v0.5.x implementation is in maintenance mode at [jamjet-labs/jamjet](ht
 - ✅ Phase 12 — Reading layer (verifier-backed abstention, query decomposer, confidence-aware context)
 - ✅ Phase 13 — Active fact-versioning (`supersede` API + retrieval filter) + determinism
 
-164 tests, mypy `--strict`, ruff clean.
+309 tests, mypy `--strict`, ruff clean.
+
+**Getting started:** see [`docs/quickstart.md`](docs/quickstart.md).
+
+## Running in production
+
+Engram is async-first SQLite + hnswlib by default. For multi-tenant deployments, a few practical notes:
+
+**Scope isolation.** Every API call takes `user_id` + `org_id` (combined into a `Scope`). Facts, vectors, and chat-message storage are partitioned by scope at the SQL and HNSW levels — no cross-tenant leakage by construction. There is no "admin" scope that can read all data.
+
+**Embedding provider tradeoffs.** `OllamaEmbedding` runs entirely local (private, free, slower) — recommended for sensitive data or offline usage. `OpenAIEmbedding` is faster and more accurate but sends every recorded text to OpenAI. `SyntheticEmbedding` is for tests only.
+
+**LLM API keys.** Engram never stores API keys. They're read from the environment by the `OpenAILLM` / `AnthropicLLM` / `OllamaLLM` clients. Use a secrets manager in production.
+
+**Rate limits.** The default extraction pipeline calls one LLM per session ingested. Bulk imports of large chat histories should chunk + rate-limit to fit your provider's tier. The `OpenAILLM` and `AnthropicLLM` clients use the official SDKs which handle retries with exponential backoff.
+
+**Determinism.** `HnswVectorStore` defaults to `random_seed=42` for reproducible benchmark runs. Set `PYTHONHASHSEED=42` and use the same insertion order for byte-for-byte reproducibility.
+
+**Per-category routing (v0.1.0).** For preference/recommendation questions, route to `Reader(mode="synthesis")` with `Engram.context(role_filter=("user",))`. Other categories take the default fact-recall reader. See [docs/quickstart.md](docs/quickstart.md#per-category-routing-preferences) for the canonical pattern.
 
 ## Status
 
