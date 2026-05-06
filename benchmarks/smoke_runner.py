@@ -71,6 +71,9 @@ def parse_args() -> SmokeFlags:
 class TraceRecord(TypedDict, total=False):
     qid: str
     category: str
+    predicted_category: str
+    is_preference: bool
+    synthesis_used: bool
     solver_fired: bool
     decomposer: dict[str, Any]
     recall: list[dict[str, Any]]
@@ -295,6 +298,7 @@ async def main() -> None:
     from engram.embedding.ollama import OllamaEmbedding
     from engram.llm.openai import OpenAILLM
     from engram.read.decomposer import should_decompose
+    from engram.read.preference_gate import is_preference_question
     from engram.read.reader import Reader, ReaderConfig
     from engram.retrieve.base import RetrievalConfig
     from engram.retrieve.rerank import CrossEncoderReranker
@@ -342,6 +346,11 @@ async def main() -> None:
     for i, q in enumerate(selected, 1):
         print(f"\n=== [{i}/{len(selected)}] {q['question_type']} ===")
         print(f"Q: {q['question'][:120]}")
+        # Pre-classify so we can branch the synthesis path.
+        predicted_qt = await classifier.classify(q["question"])
+        true_qt = q["question_type"]
+        is_pref = is_preference_question(q["question"], predicted_qt)
+
         async with await Engram.open(
             ":memory:",
             embedder=embedder,
@@ -349,99 +358,148 @@ async def main() -> None:
             reranker=reranker,
             retrieval_config=cfg,
         ) as memory:
-            n_chunks = await _ingest_chunks(memory, q, user_id="alice")
-            # When --solver or --react is enabled, also populate the SVO event
-            # calendar so the temporal solver / ReAct agent's search_events
-            # tool has data to query against.
-            if flags.solver or flags.react:
-                n_events = await _ingest_events(memory, q, user_id="alice")
-            else:
-                n_events = 0
-            ctx = await memory.context(
-                query=q["question"],
-                user_id="alice",
-                classifier=classifier,
-                decompose=flags.decompose,
-            )
-            today = (
-                _parse_haystack_date(q["question_date"]) if q.get("question_date") else None
-            )
-            solver = (
-                TemporalSolver(store=memory._store, llm=tier.utility)
-                if flags.solver
-                else None
-            )
-            # When --react is set, we always need a tool registry (ReAct uses
-            # it for its tool calls). If the user didn't pass --tools, build one
-            # for the agent privately. The reader itself only sees the registry
-            # when --tools is explicitly set.
-            tools_reg = _build_tools(memory, solver, flags) if flags.tools else None
-            react_tools_reg = (
-                tools_reg
-                if tools_reg is not None
-                else (_build_tools(memory, solver, flags) if flags.react else None)
-            )
-            # The ReAct agent needs a final_answer tool too, regardless of mode.
-            if react_tools_reg is not None and "final_answer" not in (
-                react_tools_reg.names() if hasattr(react_tools_reg, "names") else []
-            ):
-                _register_final_answer_tool(react_tools_reg)
-
-            reader = Reader(
-                tier.reader,
-                config=ReaderConfig(
-                    solver=solver,
-                    tools=tools_reg,
-                    enable_reextract=flags.reextract,
-                    self_consistency_on_partial=3 if flags.self_consistency else 1,
-                ),
-            )
-            reader.set_category(q["question_type"])
-            if flags.react and react_tools_reg is not None:
-                from engram.agent.react import ReActAgent
-
-                react = ReActAgent(tier=tier, tools=react_tools_reg, max_hops=4)
-                reader.attach_react(react)
-            # Escalation rung (a) — re-extract on PARTIAL/NO. Pre-compute the
-            # candidate-session list so the sync provider in attach_reextractor
-            # can return it without an extra recall round trip.
-            if flags.reextract:
-                from engram.read.reextract import QueryConditionedReextractor
-
-                hits = await memory.recall(q["question"], user_id="alice", top_k=30)
-                cand_sids: list[str] = []
-                seen: set[str] = set()
-                for sf in hits:
-                    sid = sf.fact.session_id
-                    if sid and sid not in seen:
-                        cand_sids.append(sid)
-                        seen.add(sid)
-                rx = QueryConditionedReextractor(llm=tier.utility)
-                reader.attach_reextractor(
-                    reextractor=rx,
-                    store=memory._store,
-                    candidate_sessions_provider=lambda _q, _s=cand_sids: _s,
+            if is_pref:
+                # ── Synthesis path ─────────────────────────────────────────
+                # Filter to user turns only — embedding similarity ranks
+                # info-dense assistant explanations above terse user
+                # preferences if both are ingested.
+                n_chunks = await _ingest_chunks(
+                    memory, q, user_id="alice", role_filter=("user",)
                 )
-            res = await reader.read(
-                question=q["question"],
-                context=ctx,
-                today=today,
-                scope=Scope(org_id="default", user_id="alice"),
-            )
+                n_events = 0
+                ctx = await memory.context(
+                    query=q["question"], user_id="alice", token_budget=3500
+                )
+                synthesis_used = True
+                synth_answer = await _synthesis_read(tier, ctx, q["question"])
+                synth_abstained = synth_answer.lower().startswith("i don't know")
+                # Normalize to ReadResult-shaped locals for trace consistency
+                res_answer = synth_answer
+                res_verdict = None
+                res_missing = None
+                res_abstained = synth_abstained
+                res_solved_by = "synthesis"
+                today = (
+                    _parse_haystack_date(q["question_date"])
+                    if q.get("question_date")
+                    else None
+                )
+            else:
+                # ── Existing path (unchanged) ──────────────────────────────
+                synthesis_used = False
+                n_chunks = await _ingest_chunks(memory, q, user_id="alice")
+                # When --solver or --react is enabled, also populate the SVO event
+                # calendar so the temporal solver / ReAct agent's search_events
+                # tool has data to query against.
+                if flags.solver or flags.react:
+                    n_events = await _ingest_events(memory, q, user_id="alice")
+                else:
+                    n_events = 0
+                ctx = await memory.context(
+                    query=q["question"],
+                    user_id="alice",
+                    classifier=classifier,
+                    decompose=flags.decompose,
+                )
+                today = (
+                    _parse_haystack_date(q["question_date"])
+                    if q.get("question_date")
+                    else None
+                )
+                solver = (
+                    TemporalSolver(store=memory._store, llm=tier.utility)
+                    if flags.solver
+                    else None
+                )
+                # When --react is set, we always need a tool registry (ReAct uses
+                # it for its tool calls). If the user didn't pass --tools, build one
+                # for the agent privately. The reader itself only sees the registry
+                # when --tools is explicitly set.
+                tools_reg = (
+                    _build_tools(memory, solver, flags) if flags.tools else None
+                )
+                react_tools_reg = (
+                    tools_reg
+                    if tools_reg is not None
+                    else (_build_tools(memory, solver, flags) if flags.react else None)
+                )
+                # The ReAct agent needs a final_answer tool too, regardless of mode.
+                if react_tools_reg is not None and "final_answer" not in (
+                    react_tools_reg.names() if hasattr(react_tools_reg, "names") else []
+                ):
+                    _register_final_answer_tool(react_tools_reg)
+
+                reader = Reader(
+                    tier.reader,
+                    config=ReaderConfig(
+                        solver=solver,
+                        tools=tools_reg,
+                        enable_reextract=flags.reextract,
+                        self_consistency_on_partial=3 if flags.self_consistency else 1,
+                    ),
+                )
+                reader.set_category(q["question_type"])
+                if flags.react and react_tools_reg is not None:
+                    from engram.agent.react import ReActAgent
+
+                    react = ReActAgent(tier=tier, tools=react_tools_reg, max_hops=4)
+                    reader.attach_react(react)
+                # Escalation rung (a) — re-extract on PARTIAL/NO. Pre-compute the
+                # candidate-session list so the sync provider in attach_reextractor
+                # can return it without an extra recall round trip.
+                if flags.reextract:
+                    from engram.read.reextract import QueryConditionedReextractor
+
+                    hits = await memory.recall(
+                        q["question"], user_id="alice", top_k=30
+                    )
+                    cand_sids: list[str] = []
+                    seen: set[str] = set()
+                    for sf in hits:
+                        sid = sf.fact.session_id
+                        if sid and sid not in seen:
+                            cand_sids.append(sid)
+                            seen.add(sid)
+                    rx = QueryConditionedReextractor(llm=tier.utility)
+                    reader.attach_reextractor(
+                        reextractor=rx,
+                        store=memory._store,
+                        candidate_sessions_provider=lambda _q, _s=cand_sids: _s,
+                    )
+                res = await reader.read(
+                    question=q["question"],
+                    context=ctx,
+                    today=today,
+                    scope=Scope(org_id="default", user_id="alice"),
+                )
+                res_answer = res.answer
+                res_verdict = res.verdict
+                res_missing = res.missing
+                res_abstained = res.abstained
+                res_solved_by = res.solved_by
+
             judged = await judge_one(
                 question=q["question"],
                 expected=str(q["answer"]),
-                predicted=res.answer,
-                category=q["question_type"],
+                predicted=res_answer,
+                category=true_qt,
                 llm=judge_llm,
             )
+
         n_correct += int(judged.correct)
-        by_cat.setdefault(q["question_type"], []).append(judged.correct)
-        decomposer_fired = flags.decompose and should_decompose(q["question"])
+        by_cat.setdefault(true_qt, []).append(judged.correct)
+        decomposer_fired = (
+            (not is_pref)            # synthesis path bypasses the decomposer entirely
+            and flags.decompose
+            and should_decompose(q["question"])
+        )
         rec: TraceRecord = {
             "qid": q["question_id"],
-            "category": q["question_type"],
-            "solver_fired": res.solved_by == "solver",
+            "category": true_qt,
+            "predicted_category": predicted_qt.value,
+            "is_preference": is_pref,
+            "synthesis_used": synthesis_used,
+            "solver_fired": res_solved_by == "solver",
             "decomposer": {"fired": decomposer_fired, "subqueries": [q["question"]]},
             "recall": [
                 {
@@ -455,22 +513,22 @@ async def main() -> None:
             "reader": {
                 "model": flags.reader,
                 "tool_calls": [],
-                "answer": res.answer,
+                "answer": res_answer,
                 "tokens": {"in": 0, "out": 0},
             },
-            "verifier": {"verdict": res.verdict, "missing": res.missing},
+            "verifier": {"verdict": res_verdict, "missing": res_missing},
             "escalation": [],
             "react": None,
             "final": {
-                "answer": res.answer,
-                "abstained": res.abstained,
+                "answer": res_answer,
+                "abstained": res_abstained,
                 "judge_verdict": "correct" if judged.correct else "incorrect",
                 "cost_usd": 0.0,
             },
         }
         write_trace_line(trace_path, rec)
         print(f"Expected: {q['answer']}")
-        print(f"Predicted: {res.answer}")
+        print(f"Predicted: {res_answer}")
         print(f"judged={judged.correct}")
 
     pct = 100 * n_correct / max(1, len(selected))
