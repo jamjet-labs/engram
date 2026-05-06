@@ -146,24 +146,25 @@ Engram's reference benchmark is [LongMemEval-S](https://github.com/xiaowu0162/Lo
 
 ### Latest result
 
-**68.0%** on a 100-question stratified subset, configuration:
+**71.0%** on a 100-question stratified subset, configuration:
 
 - Reader: `gpt-4o-mini` (default)
 - Embedder: Ollama `nomic-embed-text` (768-dim, local)
 - Reranker: `cross-encoder/ms-marco-MiniLM-L-6-v2` (base, no fine-tune — see ablation notes)
 - Pipeline flags: `--decompose --tools`
+- Preference-aware routing: live in the benchmark harness (smoke runner branches preference-classified questions onto a recommendation-grounded synthesis path; library API follow-up tracked below)
 
 | category | score | n |
 |---|---|---|
 | `single-session-assistant` | 88% | 17 |
-| `knowledge-update` | 76% | 17 |
 | `temporal-reasoning` | 75% | 16 |
+| `knowledge-update` | 71% | 17 |
 | `single-session-user` | 69% | 16 |
-| `multi-session` | 65% | 17 |
-| `single-session-preference` | 35% | 17 |
-| **overall** | **68%** | **100** |
+| `single-session-preference` | 65% | 17 |
+| `multi-session` | 59% | 17 |
+| **overall** | **71%** | **100** |
 
-This is **+4pp over the bare-pipeline baseline** (no `--decompose`, no `--tools`). For comparison, [AgentMemory](https://arxiv.org/abs/2501.00309) reports 96.2% on this benchmark — Engram is currently well behind that frontier; documented follow-up work below.
+This is **+3pp over the previous best (68%)** that shipped with the Tier 2-3 ablation programme — the lift comes from `single-session-preference` jumping 35% → 65% via the preference-aware routing described below. For comparison, [AgentMemory](https://arxiv.org/abs/2501.00309) reports 96.2% on this benchmark — Engram is currently well behind that frontier; documented follow-up work below.
 
 ### Reproduce
 
@@ -177,7 +178,9 @@ The runner writes a per-question JSONL trace + a markdown report under `benchmar
 
 ### What we tried, what worked, what didn't
 
-Full programme write-up: [`docs/superpowers/specs/2026-04-30-engram-v2-tier-2-3-design.md`](docs/superpowers/specs/2026-04-30-engram-v2-tier-2-3-design.md). 8 items implemented and ablated independently:
+Two ablation programmes have shipped to date.
+
+**Tier 2-3 (April 2026):** 8 items implemented and ablated independently. Headline result: 64% → 68% (+4pp over the bare pipeline baseline).
 
 | item | what it does | shipped | net |
 |---|---|---|---|
@@ -190,10 +193,27 @@ Full programme write-up: [`docs/superpowers/specs/2026-04-30-engram-v2-tier-2-3-
 | ReAct retrieval agent (`--react`) | multi-hop tool-using agent fallback | flag, default OFF | overwrites borderline-correct answers with worse ones |
 | Fine-tuned cross-encoder (`--ft-cross-encoder`) | LongMemEval-trained MiniLM | flag, default OFF | +3 nDCG@10 but -7pp downstream — labels misaligned with multi-session task structure |
 
-The negative results are as informative as the positive ones — the spec doc explains the diagnosis for each.
+**Preference uplift v2 (May 2026):** category-aware reading, after attempt-1 (a `PreferenceExpander` + tool + preamble approach) was rolled back as a null result. Headline: **single-session-preference 29% → 65% (+36pp); overall 64% → 71% (+7pp)**, zero per-category regressions.
+
+| item | what it does | shipped | net |
+|---|---|---|---|
+| `is_preference_question` predicate | catches conversational advice queries the rule classifier mis-tags ("any tips on guitars?", "recommend a movie") | ✓ live | 76% recall, 87% precision on 100q stratified |
+| User-only ingest for preference questions | filters out assistant turns at ingest so user's terse preference statements aren't buried under info-dense assistant explanations | ✓ live (smoke runner) | rank-1 retrieval of user preferences |
+| Synthesis-mode reader prompt | recommendation-grounded prompt; bypasses verifier + tool loop + escalation rungs | ✓ live (smoke runner) | 77% solve rate on activated questions (10/13) |
+
+Diagnosis from attempt-1's failure: the verifier short-circuits the new path before tools fire (NO verdict on sparse context), AND topic-shaped subquery expansion ranks assistant explanations above terse user preferences (the user's relevant chunk dropped from rank 2 → outside top 5). The verifier-gated `Reader` is calibrated for fact-recall; preference questions are recommendation tasks — wrong tool for the job. Synthesis mode replaces the read path entirely for that one category, gated on the predicate.
+
+The negative results across both programmes are as informative as the positive ones.
 
 ### Documented follow-up work
 
+**Promote v2 from benchmark to library:** the synthesis path currently lives only inside `benchmarks/smoke_runner.py`. Library users importing `engram` get the existing verifier-gated reader. Next plan: add `Engram.context(role_filter=...)` parameter, `Reader(mode="recall" | "synthesis")`, and a `SYNTHESIS_PROMPT` constant in `src/engram/read/prompts.py` so callers can opt in to per-category routing.
+
+**Tighten the preference predicate:** current 76% recall caps preference category at ~13/17 = 76% even with perfect synthesis solving. The 4 missed shapes are decision-help questions ("what do you think?", "would you recommend X?") that don't match the current regex. Lifting recall to ~95% with 77% solve rate would push the category to ~76%.
+
+**Cross-model validation:** repeat the v2 smoke with Sonnet-4.6 reader to confirm the synthesis prompt generalizes.
+
+**From Tier 2-3 (still open):**
 - Native Anthropic tool-use API path (would unlock Sonnet at +5-10pp on tool-augmented runs)
 - Question-type-aware cross-encoder training labels (different positive criteria per LongMemEval category)
 - Stricter solver pre-gate (require explicit anchor words like "before"/"after")
