@@ -36,4 +36,16 @@ jobs:
         run: uv run mypy src/engram
 
       - name: Test
-        run: uv run pytest --cov=engram --cov-report=term-missing
+        run: |
+          uv run pytest \
+            --cov=engram \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=79
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python }}
+          path: coverage.xml
