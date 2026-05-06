@@ -35,8 +35,7 @@ CHAT_HISTORY = [
     {
         "role": "assistant",
         "content": (
-            "Both are iconic. Strats are bright and snappy, "
-            "Les Pauls are thicker and warmer."
+            "Both are iconic. Strats are bright and snappy, Les Pauls are thicker and warmer."
         ),
     },
     {
@@ -46,8 +45,7 @@ CHAT_HISTORY = [
     {
         "role": "assistant",
         "content": (
-            "For low-volume blues/rock, a Les Paul into a small tube combo or "
-            "modeler shines."
+            "For low-volume blues/rock, a Les Paul into a small tube combo or modeler shines."
         ),
     },
 ]
