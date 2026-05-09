@@ -1,0 +1,103 @@
+name: LongMemEval-S Leaderboard Submission
+description: Submit your memory system's LongMemEval-S result for the public leaderboard at jamjet.dev/benchmarks/engram-longmemeval
+title: "[Leaderboard] <System name> — <score>%"
+labels: ["leaderboard"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for submitting! We add **verified** entries to the LongMemEval-S leaderboard at https://jamjet.dev/benchmarks/engram-longmemeval/.
+
+        Required: system name, score, n, judge, reader/generator, license, MCP support, local-run capability, reproduction link.
+
+  - type: input
+    id: system_name
+    attributes:
+      label: System name
+      placeholder: "e.g. AcmeMemory v1.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: score
+    attributes:
+      label: LongMemEval-S overall accuracy (n=500)
+      placeholder: "87.4"
+    validations:
+      required: true
+
+  - type: input
+    id: n
+    attributes:
+      label: n (questions evaluated)
+      placeholder: "500"
+    validations:
+      required: true
+
+  - type: input
+    id: judge
+    attributes:
+      label: Judge model
+      placeholder: "LongMemEval official gpt-4o-mini"
+    validations:
+      required: true
+
+  - type: input
+    id: reader
+    attributes:
+      label: Reader / generator model
+      placeholder: "Claude Opus 4.6, GPT-4o-mini, etc."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: license
+    attributes:
+      label: License
+      options:
+        - Apache 2.0
+        - MIT
+        - BSD-3-Clause
+        - AGPL
+        - Source-available
+        - Commercial / proprietary
+        - Other (specify in repro link)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mcp
+    attributes:
+      label: MCP-native
+      options:
+        - Yes — first-party MCP server
+        - Partial — community wrapper
+        - "No"
+        - Not documented
+    validations:
+      required: true
+
+  - type: dropdown
+    id: local
+    attributes:
+      label: Runs locally / self-host
+      options:
+        - Yes — full local-only mode supported
+        - Partial — some components require cloud
+        - No — cloud-only
+    validations:
+      required: true
+
+  - type: input
+    id: repro
+    attributes:
+      label: Reproduction link (repo + exact command, OR paper section reference)
+      placeholder: "https://github.com/your-org/your-system#longmemeval-reproduction"
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Methodology nuance, partial verification status, related submissions, etc.
