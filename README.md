@@ -267,6 +267,55 @@ The benchmark history (visible in `CHANGELOG.md`) documents two ablation program
 
 ---
 
+## Hosted MCP server
+
+`jamjet-engram` 0.2.0+ ships an `engram-server` binary that exposes Engram's MCP tools over **Streamable HTTP**. Use it to host a remote Engram for JamJet Cloud agents, ChatGPT custom connectors, or any HTTP-aware MCP client.
+
+### Quickstart
+
+```bash
+pip install jamjet-engram
+export ENGRAM_AUTH_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+engram-server --transport http --port 8765
+```
+
+Or via Docker:
+
+```bash
+docker run --rm \
+  -e ENGRAM_AUTH_TOKEN="$ENGRAM_AUTH_TOKEN" \
+  -v engram-data:/data \
+  -p 8765:8765 \
+  ghcr.io/jamjet-labs/engram-py-server:0.2.0
+```
+
+### Connecting a client
+
+```bash
+curl -i -X POST http://localhost:8765/mcp \
+  -H "Authorization: Bearer $ENGRAM_AUTH_TOKEN" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-03-26","capabilities":{},
+                 "clientInfo":{"name":"curl","version":"1"}}}'
+```
+
+The server returns `MCP-Session-Id` in the response headers; subsequent requests echo it.
+
+### Auth model (v0.2)
+
+- `/mcp` requires `Authorization: Bearer <token>` matching `$ENGRAM_AUTH_TOKEN`.
+- The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset (fail-closed). The only opt-out is `--no-auth`, which is rejected unless `--host` is `127.0.0.1` or `::1`.
+- `/v1/memory/*` REST routes remain unauthed (matches the Rust `engram-server` REST behavior; deploy them behind a reverse proxy if you need auth).
+- OAuth2 dynamic client registration (the Claude Desktop remote-server flavor) is on the roadmap.
+
+### Stdio transport
+
+For Claude Desktop and other stdio MCP clients, keep using the Rust `ghcr.io/jamjet-labs/engram-server:0.5.0` image — that path is unaffected by this release.
+
+---
+
 ## Contributing
 
 We genuinely welcome contributions. The repo is set up so a new contributor can ship a meaningful change in a couple of hours.

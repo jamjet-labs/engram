@@ -14,6 +14,27 @@ All notable changes to Engram v2.0 (the Python rewrite) are documented here. For
 ### Fixed
 - `benchmarks/smoke_runner.py` and `benchmarks/longmemeval_v2.py`: replaced developer-machine-specific oracle-path fallbacks (`../jamjet-research/...`) with a generic `./longmemeval_oracle.json` default. The `LONGMEMEVAL_ORACLE` env var still takes priority; the new default is a sensible cwd-relative path that fails fast with a clear message if the file isn't there.
 
+## [0.2.0] — 2026-05-09
+
+### Added
+- `engram-server` script entry point (typer-based CLI). Run `engram-server --help` for flags.
+- **MCP Streamable HTTP transport** at `POST /mcp` (and `GET /mcp`) on the FastAPI app, mounted alongside the existing `/v1/memory/*` REST routes.
+- Bearer-token auth for `/mcp` via `$ENGRAM_AUTH_TOKEN` (fail-closed; server refuses to start if unset). `--no-auth` opt-out is rejected unless `--host` is loopback (`127.0.0.1` or `::1`).
+- `Dockerfile` shipping `ghcr.io/jamjet-labs/engram-py-server:0.2.0` — `python:3.13-slim` base, non-root user, healthcheck, `/data` volume.
+- `src/engram/server/auth.py` (bearer-token ASGI middleware) and `src/engram/server/transport.py` (Streamable HTTP adapter) modules.
+- CI: tagged release also builds and pushes `ghcr.io/jamjet-labs/engram-py-server:<version>` (and `:latest` for non-prerelease) to GHCR.
+
+### Changed
+- `build_http_app(engram)` now accepts optional `mcp_server` and `auth_token` keyword arguments. Existing single-arg callers keep working.
+- Bumped version in `pyproject.toml` to `0.2.0`. Added `typer>=0.12` to runtime dependencies.
+
+### Deferred
+- Stdio transport in the Python binary (CLI flag `--transport=stdio` reserved; rejects with a clear message in v0.2).
+- OAuth2 dynamic client registration for `/mcp`.
+- `/v1/memory/*` auth gating.
+- Replacing the Rust `ghcr.io/jamjet-labs/engram-server` image. Stdio Claude Desktop users keep using v0.5.0.
+- Tool surface expansion to match Rust's 11 tools (Engram v2 tool-port roadmap, separate workstream).
+
 ## [0.1.0] - 2026-05-06
 
 ### Added
