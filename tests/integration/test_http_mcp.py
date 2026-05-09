@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, MutableMapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -47,7 +48,7 @@ async def _start_lifespan(asgi_app: FastAPI) -> asyncio.Task[None]:
 
 
 @pytest_asyncio.fixture
-async def app(tmp_path: Any, monkeypatch: Any) -> AsyncGenerator[FastAPI, None]:
+async def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[FastAPI, None]:
     """Build a FastAPI app with MCP mounted and the ASGI lifespan started.
 
     ASGITransport does not trigger the ASGI lifespan, so we start it manually
@@ -67,7 +68,7 @@ async def app(tmp_path: Any, monkeypatch: Any) -> AsyncGenerator[FastAPI, None]:
             lifespan_task.cancel()
             try:
                 await lifespan_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
         await engram.close()
 
