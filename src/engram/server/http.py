@@ -6,16 +6,21 @@ existing clients (Spring Boot starter, langchain4j, Java SDK) keep working.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from starlette.routing import Route
 
 from engram.engram import Engram
 from engram.models import ChatMessage, MemoryTier, Polarity
 from engram.scope import Scope
+from engram.server.auth import auth_asgi_wrapper
+from engram.server.transport import build_streamable_http_mount
 
 
 class _RecordRequest(BaseModel):
@@ -99,9 +104,46 @@ class _ExtractResponse(BaseModel):
     facts: list[_ExtractedFactSummary]
 
 
-def build_http_app(engram: Engram) -> FastAPI:
-    """Build a FastAPI app bound to a single Engram instance."""
-    app = FastAPI(title="Engram", version="0.1.0a0")
+def build_http_app(
+    engram: Engram,
+    *,
+    mcp_server: Any | None = None,
+    auth_token: str | None = None,
+) -> FastAPI:
+    """Build a FastAPI app bound to a single Engram instance.
+
+    Args:
+        engram: The Engram instance to serve.
+        mcp_server: Optional MCP `Server` (e.g. from `build_mcp_server`). If
+            provided, a Streamable HTTP MCP endpoint is mounted at `/mcp`.
+        auth_token: Bearer token required on `/mcp`. If None, `/mcp` is unauthed
+            (only safe on loopback). The legacy `/v1/memory/*` routes are NEVER
+            auth-gated regardless of this argument — see v0.2 spec.
+    """
+    if mcp_server is not None:
+        manager, handler = build_streamable_http_mount(mcp_server)
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+            async with manager.run():
+                yield
+
+        app = FastAPI(title="Engram", version="0.2.0", lifespan=lifespan)
+
+        wrapped_handler = auth_asgi_wrapper(handler, expected_token=auth_token)
+
+        # Route (not Mount) so that POST /mcp hits the handler without a
+        # 307 redirect. Starlette's Mount matches /mcp/ and below, but
+        # redirects bare /mcp; Route matches the exact path.
+        # The handler is wrapped in a class so Starlette treats it as an ASGI
+        # app (methods=None = all HTTP methods) rather than a GET-only function.
+        class _MCPHandler:
+            async def __call__(self, scope_: Any, receive_: Any, send_: Any) -> None:
+                await wrapped_handler(scope_, receive_, send_)
+
+        app.router.routes.append(Route("/mcp", endpoint=_MCPHandler()))
+    else:
+        app = FastAPI(title="Engram", version="0.2.0")
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
