@@ -123,7 +123,7 @@ def _parse_body(resp: Response) -> dict[str, Any]:
         # Find the first `data: { ... }` line.
         for line in resp.text.splitlines():
             if line.startswith("data: "):
-                parsed: dict[str, Any] = json.loads(line[len("data: "):])
+                parsed: dict[str, Any] = json.loads(line[len("data: ") :])
                 return parsed
         raise AssertionError(f"no data: line in SSE body: {resp.text!r}")
     raise AssertionError(f"unexpected content-type: {content_type!r}")

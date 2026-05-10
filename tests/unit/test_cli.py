@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from typer.testing import CliRunner
 
 from engram.cli import app
@@ -26,7 +25,8 @@ def test_no_auth_requires_loopback_127(monkeypatch):
     monkeypatch.delenv("ENGRAM_AUTH_TOKEN", raising=False)
     result = runner.invoke(app, ["--no-auth", "--host", "0.0.0.0", "--dry-run"])
     assert result.exit_code == 2
-    assert "loopback" in (result.stderr + result.output).lower() or "127.0.0.1" in (result.stderr + result.output)
+    output = result.stderr + result.output
+    assert "loopback" in output.lower() or "127.0.0.1" in output
 
 
 def test_no_auth_rejects_localhost_string(monkeypatch):
@@ -64,4 +64,5 @@ def test_short_token_warns_but_starts(monkeypatch):
     monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "short")
     result = runner.invoke(app, ["--dry-run"])
     assert result.exit_code == 0
-    assert "32" in (result.stderr + result.output) or "weak" in (result.stderr + result.output).lower()
+    output = result.stderr + result.output
+    assert "32" in output or "weak" in output.lower()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
@@ -12,7 +11,7 @@ from engram.server.auth import auth_asgi_wrapper
 
 
 def _ok_app() -> Starlette:
-    async def hello(request):  # noqa: ANN001, ARG001
+    async def hello(request):
         return PlainTextResponse("ok")
 
     return Starlette(routes=[Route("/", hello)])

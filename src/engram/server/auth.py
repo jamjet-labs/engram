@@ -10,25 +10,31 @@ routes are intentionally NOT gated — see the v0.2 design spec.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from secrets import compare_digest
-from typing import Any, Awaitable, Callable
+from typing import Any
 
-ASGIApp = Callable[[dict[str, Any], Callable[[], Awaitable[Any]], Callable[[Any], Awaitable[None]]], Awaitable[None]]
+# Type aliases to stay within line length limits
+ReceiveFn = Callable[[], Awaitable[Any]]
+SendFn = Callable[[Any], Awaitable[None]]
+ASGIApp = Callable[[dict[str, Any], ReceiveFn, SendFn], Awaitable[None]]
 
 
 _UNAUTH_BODY = json.dumps({"error": "invalid bearer token"}).encode("utf-8")
 
 
-async def _send_401(send: Callable[[Any], Awaitable[None]]) -> None:
-    await send({
-        "type": "http.response.start",
-        "status": 401,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(_UNAUTH_BODY)).encode("ascii")),
-            (b"www-authenticate", b'Bearer realm="engram"'),
-        ],
-    })
+async def _send_401(send: SendFn) -> None:
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(_UNAUTH_BODY)).encode("ascii")),
+                (b"www-authenticate", b'Bearer realm="engram"'),
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": _UNAUTH_BODY})
 
 
@@ -43,7 +49,7 @@ def auth_asgi_wrapper(app: ASGIApp, expected_token: str | None) -> ASGIApp:
     if expected_token is None:
         return app
 
-    async def wrapped(scope: dict[str, Any], receive: Callable[[], Awaitable[Any]], send: Callable[[Any], Awaitable[None]]) -> None:
+    async def wrapped(scope: dict[str, Any], receive: ReceiveFn, send: SendFn) -> None:
         if scope.get("type") != "http":
             await app(scope, receive, send)
             return
@@ -55,7 +61,7 @@ def auth_asgi_wrapper(app: ASGIApp, expected_token: str | None) -> ASGIApp:
                 break
 
         if header_value.startswith(b"Bearer "):
-            token = header_value[len(b"Bearer "):].decode("utf-8", errors="replace")
+            token = header_value[len(b"Bearer ") :].decode("utf-8", errors="replace")
             if compare_digest(token, expected_token):
                 await app(scope, receive, send)
                 return
