@@ -54,6 +54,22 @@ def test_wrong_token_rejected():
     assert resp.status_code == 401
 
 
+def test_lowercase_bearer_accepted():
+    # RFC 9110 §11: auth-scheme tokens are case-insensitive. Some clients
+    # (Go oauth2, curl with explicit casing) send "bearer" lowercase.
+    wrapped = auth_asgi_wrapper(_ok_app(), expected_token="secret123")
+    client = TestClient(wrapped)
+    resp = client.get("/", headers={"Authorization": "bearer secret123"})
+    assert resp.status_code == 200
+
+
+def test_uppercase_bearer_accepted():
+    wrapped = auth_asgi_wrapper(_ok_app(), expected_token="secret123")
+    client = TestClient(wrapped)
+    resp = client.get("/", headers={"Authorization": "BEARER secret123"})
+    assert resp.status_code == 200
+
+
 def test_constant_time_compare_used(monkeypatch):
     calls = []
     import secrets as _secrets

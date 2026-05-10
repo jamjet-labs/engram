@@ -60,8 +60,11 @@ def auth_asgi_wrapper(app: ASGIApp, expected_token: str | None) -> ASGIApp:
                 header_value = value
                 break
 
-        if header_value.startswith(b"Bearer "):
-            token = header_value[len(b"Bearer ") :].decode("utf-8", errors="replace")
+        # RFC 9110 §11: auth-scheme tokens are case-insensitive (e.g. Go's oauth2
+        # client and curl can emit "bearer" lowercase). Match scheme tolerantly.
+        scheme, _, rest = header_value.partition(b" ")
+        if scheme.lower() == b"bearer" and rest:
+            token = rest.decode("utf-8", errors="replace")
             if compare_digest(token, expected_token):
                 await app(scope, receive, send)
                 return

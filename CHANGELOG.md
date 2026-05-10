@@ -140,5 +140,6 @@ All notable changes to Engram v2.0 (the Python rewrite) are documented here. For
 ### Tests
 ~280 tests (units + integration). mypy `--strict` clean. ruff + ruff format clean. CI green on Python 3.12 + 3.13.
 
-[unreleased]: https://github.com/jamjet-labs/engram/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/jamjet-labs/engram/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jamjet-labs/engram/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jamjet-labs/engram/releases/tag/v0.1.0

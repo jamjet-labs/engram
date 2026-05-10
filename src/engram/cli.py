@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
 
 import typer
 
@@ -85,6 +84,35 @@ def main(
     if dry_run:
         return
 
+    resolved_db = db_path or os.environ.get("ENGRAM_DB_PATH") or "engram.db"
+
+    asyncio.run(
+        serve_engram(
+            host=host,
+            port=port,
+            db_path=resolved_db,
+            auth_token=auth_token,
+            log_level=log_level,
+        )
+    )
+
+
+async def serve_engram(
+    *,
+    host: str,
+    port: int,
+    db_path: str,
+    auth_token: str | None,
+    log_level: str,
+) -> None:
+    """Open Engram and serve the FastAPI app via uvicorn — all on one event loop.
+
+    Engram.open() creates loop-bound resources (an aiosqlite Connection lives on
+    the loop that opened it). If we used asyncio.run(open_engram) followed by
+    uvicorn.run(...), the second call would create a different event loop and
+    every MCP tool call would explode with "Event loop is closed". Keeping the
+    full lifecycle inside one asyncio.run(serve_engram(...)) avoids that.
+    """
     # Late imports — keep --version, --help, and dry-run fast.
     import uvicorn
 
@@ -92,16 +120,15 @@ def main(
     from engram.server.http import build_http_app
     from engram.server.mcp import build_mcp_server
 
-    resolved_db = db_path or os.environ.get("ENGRAM_DB_PATH") or "engram.db"
-
-    async def _setup() -> Any:
-        engram = await Engram.open(path=resolved_db)
+    engram = await Engram.open(path=db_path)
+    try:
         mcp_server = build_mcp_server(engram, name="engram")
-        return build_http_app(engram, mcp_server=mcp_server, auth_token=auth_token)
-
-    fast_app = asyncio.run(_setup())
-
-    uvicorn.run(fast_app, host=host, port=port, log_level=log_level.lower())
+        fast_app = build_http_app(engram, mcp_server=mcp_server, auth_token=auth_token)
+        config = uvicorn.Config(fast_app, host=host, port=port, log_level=log_level.lower())
+        server = uvicorn.Server(config)
+        await server.serve()
+    finally:
+        await engram.close()
 
 
 if __name__ == "__main__":
