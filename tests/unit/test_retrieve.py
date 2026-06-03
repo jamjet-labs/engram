@@ -7,7 +7,8 @@ import pytest
 import pytest_asyncio
 
 from engram.embedding.synthetic import SyntheticEmbedding
-from engram.models import Fact
+from engram.models import Fact, LifecycleState, MemorySystem
+from engram.retrieve.base import RetrievalConfig
 from engram.retrieve.hybrid import HybridRetriever
 from engram.retrieve.temporal import TemporalIntent, detect_temporal_intent
 from engram.scope import Scope
@@ -216,3 +217,82 @@ async def test_reranker_is_invoked(
     # (we reversed ascending input → output is descending, so rerank_score
     # which is the negation is ascending → all negative).
     assert all(r.rerank_score <= 0.0 for r in reranked)
+
+
+async def test_search_filters_by_memory_system(
+    setup_retriever: tuple[HybridRetriever, Scope, list[Fact]],
+) -> None:
+    retriever, scope, facts = setup_retriever
+    facts[0].memory_system = MemorySystem.PREFERENCE
+    facts[1].memory_system = MemorySystem.SEMANTIC
+    await retriever._facts.upsert_fact(facts[0])
+    await retriever._facts.upsert_fact(facts[1])
+    results = await retriever.search(
+        "alice", scope, top_k=5, memory_systems=(MemorySystem.PREFERENCE,)
+    )
+    assert results
+    assert all(result.fact.memory_system == MemorySystem.PREFERENCE for result in results)
+
+
+async def test_search_filtered_candidates_survive_small_top_k() -> None:
+    fact_store = await SqliteStore.open(":memory:")
+    embedder = SyntheticEmbedding(dim=64)
+    vec_store = HnswVectorStore(dim=64)
+    scope = Scope(org_id="acme", user_id="alice")
+    for i in range(1001):
+        f = Fact(
+            text=f"alice shared common semantic note {i}",
+            scope=scope,
+            valid_from=_now(),
+            memory_system=MemorySystem.SEMANTIC,
+        )
+        await fact_store.upsert_fact(f)
+        [vector] = await embedder.embed([f.text])
+        await vec_store.add(f.id, vector, scope)
+    preference = Fact(
+        text="alice shared common preference note",
+        scope=scope,
+        valid_from=_now(),
+        memory_system=MemorySystem.PREFERENCE,
+    )
+    await fact_store.upsert_fact(preference)
+    [vector] = await embedder.embed([preference.text])
+    await vec_store.add(preference.id, vector, scope)
+    retriever = HybridRetriever(fact_store=fact_store, vector_store=vec_store, embedder=embedder)
+
+    results = await retriever.search(
+        "alice shared common",
+        scope,
+        top_k=1,
+        memory_systems=(MemorySystem.PREFERENCE,),
+    )
+
+    assert len(results) == 1
+    assert results[0].fact.memory_system == MemorySystem.PREFERENCE
+
+
+async def test_config_include_lifecycle_overrides_default_exclude() -> None:
+    fact_store = await SqliteStore.open(":memory:")
+    embedder = SyntheticEmbedding(dim=64)
+    vec_store = HnswVectorStore(dim=64)
+    scope = Scope(org_id="acme", user_id="alice")
+    fact = Fact(
+        text="alice prefers espresso",
+        scope=scope,
+        valid_from=_now(),
+        lifecycle_state=LifecycleState.EXPIRED,
+    )
+    await fact_store.upsert_fact(fact)
+    [vector] = await embedder.embed([fact.text])
+    await vec_store.add(fact.id, vector, scope)
+    retriever = HybridRetriever(
+        fact_store=fact_store,
+        vector_store=vec_store,
+        embedder=embedder,
+        config=RetrievalConfig(include_lifecycle_states=(LifecycleState.EXPIRED,)),
+    )
+
+    results = await retriever.search("espresso", scope, top_k=1)
+
+    assert len(results) == 1
+    assert results[0].fact.lifecycle_state == LifecycleState.EXPIRED

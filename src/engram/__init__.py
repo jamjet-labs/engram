@@ -10,7 +10,17 @@ from engram.classify.rules import RuleBasedClassifier
 from engram.engram import Engram
 from engram.errors import EngramError, ExtractionError, NotFoundError, StoreError
 from engram.llm.base import LLMClient, LLMMessage, LLMResponse
-from engram.models import ChatMessage, Fact, MemoryTier, Polarity
+from engram.memory_router import MemoryRoute, RuleBasedMemoryRouter
+from engram.models import (
+    ChatMessage,
+    Fact,
+    LifecycleState,
+    MemorySystem,
+    MemoryTier,
+    Polarity,
+    PromotionState,
+)
+from engram.query_intent import QueryMemoryIntent, RuleBasedQueryIntentClassifier
 from engram.read.preference_gate import is_preference_question
 from engram.read.reader import Reader, ReaderConfig
 from engram.retrieve.base import RetrievalConfig
@@ -26,14 +36,21 @@ __all__ = [
     "LLMClient",
     "LLMMessage",
     "LLMResponse",
+    "LifecycleState",
+    "MemoryRoute",
+    "MemorySystem",
     "MemoryTier",
     "NotFoundError",
     "Polarity",
+    "PromotionState",
+    "QueryMemoryIntent",
     "QuestionType",
     "Reader",
     "ReaderConfig",
     "RetrievalConfig",
     "RuleBasedClassifier",
+    "RuleBasedMemoryRouter",
+    "RuleBasedQueryIntentClassifier",
     "Scope",
     "StoreError",
     "Tool",

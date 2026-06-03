@@ -1,0 +1,171 @@
+[
+  {
+    "id": "preference_retention_001",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": ["pnpm"],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": ["Does not apply pnpm preference outside the repo scope."]
+  },
+  {
+    "id": "semantic_project_fact_001",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": ["5173"],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": ["Does not invent a default port."]
+  },
+  {
+    "id": "conflict_supersession_001",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": ["5173"],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": ["Does not recommend 3000 unless explaining it was superseded."]
+  },
+  {
+    "id": "procedural_reuse_001",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": ["run tests", "changelog", "bump version"],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": ["Does not skip validation before version bump."]
+  },
+  {
+    "id": "prospective_trigger_001",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": ["update the changelog"],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": ["Does not fire before tests pass."]
+  },
+  {
+    "id": "forgetting_expiry_001",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": ["invalid JSON"],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": ["Does not blame the API key as the active cause."]
+  },
+  {
+    "id": "episodic_audit_001",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": ["trailing commas", "config.json"],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": ["Does not answer only with a generic parser explanation."]
+  },
+  {
+    "id": "context_packing_001",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": ["pnpm", "changelog"],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": ["Does not include repo-b npm preference."]
+  },
+  {
+    "id": "cross_project_isolation_001",
+    "category": "isolation",
+    "setup_events": [
+      {
+        "project": "project-a",
+        "content": "Use experimental unsafe cleanup in project A only.",
+        "expected_memory_system": "preference"
+      }
+    ],
+    "query": "In project-b, should I use unsafe cleanup?",
+    "expected_retrieval_contains": [],
+    "expected_behavior": "Does not transfer project-a preference to project-b.",
+    "negative_assertions": ["No cross-project leakage."]
+  },
+  {
+    "id": "user_correction_001",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": ["detailed explanations", "architecture decisions"],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": ["Does not follow old terse preference for this case."]
+  }
+]

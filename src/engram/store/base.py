@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
-from engram.models import ChatMessage, Event, Fact
+from engram.models import ChatMessage, Event, Fact, LifecycleState, MemorySystem
 from engram.scope import Scope
 
 
@@ -30,7 +30,17 @@ class EngramStore(Protocol):
     ) -> list[Fact]: ...
 
     @abstractmethod
-    async def keyword_search(self, query: str, scope: Scope, limit: int = 30) -> list[Fact]: ...
+    async def keyword_search(
+        self,
+        query: str,
+        scope: Scope,
+        limit: int = 30,
+        memory_systems: tuple[MemorySystem, ...] | None = None,
+        memory_subtypes: tuple[str, ...] | None = None,
+        tags: tuple[str, ...] | None = None,
+        include_lifecycle_states: tuple[LifecycleState, ...] | None = None,
+        exclude_lifecycle_states: tuple[LifecycleState, ...] = (),
+    ) -> list[Fact]: ...
 
     @abstractmethod
     async def aggregate_sessions(

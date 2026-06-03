@@ -23,7 +23,19 @@ from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.llm.base import LLMClient
 from engram.llm.tier import ModelTier
-from engram.models import ChatMessage, Event, ExtractedFact, Fact, MemoryTier, Polarity
+from engram.memory_router import RuleBasedMemoryRouter
+from engram.models import (
+    ChatMessage,
+    Event,
+    ExtractedFact,
+    Fact,
+    LifecycleState,
+    MemorySystem,
+    MemoryTier,
+    Polarity,
+    PromotionState,
+)
+from engram.query_intent import RuleBasedQueryIntentClassifier
 from engram.read.decomposer import QueryDecomposer, should_decompose
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.hybrid import HybridRetriever
@@ -59,6 +71,8 @@ class Engram:
         self._retrieve = retriever
         self._extract = extraction
         self._events = event_extractor
+        self._memory_router = RuleBasedMemoryRouter()
+        self._query_intent = RuleBasedQueryIntentClassifier()
         self.tier = tier
         # Decomposer is constructed when a tier is supplied (uses utility LLM).
         # Caller can replace with `engram._decomposer = ...` for tests.
@@ -199,6 +213,15 @@ class Engram:
         event_date: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         role: str | None = None,
+        memory_system: MemorySystem | str | None = None,
+        memory_subtype: str | None = None,
+        secondary_systems: tuple[MemorySystem | str, ...] | None = None,
+        tags: tuple[str, ...] | None = None,
+        lifecycle_state: LifecycleState | str | None = None,
+        promotion_state: PromotionState | str | None = None,
+        retrieval_policy: str | None = None,
+        valid_until: datetime | None = None,
+        route_memory: bool = False,
     ) -> Fact:
         """Record a single fact (no LLM extraction). Embeds + stores in one call.
 
@@ -212,6 +235,11 @@ class Engram:
         md = dict(metadata or {})
         if role is not None:
             md["role"] = role
+        route = (
+            self._memory_router.route(text, category=category, metadata=md)
+            if route_memory
+            else None
+        )
         fact = Fact(
             text=text,
             scope=scope,
@@ -221,8 +249,24 @@ class Engram:
             confidence=confidence,
             polarity=polarity,
             tier=tier,
+            memory_system=_coerce_memory_system(memory_system)
+            or (route.memory_system if route is not None else MemorySystem.WORKING),
+            memory_subtype=(
+                memory_subtype
+                if memory_subtype is not None
+                else (route.memory_subtype if route else None)
+            ),
+            secondary_systems=_coerce_memory_system_list(secondary_systems)
+            or (route.secondary_systems if route is not None else []),
+            tags=list(tags) if tags is not None else (route.tags if route is not None else []),
+            lifecycle_state=_coerce_lifecycle_state(lifecycle_state)
+            or (route.lifecycle_state if route is not None else LifecycleState.DURABLE),
+            promotion_state=_coerce_promotion_state(promotion_state)
+            or (route.promotion_state if route is not None else PromotionState.RAW),
+            retrieval_policy=retrieval_policy,
+            valid_until=valid_until,
             event_date=event_date,
-            metadata=md,
+            metadata={**md, **({"memory_route_reason": route.reason} if route else {})},
         )
         await self._store.upsert_fact(fact)
         [vec] = await self._embed.embed([text])
@@ -272,6 +316,9 @@ class Engram:
         out: list[Fact] = []
         if persist:
             for ef in extracted:
+                route = self._memory_router.route(
+                    ef.text, category=ef.category, metadata=ef.metadata
+                )
                 fact = Fact(
                     id=uuid4(),
                     text=ef.text,
@@ -281,8 +328,15 @@ class Engram:
                     confidence=ef.confidence,
                     category=ef.category,
                     polarity=ef.polarity,
+                    memory_system=route.memory_system,
+                    memory_subtype=route.memory_subtype,
+                    secondary_systems=route.secondary_systems,
+                    tags=route.tags,
+                    lifecycle_state=route.lifecycle_state,
+                    promotion_state=route.promotion_state,
                     event_date=ef.event_date,
                     mention_date=ef.mention_date,
+                    metadata={**ef.metadata, "memory_route_reason": route.reason},
                 )
                 await self._store.upsert_fact(fact)
                 [vec] = await self._embed.embed([ef.text])
@@ -291,6 +345,9 @@ class Engram:
         else:
             # Non-persisting branch: synthesize Facts in-memory only
             for ef in extracted:
+                route = self._memory_router.route(
+                    ef.text, category=ef.category, metadata=ef.metadata
+                )
                 out.append(
                     Fact(
                         id=uuid4(),
@@ -301,8 +358,15 @@ class Engram:
                         confidence=ef.confidence,
                         category=ef.category,
                         polarity=ef.polarity,
+                        memory_system=route.memory_system,
+                        memory_subtype=route.memory_subtype,
+                        secondary_systems=route.secondary_systems,
+                        tags=route.tags,
+                        lifecycle_state=route.lifecycle_state,
+                        promotion_state=route.promotion_state,
                         event_date=ef.event_date,
                         mention_date=ef.mention_date,
+                        metadata={**ef.metadata, "memory_route_reason": route.reason},
                     )
                 )
         return out
@@ -313,10 +377,49 @@ class Engram:
         user_id: str = "default",
         org_id: str = "default",
         top_k: int = 10,
+        memory_systems: tuple[MemorySystem | str, ...] | None = None,
+        memory_subtypes: tuple[str, ...] | None = None,
+        tags: tuple[str, ...] | None = None,
+        include_lifecycle_states: tuple[LifecycleState | str, ...] | None = None,
+        exclude_lifecycle_states: tuple[LifecycleState | str, ...] | None = None,
+        infer_memory_filters: bool = False,
+        allow_sensitive_recall: bool = False,
     ) -> list[ScoredFact]:
-        """Hybrid (vector + keyword) retrieval, optionally reranked."""
+        """Hybrid (vector + keyword) retrieval, optionally reranked.
+
+        When ``infer_memory_filters=True``, the query intent classifier
+        determines both the memory filters and confidence level.
+
+        - ``high`` confidence → strict system/subtype/tag filtering (current behavior).
+        - ``low`` / ``medium`` confidence → matching facts get a score boost
+          but non-matching facts are still included (soft boost).
+
+        ``allow_sensitive_recall``: when True, facts with
+        ``retrieval_policy="explicit_only"`` are included even without
+        explicit subtype/tag filters. Default False (sensitive vault facts
+        are excluded unless the caller provides specific filters).
+        """
+        typed_systems = _coerce_memory_systems(memory_systems)
+        typed_subtypes = memory_subtypes
+        typed_tags = tags
+        intent_confidence: str | None = None
+        if infer_memory_filters:
+            intent = self._query_intent.classify(query)
+            typed_systems = typed_systems or intent.memory_systems
+            typed_subtypes = typed_subtypes or intent.memory_subtypes
+            typed_tags = typed_tags or intent.tags
+            intent_confidence = intent.confidence
         return await self._retrieve.search(
-            query, Scope(org_id=org_id, user_id=user_id), top_k=top_k
+            query,
+            Scope(org_id=org_id, user_id=user_id),
+            top_k=top_k,
+            memory_systems=typed_systems,
+            memory_subtypes=typed_subtypes,
+            tags=typed_tags,
+            include_lifecycle_states=_coerce_lifecycle_states(include_lifecycle_states),
+            exclude_lifecycle_states=_coerce_lifecycle_states(exclude_lifecycle_states),
+            intent_confidence=intent_confidence,  # type: ignore[arg-type]
+            allow_sensitive_recall=allow_sensitive_recall,
         )
 
     async def context(
@@ -329,6 +432,13 @@ class Engram:
         classifier: QuestionClassifier | None = None,
         decompose: bool = False,
         role_filter: tuple[str, ...] | None = None,
+        memory_systems: tuple[MemorySystem | str, ...] | None = None,
+        memory_subtypes: tuple[str, ...] | None = None,
+        tags: tuple[str, ...] | None = None,
+        include_lifecycle_states: tuple[LifecycleState | str, ...] | None = None,
+        exclude_lifecycle_states: tuple[LifecycleState | str, ...] | None = None,
+        infer_memory_filters: bool = False,
+        allow_sensitive_recall: bool = False,
     ) -> str:
         """Assemble a context string from top-N facts that fit `token_budget`.
 
@@ -359,12 +469,51 @@ class Engram:
         else:
             subqueries = [query]
 
+        typed_systems = memory_systems
+        typed_subtypes = memory_subtypes
+        typed_tags = tags
+        if infer_memory_filters:
+            intent = self._query_intent.classify(query)
+            typed_systems = typed_systems or intent.memory_systems
+            typed_subtypes = typed_subtypes or intent.memory_subtypes
+            typed_tags = typed_tags or intent.tags
+        include_lifecycle = include_lifecycle_states
+        exclude_lifecycle = exclude_lifecycle_states
+
         if len(subqueries) == 1:
-            candidates = await self.recall(subqueries[0], user_id=user_id, org_id=org_id, top_k=30)
+            candidates = await self.recall(
+                subqueries[0],
+                user_id=user_id,
+                org_id=org_id,
+                top_k=30,
+                memory_systems=typed_systems,
+                memory_subtypes=typed_subtypes,
+                tags=typed_tags,
+                include_lifecycle_states=include_lifecycle,
+                exclude_lifecycle_states=exclude_lifecycle,
+                infer_memory_filters=False,
+                allow_sensitive_recall=allow_sensitive_recall,
+            )
         else:
             per_q = await asyncio.gather(
-                *[self.recall(sq, user_id=user_id, org_id=org_id, top_k=15) for sq in subqueries]
+                *[
+                    self.recall(
+                        sq,
+                        user_id=user_id,
+                        org_id=org_id,
+                        top_k=15,
+                        memory_systems=typed_systems,
+                        memory_subtypes=typed_subtypes,
+                        tags=typed_tags,
+                        include_lifecycle_states=include_lifecycle,
+                        exclude_lifecycle_states=exclude_lifecycle,
+                        infer_memory_filters=False,
+                        allow_sensitive_recall=allow_sensitive_recall,
+                    )
+                    for sq in subqueries
+                ]
             )
+
             ranked_lists = [[sf.fact.id for sf in lst] for lst in per_q]
             fused_ids = reciprocal_rank_fusion(ranked_lists, k=60)
             by_id: dict[UUID, ScoredFact] = {sf.fact.id: sf for lst in per_q for sf in lst}
@@ -387,3 +536,45 @@ class Engram:
             lines.append(line)
             running += len(line) + 1
         return "\n".join(lines)
+
+
+def _coerce_memory_system(value: MemorySystem | str | None) -> MemorySystem | None:
+    if value is None:
+        return None
+    return value if isinstance(value, MemorySystem) else MemorySystem(str(value))
+
+
+def _coerce_memory_system_list(
+    values: tuple[MemorySystem | str, ...] | None,
+) -> list[MemorySystem]:
+    if values is None:
+        return []
+    return [_coerce_memory_system(value) or MemorySystem.WORKING for value in values]
+
+
+def _coerce_memory_systems(
+    values: tuple[MemorySystem | str, ...] | None,
+) -> tuple[MemorySystem, ...] | None:
+    if values is None:
+        return None
+    return tuple(_coerce_memory_system(value) or MemorySystem.WORKING for value in values)
+
+
+def _coerce_lifecycle_state(value: LifecycleState | str | None) -> LifecycleState | None:
+    if value is None:
+        return None
+    return value if isinstance(value, LifecycleState) else LifecycleState(str(value))
+
+
+def _coerce_lifecycle_states(
+    values: tuple[LifecycleState | str, ...] | None,
+) -> tuple[LifecycleState, ...] | None:
+    if values is None:
+        return None
+    return tuple(_coerce_lifecycle_state(value) or LifecycleState.DURABLE for value in values)
+
+
+def _coerce_promotion_state(value: PromotionState | str | None) -> PromotionState | None:
+    if value is None:
+        return None
+    return value if isinstance(value, PromotionState) else PromotionState(str(value))

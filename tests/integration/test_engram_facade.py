@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from engram import Engram
+from engram import Engram, MemorySystem
 
 
 def _now() -> datetime:
@@ -55,3 +55,37 @@ async def test_record_returns_fact_with_event_date() -> None:
         ed = _now()
         fact = await memory.record(text="alice went to paris", user_id="alice", event_date=ed)
         assert fact.event_date == ed
+
+
+async def test_record_can_route_typed_memory() -> None:
+    async with await Engram.open(":memory:") as memory:
+        fact = await memory.record(
+            "For this repo, always use pnpm instead of npm.",
+            user_id="repo-a",
+            route_memory=True,
+        )
+        assert fact.memory_system == MemorySystem.PREFERENCE
+        assert fact.memory_subtype == "tool_preference"
+
+
+async def test_recall_can_infer_query_memory_filters() -> None:
+    async with await Engram.open(":memory:") as memory:
+        await memory.record(
+            "Repo A npm audit log: npm install failed during migration.",
+            user_id="repo-a",
+            route_memory=True,
+        )
+        await memory.record(
+            "For repo-a, always use pnpm instead of npm.",
+            user_id="repo-a",
+            route_memory=True,
+        )
+        hits = await memory.recall(
+            "In repo-a, what package manager should I use?",
+            user_id="repo-a",
+            top_k=3,
+            infer_memory_filters=True,
+        )
+        assert hits
+        assert all(hit.fact.memory_system == MemorySystem.PREFERENCE for hit in hits)
+        assert "pnpm" in hits[0].fact.text

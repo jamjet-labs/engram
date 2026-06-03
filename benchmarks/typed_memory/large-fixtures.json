@@ -1,0 +1,5063 @@
+[
+  {
+    "id": "semantic_project_fact_001_v1",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "The API gateway supports WebSocket connections."
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Active session: investigating the performance regression in v3.2."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Backups run daily at 02:00 UTC."
+      },
+      {
+        "content": "Session event: user reported slow query performance on dashboard."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "The database connection string is stored",
+      "The API gateway supports WebSocket conne",
+      "Backups run daily at 02",
+      "Session event",
+      "Prefer composition over inheritance in c",
+      "Active session"
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v2",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Session event: refactored the authentication middleware."
+      },
+      {
+        "content": "Performance tuning: profile, identify bottleneck, optimize, re-profile."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Incident response: acknowledge, triage, mitigate, postmortem."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Performance tuning",
+      "Documentation update",
+      "Incident response",
+      "Prefer composition over inheritance in c",
+      "Session event",
+      "Active session"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v3",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "The application uses JWT tokens for authentication."
+      },
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      },
+      {
+        "content": "Session event: upgraded PostgreSQL from 14 to 16."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "The application uses JWT tokens for auth",
+      "When the certification expires, schedule"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v4",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "After the database migration completes, update the connection strings."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      },
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "Session event: user reported slow query performance on dashboard."
+      },
+      {
+        "content": "Active session: investigating the performance regression in v3.2."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Prefer async/await over raw callbacks in",
+      "Active session",
+      "After the database migration completes, "
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v5",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "Active session: writing unit tests for the payment processor."
+      },
+      {
+        "content": "Session event: added end-to-end tests for the checkout flow."
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      },
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Database migration process: backup, test locally, run migration, verify."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "Database migration process",
+      "After the team expands, split the monoli"
+    ]
+  },
+  {
+    "id": "conflict_supersession_001_v6",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "The API gateway supports WebSocket connections."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      },
+      {
+        "content": "Error tracking is sent to Sentry."
+      },
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "The deployment uses blue-green strategy."
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": [
+      "Does not recommend 3000 unless explaining it was superseded."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Error tracking is sent to Sentry.",
+      "The deployment uses blue-green strategy.",
+      "The API gateway supports WebSocket conne",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Session event",
+      "Active session"
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v7",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "Session event: refactored the authentication middleware."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "Log analysis: collect logs, identify patterns, correlate, report."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Log analysis",
+      "Documentation update",
+      "Certificate renewal",
+      "Active session",
+      "Session event",
+      "Use feature flags for all new functional"
+    ]
+  },
+  {
+    "id": "user_correction_001_v8",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Security audit: review dependencies, check secrets, scan endpoints."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Always include API documentation in ever",
+      "Write documentation in Markdown, not Con",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Security audit",
+      "When the new API is deployed, deprecate ",
+      "Session event"
+    ]
+  },
+  {
+    "id": "user_correction_001_v9",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer functional programming patterns f",
+      "Always include API documentation in ever",
+      "Prefer composition over inheritance in c",
+      "After the team expands, split the monoli",
+      "Active session",
+      "Session event"
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v10",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "Active session: drafting the migration plan for the new API."
+      },
+      {
+        "content": "Rate limiting is 100 requests per minute per user."
+      },
+      {
+        "content": "Performance tuning: profile, identify bottleneck, optimize, re-profile."
+      },
+      {
+        "content": "Cache TTL is 5 minutes for product listings."
+      },
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Cache TTL is 5 minutes for product listi",
+      "Feature flags are managed through Launch",
+      "Rate limiting is 100 requests per minute",
+      "After the team expands, split the monoli",
+      "Performance tuning",
+      "Active session"
+    ]
+  },
+  {
+    "id": "conflict_supersession_001_v11",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "Session event: patched a critical security vulnerability in auth."
+      },
+      {
+        "content": "Database migrations use Flyway."
+      },
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "The monorepo is structured with pnpm workspaces."
+      },
+      {
+        "content": "Active session: investigating the performance regression in v3.2."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": [
+      "Does not recommend 3000 unless explaining it was superseded."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "The monorepo is structured with pnpm wor",
+      "Database migrations use Flyway.",
+      "The database connection string is stored",
+      "For this team, always write tests before",
+      "Active session",
+      "Session event"
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v12",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "Content is served through a CDN with 1-hour cache."
+      },
+      {
+        "content": "Active session: drafting the migration plan for the new API."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "The monorepo is structured with pnpm workspaces."
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Session event: added end-to-end tests for the checkout flow."
+      },
+      {
+        "content": "Session timeout is set to 30 minutes of inactivity."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Content is served through a CDN with 1-h",
+      "Session timeout is set to 30 minutes of ",
+      "The monorepo is structured with pnpm wor",
+      "Session event",
+      "Prefer composition over inheritance in c",
+      "Active session"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v13",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "Session timeout is set to 30 minutes of inactivity."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "When the certification expires, schedule renewal training."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the test suite runs, check for fla",
+      "When the certification expires, schedule",
+      "When the deployment finishes, verify the",
+      "Prefer async/await over raw callbacks in",
+      "Active session",
+      "Session timeout is set to 30 minutes of "
+    ]
+  },
+  {
+    "id": "preference_retention_001_v14",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "Session timeout is set to 30 minutes of inactivity."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Database migration process: backup, test locally, run migration, verify."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer functional programming patterns f",
+      "For this team, always write tests before",
+      "Prefer async/await over raw callbacks in",
+      "Session timeout is set to 30 minutes of ",
+      "After the contract is signed, set up the",
+      "Database migration process"
+    ]
+  },
+  {
+    "id": "user_correction_001_v15",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "Active session: investigating the performance regression in v3.2."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Write documentation in Markdown, not Con",
+      "Use feature flags for all new functional",
+      "Prefer async/await over raw callbacks in",
+      "Active session",
+      "When the new API is deployed, deprecate ",
+      "Feature flags are managed through Launch"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v16",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "Performance tuning: profile, identify bottleneck, optimize, re-profile."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Logging level defaults to INFO in production."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Always include API documentation in ever",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Prefer functional programming patterns f",
+      "Performance tuning",
+      "When the deployment finishes, verify the",
+      "Logging level defaults to INFO in produc"
+    ]
+  },
+  {
+    "id": "context_packing_001_v17",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "Rate limiting is 100 requests per minute per user."
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer composition over inheritance in c",
+      "Prefer functional programming patterns f",
+      "For this team, always write tests before",
+      "When Q2 planning starts, propose the per",
+      "Rate limiting is 100 requests per minute",
+      "Active session"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v18",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "Feature branch workflow: create branch, commit, push, open PR."
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "After the contract is signed, set up the",
+      "Active session",
+      "Feature branch workflow"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v19",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "Code review checklist: correctness, testing, docs, performance."
+      },
+      {
+        "content": "Session event: investigated a memory leak in the event loop."
+      },
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      },
+      {
+        "content": "Session event: patched a critical security vulnerability in auth."
+      },
+      {
+        "content": "Rate limiting is 100 requests per minute per user."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "After the contract is signed, set up the",
+      "Code review checklist",
+      "Rate limiting is 100 requests per minute"
+    ]
+  },
+  {
+    "id": "user_correction_001_v20",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Write documentation in Markdown, not Con",
+      "For this team, always write tests before",
+      "Prefer functional programming patterns f",
+      "Active session",
+      "Session event",
+      "Certificate renewal"
+    ]
+  },
+  {
+    "id": "context_packing_001_v21",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      },
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "The primary datacenter is in us-east-1."
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Prefer functional programming patterns f",
+      "For this team, always write tests before",
+      "Active session",
+      "The primary datacenter is in us-east-1.",
+      "After the contract is signed, set up the"
+    ]
+  },
+  {
+    "id": "context_packing_001_v22",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Session event: patched a critical security vulnerability in auth."
+      },
+      {
+        "content": "Active session: drafting the migration plan for the new API."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer composition over inheritance in c",
+      "Use TypeScript strict mode for all front",
+      "For this team, always write tests before",
+      "When the new API is deployed, deprecate ",
+      "Session event",
+      "Active session"
+    ]
+  },
+  {
+    "id": "user_correction_001_v23",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Session event: patched a critical security vulnerability in auth."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Code review checklist: correctness, testing, docs, performance."
+      },
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer async/await over raw callbacks in",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Write documentation in Markdown, not Con",
+      "Session event",
+      "Active session",
+      "Code review checklist"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v24",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "Logging level defaults to INFO in production."
+      },
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the security audit finishes, rotat",
+      "When the deployment finishes, verify the",
+      "After the test suite runs, check for fla",
+      "Prefer functional programming patterns f",
+      "Logging level defaults to INFO in produc",
+      "Active session"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v25",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "Rollback procedure: identify breaking change, revert, verify fix."
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Session event: upgraded PostgreSQL from 14 to 16."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use TypeScript strict mode for all front",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "For this team, always write tests before",
+      "Session event",
+      "Rollback procedure",
+      "When the new API is deployed, deprecate "
+    ]
+  },
+  {
+    "id": "conflict_supersession_001_v26",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      },
+      {
+        "content": "Rate limiting is 100 requests per minute per user."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": [
+      "Does not recommend 3000 unless explaining it was superseded."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Feature flags are managed through Launch",
+      "The database connection string is stored",
+      "Rate limiting is 100 requests per minute",
+      "Active session",
+      "After the team expands, split the monoli",
+      "Use conventional commits for all commit "
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v27",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "The deployment uses blue-green strategy."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      },
+      {
+        "content": "Rollback procedure: identify breaking change, revert, verify fix."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Rollback procedure",
+      "Prefer async/await over raw callbacks in",
+      "The deployment uses blue-green strategy."
+    ]
+  },
+  {
+    "id": "cross_project_isolation_001_v28",
+    "category": "isolation",
+    "setup_events": [
+      {
+        "content": "Incident response: acknowledge, triage, mitigate, postmortem."
+      },
+      {
+        "project": "project-a",
+        "content": "Use experimental unsafe cleanup in project A only.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      }
+    ],
+    "query": "In project-b, should I use unsafe cleanup?",
+    "expected_retrieval_contains": [],
+    "expected_behavior": "Does not transfer project-a preference to project-b.",
+    "negative_assertions": [
+      "No cross-project leakage."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer PostgreSQL over MongoDB for new s",
+      "For this team, always write tests before",
+      "Prefer functional programming patterns f",
+      "Session event",
+      "Incident response",
+      "When the new API is deployed, deprecate "
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v29",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: upgraded PostgreSQL from 14 to 16."
+      },
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      },
+      {
+        "content": "Session event: patched a critical security vulnerability in auth."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "The database connection string is stored",
+      "Prefer composition over inheritance in c"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v30",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      },
+      {
+        "content": "Cache TTL is 5 minutes for product listings."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Cache TTL is 5 minutes for product listi",
+      "Active session",
+      "When the certification expires, schedule"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v31",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      },
+      {
+        "content": "Monitoring setup: install agent, configure alerts, test notification."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "Session event: updated SSL certificates for the staging environment."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Prefer composition over inheritance in c",
+      "Active session",
+      "Monitoring setup"
+    ]
+  },
+  {
+    "id": "context_packing_001_v32",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "The CI pipeline runs on GitHub Actions."
+      },
+      {
+        "content": "Performance tuning: profile, identify bottleneck, optimize, re-profile."
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer async/await over raw callbacks in",
+      "Prefer composition over inheritance in c",
+      "Use feature flags for all new functional",
+      "Performance tuning",
+      "The CI pipeline runs on GitHub Actions.",
+      "When the certification expires, schedule"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v33",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Active session: analyzing the latest error logs from production."
+      },
+      {
+        "content": "Session event: updated SSL certificates for the staging environment."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer async/await over raw callbacks in",
+      "Use feature flags for all new functional",
+      "Prefer functional programming patterns f",
+      "Active session",
+      "When Q2 planning starts, propose the per",
+      "Session event"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v34",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Performance tuning: profile, identify bottleneck, optimize, re-profile."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "The application uses JWT tokens for authentication."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer functional programming patterns f",
+      "Always include API documentation in ever",
+      "Prefer async/await over raw callbacks in",
+      "Performance tuning",
+      "Active session",
+      "The application uses JWT tokens for auth"
+    ]
+  },
+  {
+    "id": "cross_project_isolation_001_v35",
+    "category": "isolation",
+    "setup_events": [
+      {
+        "content": "Database migrations use Flyway."
+      },
+      {
+        "project": "project-a",
+        "content": "Use experimental unsafe cleanup in project A only.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Active session: reviewing the pull request for the auth module."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      }
+    ],
+    "query": "In project-b, should I use unsafe cleanup?",
+    "expected_retrieval_contains": [],
+    "expected_behavior": "Does not transfer project-a preference to project-b.",
+    "negative_assertions": [
+      "No cross-project leakage."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use feature flags for all new functional",
+      "Use conventional commits for all commit ",
+      "Write documentation in Markdown, not Con",
+      "Active session",
+      "Session event",
+      "Database migrations use Flyway."
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v36",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      },
+      {
+        "content": "Backups run daily at 02:00 UTC."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "When Q2 planning starts, propose the per",
+      "After the team expands, split the monoli",
+      "When the certification expires, schedule",
+      "Session event",
+      "Backups run daily at 02",
+      "Active session"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v37",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "The deployment uses blue-green strategy."
+      },
+      {
+        "content": "Session event: added end-to-end tests for the checkout flow."
+      },
+      {
+        "content": "Session event: refactored the authentication middleware."
+      },
+      {
+        "content": "Log analysis: collect logs, identify patterns, correlate, report."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "The deployment uses blue-green strategy.",
+      "Log analysis",
+      "When the budget is approved, hire additi"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v38",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "Security audit: review dependencies, check secrets, scan endpoints."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the test suite runs, check for fla",
+      "When the budget is approved, hire additi",
+      "When Q2 planning starts, propose the per",
+      "Active session",
+      "Security audit",
+      "For this team, always write tests before"
+    ]
+  },
+  {
+    "id": "user_correction_001_v39",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Logging level defaults to INFO in production."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer composition over inheritance in c",
+      "For this team, always write tests before",
+      "Always include API documentation in ever",
+      "After the test suite runs, check for fla",
+      "Logging level defaults to INFO in produc",
+      "Active session"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v40",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "Active session: investigating the performance regression in v3.2."
+      },
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Session event: refactored the authentication middleware."
+      },
+      {
+        "content": "Incident response: acknowledge, triage, mitigate, postmortem."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "When the deployment finishes, verify the",
+      "Incident response"
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v41",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Environment variables are loaded from .env file."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "Session event: added end-to-end tests for the checkout flow."
+      },
+      {
+        "content": "Incident response: acknowledge, triage, mitigate, postmortem."
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "A/B test setup: define metric, split traffic, run experiment, analyze."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "A/B test setup",
+      "Incident response",
+      "Documentation update",
+      "Session event",
+      "Prefer functional programming patterns f",
+      "Environment variables are loaded from .e"
+    ]
+  },
+  {
+    "id": "conflict_supersession_001_v42",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      },
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "Cache TTL is 5 minutes for product listings."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "The application uses JWT tokens for authentication."
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": [
+      "Does not recommend 3000 unless explaining it was superseded."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Cache TTL is 5 minutes for product listi",
+      "The application uses JWT tokens for auth",
+      "The database connection string is stored",
+      "Active session",
+      "When the new API is deployed, deprecate ",
+      "Session event"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v43",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "Active session: writing unit tests for the payment processor."
+      },
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "Session event: refactored the authentication middleware."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "The database connection string is stored",
+      "Always include API documentation in ever"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v44",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "Monitoring setup: install agent, configure alerts, test notification."
+      },
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Session event: updated SSL certificates for the staging environment."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "When the budget is approved, hire additi",
+      "Monitoring setup"
+    ]
+  },
+  {
+    "id": "context_packing_001_v45",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "Database migration process: backup, test locally, run migration, verify."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "Rate limiting is 100 requests per minute per user."
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Write documentation in Markdown, not Con",
+      "Always include API documentation in ever",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Rate limiting is 100 requests per minute",
+      "Active session",
+      "Database migration process"
+    ]
+  },
+  {
+    "id": "cross_project_isolation_001_v46",
+    "category": "isolation",
+    "setup_events": [
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "project": "project-a",
+        "content": "Use experimental unsafe cleanup in project A only.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      }
+    ],
+    "query": "In project-b, should I use unsafe cleanup?",
+    "expected_retrieval_contains": [],
+    "expected_behavior": "Does not transfer project-a preference to project-b.",
+    "negative_assertions": [
+      "No cross-project leakage."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer async/await over raw callbacks in",
+      "Prefer functional programming patterns f",
+      "Write documentation in Markdown, not Con",
+      "Active session",
+      "When the deployment finishes, verify the",
+      "Session event"
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v47",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "Onboarding: create account, set up dev environment, first PR."
+      },
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Database migration process: backup, test locally, run migration, verify."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Onboarding",
+      "Certificate renewal",
+      "Database migration process",
+      "Active session",
+      "Prefer composition over inheritance in c",
+      "Session event"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v48",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "The application uses JWT tokens for authentication."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the team expands, split the monoli",
+      "When the budget is approved, hire additi",
+      "When Q2 planning starts, propose the per",
+      "The application uses JWT tokens for auth",
+      "Certificate renewal",
+      "Active session"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v49",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "Active session: drafting the migration plan for the new API."
+      },
+      {
+        "content": "Dependency update process: check changelog, update, run tests, commit."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "Backups run daily at 02:00 UTC."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "When the budget is approved, hire additi",
+      "After the contract is signed, set up the",
+      "After the team expands, split the monoli",
+      "Backups run daily at 02",
+      "Dependency update process",
+      "Active session"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v50",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "Active session: analyzing the latest error logs from production."
+      },
+      {
+        "content": "Cache TTL is 5 minutes for product listings."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer composition over inheritance in c",
+      "Use TypeScript strict mode for all front",
+      "Use conventional commits for all commit ",
+      "Active session",
+      "Cache TTL is 5 minutes for product listi",
+      "When the deployment finishes, verify the"
+    ]
+  },
+  {
+    "id": "context_packing_001_v51",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "Logging level defaults to INFO in production."
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer functional programming patterns f",
+      "Write documentation in Markdown, not Con",
+      "Always include API documentation in ever",
+      "Active session",
+      "Logging level defaults to INFO in produc",
+      "Session event"
+    ]
+  },
+  {
+    "id": "cross_project_isolation_001_v52",
+    "category": "isolation",
+    "setup_events": [
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Incident response: acknowledge, triage, mitigate, postmortem."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "project": "project-a",
+        "content": "Use experimental unsafe cleanup in project A only.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Active session: analyzing the latest error logs from production."
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      }
+    ],
+    "query": "In project-b, should I use unsafe cleanup?",
+    "expected_retrieval_contains": [],
+    "expected_behavior": "Does not transfer project-a preference to project-b.",
+    "negative_assertions": [
+      "No cross-project leakage."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Always include API documentation in ever",
+      "Use feature flags for all new functional",
+      "Prefer composition over inheritance in c",
+      "Session event",
+      "Active session",
+      "Incident response"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v53",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      },
+      {
+        "content": "Incident response: acknowledge, triage, mitigate, postmortem."
+      },
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "When the new API is deployed, deprecate ",
+      "After the security audit finishes, rotat",
+      "When Q2 planning starts, propose the per",
+      "Incident response",
+      "Feature flags are managed through Launch",
+      "Active session"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v54",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the team expands, split the monoli",
+      "When the deployment finishes, verify the",
+      "When the new API is deployed, deprecate ",
+      "Documentation update",
+      "Session event",
+      "Active session"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v55",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      },
+      {
+        "content": "Active session: analyzing the latest error logs from production."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "After the database migration completes, update the connection strings."
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the security audit finishes, rotat",
+      "When the new API is deployed, deprecate ",
+      "After the database migration completes, ",
+      "Certificate renewal",
+      "Session event",
+      "Active session"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v56",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      },
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "When the budget is approved, hire additi",
+      "For this team, always write tests before",
+      "Feature flags are managed through Launch"
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v57",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "A/B test setup: define metric, split traffic, run experiment, analyze."
+      },
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "Environment variables are loaded from .env file."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "Rollback procedure: identify breaking change, revert, verify fix."
+      },
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Rollback procedure",
+      "A/B test setup",
+      "Documentation update",
+      "Use TypeScript strict mode for all front",
+      "Environment variables are loaded from .e",
+      "Active session"
+    ]
+  },
+  {
+    "id": "user_correction_001_v58",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Active session: writing unit tests for the payment processor."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Rollback procedure: identify breaking change, revert, verify fix."
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Always include API documentation in ever",
+      "Use feature flags for all new functional",
+      "Prefer functional programming patterns f",
+      "Active session",
+      "Session event",
+      "Rollback procedure"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v59",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "The build artifact is a single fat JAR."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "Active session: reviewing the pull request for the auth module."
+      },
+      {
+        "content": "After the database migration completes, update the connection strings."
+      },
+      {
+        "content": "Code review checklist: correctness, testing, docs, performance."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the test suite runs, check for fla",
+      "After the contract is signed, set up the",
+      "After the database migration completes, ",
+      "Active session",
+      "The build artifact is a single fat JAR.",
+      "Code review checklist"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v60",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "After the database migration completes, update the connection strings."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Session event: investigated a memory leak in the event loop."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "Session event: upgraded PostgreSQL from 14 to 16."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "After the database migration completes, ",
+      "Prefer async/await over raw callbacks in"
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v61",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "Backups run daily at 02:00 UTC."
+      },
+      {
+        "content": "Code review checklist: correctness, testing, docs, performance."
+      },
+      {
+        "content": "Rate limiting is 100 requests per minute per user."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "The database connection string is stored",
+      "Backups run daily at 02",
+      "Rate limiting is 100 requests per minute",
+      "Active session",
+      "Code review checklist",
+      "Prefer async/await over raw callbacks in"
+    ]
+  },
+  {
+    "id": "context_packing_001_v62",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "Performance tuning: profile, identify bottleneck, optimize, re-profile."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use TypeScript strict mode for all front",
+      "Prefer composition over inheritance in c",
+      "Write documentation in Markdown, not Con",
+      "Active session",
+      "When the deployment finishes, verify the",
+      "Performance tuning"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v63",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "Active session: reviewing the pull request for the auth module."
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "Environment variables are loaded from .env file."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Active session",
+      "Environment variables are loaded from .e",
+      "Documentation update"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v64",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "When Q2 planning starts, propose the per",
+      "Certificate renewal"
+    ]
+  },
+  {
+    "id": "context_packing_001_v65",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "Environment variables are loaded from .env file."
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Always include API documentation in ever",
+      "Write documentation in Markdown, not Con",
+      "Use conventional commits for all commit ",
+      "Active session",
+      "Environment variables are loaded from .e",
+      "When the certification expires, schedule"
+    ]
+  },
+  {
+    "id": "episodic_audit_001_v66",
+    "category": "episodic",
+    "setup_events": [
+      {
+        "content": "The build artifact is a single fat JAR."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "Session event: changed parser.js because config.json allowed trailing commas unexpectedly.",
+        "expected_memory_system": "episodic"
+      },
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      }
+    ],
+    "query": "Why did we change parser.js?",
+    "expected_retrieval_contains": [
+      "trailing commas",
+      "config.json"
+    ],
+    "expected_behavior": "Answers with timeline/provenance.",
+    "negative_assertions": [
+      "Does not answer only with a generic parser explanation."
+    ],
+    "expected_memory_systems": [
+      "episodic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "The build artifact is a single fat JAR.",
+      "When the budget is approved, hire additi",
+      "Certificate renewal"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v67",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "Backups run daily at 02:00 UTC."
+      },
+      {
+        "content": "Active session: reviewing the pull request for the auth module."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      },
+      {
+        "content": "Session event: updated SSL certificates for the staging environment."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "When the new API is deployed, deprecate ",
+      "Backups run daily at 02",
+      "Active session"
+    ]
+  },
+  {
+    "id": "context_packing_001_v68",
+    "category": "context_efficiency",
+    "setup_events": [
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "Repo A uses pnpm.",
+        "expected_memory_system": "preference",
+        "project": "repo-a"
+      },
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Repo B uses npm.",
+        "expected_memory_system": "preference",
+        "project": "repo-b"
+      },
+      {
+        "content": "Repo A release workflow requires changelog update.",
+        "expected_memory_system": "procedural",
+        "project": "repo-a"
+      },
+      {
+        "content": "Cache TTL is 5 minutes for product listings."
+      }
+    ],
+    "query": "In repo-a, prepare the release under a small context budget.",
+    "expected_retrieval_contains": [
+      "pnpm",
+      "changelog"
+    ],
+    "expected_behavior": "Returns only repo-a relevant preference/procedure.",
+    "negative_assertions": [
+      "Does not include repo-b npm preference."
+    ],
+    "expected_memory_systems": [
+      "preference",
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use conventional commits for all commit ",
+      "Use TypeScript strict mode for all front",
+      "For this team, always write tests before",
+      "Cache TTL is 5 minutes for product listi",
+      "Session event",
+      "When the certification expires, schedule"
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v69",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "Session event: fixed cross-origin request issues in the API."
+      },
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "The CI pipeline runs on GitHub Actions."
+      },
+      {
+        "content": "Monitoring setup: install agent, configure alerts, test notification."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "The deployment uses blue-green strategy."
+      },
+      {
+        "content": "Backups run daily at 02:00 UTC."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "The CI pipeline runs on GitHub Actions.",
+      "The deployment uses blue-green strategy.",
+      "Backups run daily at 02",
+      "When the deployment finishes, verify the",
+      "Session event",
+      "Monitoring setup"
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v70",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Health check endpoint is at /healthz."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      },
+      {
+        "content": "Error tracking is sent to Sentry."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Cache TTL is 5 minutes for product listings."
+      },
+      {
+        "content": "Session event: refactored the authentication middleware."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Error tracking is sent to Sentry.",
+      "Health check endpoint is at /healthz.",
+      "Cache TTL is 5 minutes for product listi",
+      "After the team expands, split the monoli",
+      "Active session",
+      "Session event"
+    ]
+  },
+  {
+    "id": "user_correction_001_v71",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Active session: analyzing the latest error logs from production."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Maximum upload file size is 25 MB."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use TypeScript strict mode for all front",
+      "Write documentation in Markdown, not Con",
+      "For this team, always write tests before",
+      "Active session",
+      "Session event",
+      "Maximum upload file size is 25 MB."
+    ]
+  },
+  {
+    "id": "user_correction_001_v72",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "Maximum upload file size is 25 MB."
+      },
+      {
+        "content": "Dependency update process: check changelog, update, run tests, commit."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use TypeScript strict mode for all front",
+      "Use conventional commits for all commit ",
+      "Prefer functional programming patterns f",
+      "Maximum upload file size is 25 MB.",
+      "Session event",
+      "Dependency update process"
+    ]
+  },
+  {
+    "id": "conflict_supersession_001_v73",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "Load test process: define scenarios, run test, analyze results."
+      },
+      {
+        "content": "Health check endpoint is at /healthz."
+      },
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "The monorepo is structured with pnpm workspaces."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Database migrations use Flyway."
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": [
+      "Does not recommend 3000 unless explaining it was superseded."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "The monorepo is structured with pnpm wor",
+      "Health check endpoint is at /healthz.",
+      "Database migrations use Flyway.",
+      "Use TypeScript strict mode for all front",
+      "Active session",
+      "Load test process"
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v74",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      },
+      {
+        "content": "A/B test setup: define metric, split traffic, run experiment, analyze."
+      },
+      {
+        "content": "The API gateway supports WebSocket connections."
+      },
+      {
+        "content": "Rollback procedure: identify breaking change, revert, verify fix."
+      },
+      {
+        "content": "Certificate renewal: check expiry, generate new cert, deploy, verify."
+      },
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "A/B test setup",
+      "Rollback procedure",
+      "Certificate renewal",
+      "After the test suite runs, check for fla",
+      "Active session",
+      "The API gateway supports WebSocket conne"
+    ]
+  },
+  {
+    "id": "user_correction_001_v75",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "The build artifact is a single fat JAR."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Always include API documentation in ever",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Prefer functional programming patterns f",
+      "Documentation update",
+      "Active session",
+      "The build artifact is a single fat JAR."
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v76",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Maximum upload file size is 25 MB."
+      },
+      {
+        "content": "When Q2 planning starts, propose the performance improvement initiative."
+      },
+      {
+        "content": "Log analysis: collect logs, identify patterns, correlate, report."
+      },
+      {
+        "content": "Environment variables are loaded from .env file."
+      },
+      {
+        "content": "Logging level defaults to INFO in production."
+      },
+      {
+        "content": "Active session: investigating the performance regression in v3.2."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Logging level defaults to INFO in produc",
+      "Maximum upload file size is 25 MB.",
+      "Environment variables are loaded from .e",
+      "Active session",
+      "When Q2 planning starts, propose the per",
+      "Log analysis"
+    ]
+  },
+  {
+    "id": "user_correction_001_v77",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Database migration process: backup, test locally, run migration, verify."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use conventional commits for all commit ",
+      "Always include API documentation in ever",
+      "Prefer functional programming patterns f",
+      "Active session",
+      "When the certification expires, schedule",
+      "Database migration process"
+    ]
+  },
+  {
+    "id": "cross_project_isolation_001_v78",
+    "category": "isolation",
+    "setup_events": [
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "Error tracking is sent to Sentry."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "A/B test setup: define metric, split traffic, run experiment, analyze."
+      },
+      {
+        "project": "project-a",
+        "content": "Use experimental unsafe cleanup in project A only.",
+        "expected_memory_system": "preference"
+      }
+    ],
+    "query": "In project-b, should I use unsafe cleanup?",
+    "expected_retrieval_contains": [],
+    "expected_behavior": "Does not transfer project-a preference to project-b.",
+    "negative_assertions": [
+      "No cross-project leakage."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer PostgreSQL over MongoDB for new s",
+      "For this team, always write tests before",
+      "Always include API documentation in ever",
+      "Session event",
+      "A/B test setup",
+      "Error tracking is sent to Sentry."
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v79",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "Session event: upgraded PostgreSQL from 14 to 16."
+      },
+      {
+        "content": "Environment variables are loaded from .env file."
+      },
+      {
+        "content": "Load test process: define scenarios, run test, analyze results."
+      },
+      {
+        "content": "Feature branch workflow: create branch, commit, push, open PR."
+      },
+      {
+        "content": "Active session: setting up the development environment on new machine."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "Feature branch workflow",
+      "Load test process",
+      "Documentation update",
+      "Session event",
+      "Environment variables are loaded from .e",
+      "Active session"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v80",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "A/B test setup: define metric, split traffic, run experiment, analyze."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "The database connection string is stored in /etc/config/db.env."
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      },
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the security audit finishes, rotat",
+      "When the budget is approved, hire additi",
+      "After the team expands, split the monoli",
+      "A/B test setup",
+      "The database connection string is stored",
+      "Session event"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v81",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "Content is served through a CDN with 1-hour cache."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "After the database migration completes, update the connection strings."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      },
+      {
+        "content": "Session event: added end-to-end tests for the checkout flow."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the database migration completes, ",
+      "After the security audit finishes, rotat",
+      "After the test suite runs, check for fla",
+      "Prefer functional programming patterns f",
+      "Content is served through a CDN with 1-h",
+      "Session event"
+    ]
+  },
+  {
+    "id": "user_correction_001_v82",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "The deployment uses blue-green strategy."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "For this team, always write tests before",
+      "Prefer composition over inheritance in c",
+      "Use TypeScript strict mode for all front",
+      "Active session",
+      "The deployment uses blue-green strategy.",
+      "After the test suite runs, check for fla"
+    ]
+  },
+  {
+    "id": "user_correction_001_v83",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "Monitoring setup: install agent, configure alerts, test notification."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use conventional commits for all commit ",
+      "Prefer functional programming patterns f",
+      "Write documentation in Markdown, not Con",
+      "Session event",
+      "After the contract is signed, set up the",
+      "Monitoring setup"
+    ]
+  },
+  {
+    "id": "cross_project_isolation_001_v84",
+    "category": "isolation",
+    "setup_events": [
+      {
+        "content": "A/B test setup: define metric, split traffic, run experiment, analyze."
+      },
+      {
+        "content": "After the test suite runs, check for flaky tests."
+      },
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "project": "project-a",
+        "content": "Use experimental unsafe cleanup in project A only.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      }
+    ],
+    "query": "In project-b, should I use unsafe cleanup?",
+    "expected_retrieval_contains": [],
+    "expected_behavior": "Does not transfer project-a preference to project-b.",
+    "negative_assertions": [
+      "No cross-project leakage."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer async/await over raw callbacks in",
+      "Always include API documentation in ever",
+      "Use feature flags for all new functional",
+      "A/B test setup",
+      "Active session",
+      "After the test suite runs, check for fla"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v85",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "Session timeout is set to 30 minutes of inactivity."
+      },
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      },
+      {
+        "content": "Active session: investigating the performance regression in v3.2."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "When the certification expires, schedule",
+      "After the security audit finishes, rotat",
+      "When the deployment finishes, verify the",
+      "Session timeout is set to 30 minutes of ",
+      "Always include API documentation in ever",
+      "Active session"
+    ]
+  },
+  {
+    "id": "user_correction_001_v86",
+    "category": "correction",
+    "setup_events": [
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      },
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      },
+      {
+        "content": "Correction: user prefers detailed explanations for architecture decisions.",
+        "expected_memory_system": "preference",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Monitoring setup: install agent, configure alerts, test notification."
+      },
+      {
+        "content": "User prefers very terse answers.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      }
+    ],
+    "query": "Explain the architecture tradeoff.",
+    "expected_retrieval_contains": [
+      "detailed explanations",
+      "architecture decisions"
+    ],
+    "expected_behavior": "Uses corrected preference for detailed architecture explanation.",
+    "negative_assertions": [
+      "Does not follow old terse preference for this case."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer composition over inheritance in c",
+      "Write documentation in Markdown, not Con",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Feature flags are managed through Launch",
+      "Active session",
+      "Monitoring setup"
+    ]
+  },
+  {
+    "id": "procedural_reuse_001_v87",
+    "category": "procedural",
+    "setup_events": [
+      {
+        "content": "Active session: analyzing the latest error logs from production."
+      },
+      {
+        "content": "A/B test setup: define metric, split traffic, run experiment, analyze."
+      },
+      {
+        "content": "Code review checklist: correctness, testing, docs, performance."
+      },
+      {
+        "content": "Successful release workflow: run tests, update changelog, bump version, commit, tag, push.",
+        "expected_memory_system": "procedural"
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Dependency update process: check changelog, update, run tests, commit."
+      },
+      {
+        "content": "Backups run daily at 02:00 UTC."
+      }
+    ],
+    "query": "Prepare a release for this project.",
+    "expected_retrieval_contains": [
+      "run tests",
+      "changelog",
+      "bump version"
+    ],
+    "expected_behavior": "Retrieves and follows the release workflow.",
+    "negative_assertions": [
+      "Does not skip validation before version bump."
+    ],
+    "expected_memory_systems": [
+      "procedural"
+    ],
+    "forbidden_retrieval_contains": [
+      "A/B test setup",
+      "Code review checklist",
+      "Dependency update process",
+      "Use TypeScript strict mode for all front",
+      "Active session",
+      "Backups run daily at 02"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v88",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "Environment variables are loaded from .env file."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Prefer composition over inheritance in class design."
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Use conventional commits for all commit ",
+      "Use TypeScript strict mode for all front",
+      "Prefer composition over inheritance in c",
+      "Session event",
+      "After the security audit finishes, rotat",
+      "Environment variables are loaded from .e"
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v89",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "Database migrations use Flyway."
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      },
+      {
+        "content": "The deployment uses blue-green strategy."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "After the security audit finishes, rotate all API keys."
+      },
+      {
+        "content": "The primary datacenter is in us-east-1."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Database migrations use Flyway.",
+      "The primary datacenter is in us-east-1.",
+      "The deployment uses blue-green strategy.",
+      "After the security audit finishes, rotat",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Session event"
+    ]
+  },
+  {
+    "id": "conflict_supersession_001_v90",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "When the deployment finishes, verify the health check endpoint."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "Session timeout is set to 30 minutes of inactivity."
+      },
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "The CI pipeline runs on GitHub Actions."
+      },
+      {
+        "content": "Maximum upload file size is 25 MB."
+      },
+      {
+        "content": "Write documentation in Markdown, not Confluence."
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": [
+      "Does not recommend 3000 unless explaining it was superseded."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "The CI pipeline runs on GitHub Actions.",
+      "Maximum upload file size is 25 MB.",
+      "Session timeout is set to 30 minutes of ",
+      "Active session",
+      "When the deployment finishes, verify the",
+      "Write documentation in Markdown, not Con"
+    ]
+  },
+  {
+    "id": "semantic_project_fact_001_v91",
+    "category": "semantic",
+    "setup_events": [
+      {
+        "content": "Prefer async/await over raw callbacks in new code."
+      },
+      {
+        "content": "Content is served through a CDN with 1-hour cache."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "Environment variables are loaded from .env file."
+      },
+      {
+        "content": "Cache TTL is 5 minutes for product listings."
+      },
+      {
+        "content": "Documentation update: identify changes, update docs, review, publish."
+      },
+      {
+        "content": "The API server listens on port 5173 in development.",
+        "expected_memory_system": "semantic"
+      }
+    ],
+    "query": "What dev port should the API server use?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Answers 5173 with project provenance.",
+    "negative_assertions": [
+      "Does not invent a default port."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "Cache TTL is 5 minutes for product listi",
+      "Environment variables are loaded from .e",
+      "Content is served through a CDN with 1-h",
+      "Prefer async/await over raw callbacks in",
+      "Active session",
+      "Documentation update"
+    ]
+  },
+  {
+    "id": "prospective_trigger_001_v92",
+    "category": "prospective",
+    "setup_events": [
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Active session: drafting the migration plan for the new API."
+      },
+      {
+        "content": "After tests pass, update the changelog.",
+        "expected_memory_system": "prospective",
+        "expected_trigger": "after tests pass"
+      },
+      {
+        "content": "When the certification expires, schedule renewal training."
+      },
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      },
+      {
+        "content": "When the new API is deployed, deprecate the old v1 endpoints."
+      }
+    ],
+    "query": "Tests now pass. What should happen next?",
+    "expected_retrieval_contains": [
+      "update the changelog"
+    ],
+    "expected_behavior": "Surfaces changelog update as next step.",
+    "negative_assertions": [
+      "Does not fire before tests pass."
+    ],
+    "expected_memory_systems": [
+      "prospective"
+    ],
+    "forbidden_retrieval_contains": [
+      "After the team expands, split the monoli",
+      "When the certification expires, schedule",
+      "When the new API is deployed, deprecate ",
+      "Feature flags are managed through Launch",
+      "Active session",
+      "Session event"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v93",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "Feature flags are managed through LaunchDarkly."
+      },
+      {
+        "content": "Always include API documentation in every pull request."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      },
+      {
+        "content": "Active session: updating the deployment configuration."
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Always include API documentation in ever",
+      "For this team, always write tests before",
+      "Use feature flags for all new functional",
+      "Feature flags are managed through Launch",
+      "Session event",
+      "Active session"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v94",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "The application uses JWT tokens for authentication."
+      },
+      {
+        "content": "Use conventional commits for all commit messages."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "Database migration process: backup, test locally, run migration, verify."
+      },
+      {
+        "content": "Session event: added structured logging to all services."
+      },
+      {
+        "content": "Use feature flags for all new functionality."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Use conventional commits for all commit ",
+      "Use feature flags for all new functional",
+      "Session event",
+      "The application uses JWT tokens for auth",
+      "Database migration process"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v95",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "Active session: experimenting with a new caching strategy."
+      },
+      {
+        "content": "Session event: reduced Docker image size from 1.2GB to 400MB."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Rollback procedure: identify breaking change, revert, verify fix."
+      },
+      {
+        "content": "Session event: upgraded PostgreSQL from 14 to 16."
+      },
+      {
+        "content": "The application uses JWT tokens for authentication."
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Rollback procedure",
+      "The application uses JWT tokens for auth",
+      "Active session"
+    ]
+  },
+  {
+    "id": "conflict_supersession_001_v96",
+    "category": "conflict",
+    "setup_events": [
+      {
+        "content": "The dev server uses port 3000.",
+        "expected_memory_system": "semantic"
+      },
+      {
+        "content": "Correction: the dev server was moved from port 3000 to 5173.",
+        "expected_memory_system": "semantic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "The API gateway supports WebSocket connections."
+      },
+      {
+        "content": "The primary datacenter is in us-east-1."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Rate limiting is 100 requests per minute per user."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Active session: troubleshooting the WebSocket connection drop."
+      }
+    ],
+    "query": "Which port should I use for the dev server?",
+    "expected_retrieval_contains": [
+      "5173"
+    ],
+    "expected_behavior": "Prefers latest corrected port.",
+    "negative_assertions": [
+      "Does not recommend 3000 unless explaining it was superseded."
+    ],
+    "expected_memory_systems": [
+      "semantic"
+    ],
+    "forbidden_retrieval_contains": [
+      "The API gateway supports WebSocket conne",
+      "The primary datacenter is in us-east-1.",
+      "Rate limiting is 100 requests per minute",
+      "Prefer functional programming patterns f",
+      "Session event",
+      "Active session"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v97",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "After the team expands, split the monolith into microservices."
+      },
+      {
+        "content": "Session event: added end-to-end tests for the checkout flow."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      },
+      {
+        "content": "Active session: analyzing the latest error logs from production."
+      },
+      {
+        "content": "Session event: user reported slow query performance on dashboard."
+      },
+      {
+        "content": "Session event: fixed a race condition in the payment webhook."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "After the team expands, split the monoli",
+      "Use TypeScript strict mode for all front",
+      "Active session"
+    ]
+  },
+  {
+    "id": "preference_retention_001_v98",
+    "category": "preference",
+    "setup_events": [
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "Session event: refactored the authentication middleware."
+      },
+      {
+        "content": "For this team, always write tests before implementation."
+      },
+      {
+        "content": "For this repo, always use pnpm instead of npm.",
+        "expected_memory_system": "preference"
+      },
+      {
+        "content": "After the contract is signed, set up the integration environment."
+      },
+      {
+        "content": "The CI pipeline runs on GitHub Actions."
+      },
+      {
+        "content": "Use TypeScript strict mode for all frontend projects."
+      }
+    ],
+    "query": "Install dependencies for this repo.",
+    "expected_retrieval_contains": [
+      "pnpm"
+    ],
+    "expected_behavior": "Uses pnpm, not npm.",
+    "negative_assertions": [
+      "Does not apply pnpm preference outside the repo scope."
+    ],
+    "expected_memory_systems": [
+      "preference"
+    ],
+    "forbidden_retrieval_contains": [
+      "For this team, always write tests before",
+      "Prefer PostgreSQL over MongoDB for new s",
+      "Use TypeScript strict mode for all front",
+      "The CI pipeline runs on GitHub Actions.",
+      "After the contract is signed, set up the",
+      "Session event"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v99",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "Code review checklist: correctness, testing, docs, performance."
+      },
+      {
+        "content": "The build artifact is a single fat JAR."
+      },
+      {
+        "content": "Prefer functional programming patterns for data transformations."
+      },
+      {
+        "content": "Session event: optimized the image processing pipeline."
+      },
+      {
+        "content": "Session event: added end-to-end tests for the checkout flow."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "Session event: implemented WebSocket reconnection logic."
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "Code review checklist",
+      "The build artifact is a single fat JAR.",
+      "Prefer functional programming patterns f"
+    ]
+  },
+  {
+    "id": "forgetting_expiry_001_v100",
+    "category": "forgetting",
+    "setup_events": [
+      {
+        "content": "When the budget is approved, hire additional SRE team members."
+      },
+      {
+        "content": "Active session: currently debugging the CI pipeline failure."
+      },
+      {
+        "content": "Prefer PostgreSQL over MongoDB for new services."
+      },
+      {
+        "content": "Session event: migrated CI from Jenkins to GitHub Actions."
+      },
+      {
+        "content": "Session event: refactored the authentication middleware."
+      },
+      {
+        "content": "Temporary hypothesis: the failure may be caused by a missing API key.",
+        "expected_memory_system": "working",
+        "lifecycle_state": "temporary"
+      },
+      {
+        "content": "Session event: debugged an intermittent 503 error in production."
+      },
+      {
+        "content": "The missing API key hypothesis was disproven; the real issue was invalid JSON.",
+        "expected_memory_system": "episodic",
+        "expected_relation": "supersedes"
+      }
+    ],
+    "query": "Why did the tests fail?",
+    "expected_retrieval_contains": [
+      "invalid JSON"
+    ],
+    "expected_behavior": "Does not present disproven hypothesis as current truth.",
+    "negative_assertions": [
+      "Does not blame the API key as the active cause."
+    ],
+    "expected_memory_systems": [
+      "episodic",
+      "working"
+    ],
+    "forbidden_retrieval_contains": [
+      "Session event",
+      "Session event",
+      "Session event",
+      "When the budget is approved, hire additi",
+      "Active session",
+      "Prefer PostgreSQL over MongoDB for new s"
+    ]
+  }
+]

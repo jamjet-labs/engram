@@ -709,7 +709,7 @@ wheels = [
 
 [[package]]
 name = "jamjet-engram"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -723,6 +723,7 @@ dependencies = [
     { name = "openai" },
     { name = "pydantic" },
     { name = "python-dateutil" },
+    { name = "typer" },
     { name = "uvicorn" },
 ]
 
@@ -776,6 +777,7 @@ requires-dist = [
     { name = "sentence-transformers", marker = "extra == 'rerank'", specifier = ">=3" },
     { name = "sentence-transformers", marker = "extra == 'training'", specifier = ">=3" },
     { name = "torch", marker = "extra == 'training'", specifier = ">=2.0" },
+    { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", specifier = ">=0.46.0" },
 ]
 provides-extras = ["test", "dev", "rerank", "training"]

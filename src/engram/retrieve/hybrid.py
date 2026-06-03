@@ -4,28 +4,22 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
 from engram.embedding.base import EmbeddingProvider
-from engram.models import Fact
+from engram.models import Fact, LifecycleState, MemorySystem
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.temporal import TemporalIntent, detect_temporal_intent
 from engram.scope import Scope
 from engram.store.base import EngramStore
 from engram.vector.base import VectorStore
 
+IntentConfidence = Literal["low", "medium", "high"]
+
 
 class HybridRetriever:
-    """6-signal hybrid retrieval (vector + keyword for now; graph + temporal in Phase 5+).
-
-    Pipeline:
-      1. Embed query
-      2. Vector search top-(k * pool_multiplier)
-      3. Keyword (FTS5) search top-(k * pool_multiplier)
-      4. Merge by fact_id: score = vector_weight*vec + keyword_weight*kw
-      5. Fetch full Fact rows from FactStore
-      6. Optional rerank via Reranker; truncate to top_k
-    """
+    """6-signal hybrid retrieval (vector + keyword for now; graph + temporal in Phase 5+)."""
 
     def __init__(
         self,
@@ -47,15 +41,54 @@ class HybridRetriever:
         scope: Scope,
         top_k: int = 10,
         temporal_anchor: datetime | None = None,
+        memory_systems: tuple[MemorySystem, ...] | None = None,
+        memory_subtypes: tuple[str, ...] | None = None,
+        tags: tuple[str, ...] | None = None,
+        include_lifecycle_states: tuple[LifecycleState, ...] | None = None,
+        exclude_lifecycle_states: tuple[LifecycleState, ...] | None = None,
+        intent_confidence: IntentConfidence | None = None,
+        allow_sensitive_recall: bool = False,
     ) -> list[ScoredFact]:
         if not query.strip():
             return []
         cfg = self._config
+        active_memory_systems = memory_systems if memory_systems is not None else cfg.memory_systems
+        active_memory_subtypes = (
+            memory_subtypes if memory_subtypes is not None else cfg.memory_subtypes
+        )
+        active_tags = tags if tags is not None else cfg.tags
+        active_include_lifecycle = (
+            include_lifecycle_states
+            if include_lifecycle_states is not None
+            else cfg.include_lifecycle_states
+        )
+        active_exclude_lifecycle = (
+            exclude_lifecycle_states
+            if exclude_lifecycle_states is not None
+            else cfg.exclude_lifecycle_states
+        )
+        if active_include_lifecycle is not None and exclude_lifecycle_states is None:
+            active_exclude_lifecycle = tuple(
+                state for state in active_exclude_lifecycle if state not in active_include_lifecycle
+            )
+
+        strict_filter = intent_confidence == "high" if intent_confidence is not None else True
+        boost_weight = cfg.intent_boost_weight if intent_confidence in ("low", "medium") else 0.0
+
         candidate_k = top_k * cfg.candidate_pool_multiplier
+        if any(
+            filter_value is not None
+            for filter_value in (
+                active_memory_systems if strict_filter else None,
+                active_memory_subtypes,
+                active_tags,
+                active_include_lifecycle,
+            )
+        ):
+            candidate_k = max(candidate_k, 1000)
         intent = detect_temporal_intent(query)
         anchor = temporal_anchor or datetime.now(UTC)
 
-        # Phase 9 — Stage 1: session-first retrieval (when enabled)
         allowed_sessions: set[str] | None = None
         if cfg.enable_two_stage:
             session_scores = await self._facts.aggregate_sessions(
@@ -63,51 +96,71 @@ class HybridRetriever:
             )
             if session_scores:
                 allowed_sessions = {sid for sid, _ in session_scores}
-            # If Stage 1 returns nothing, we fall through to global retrieval
-            # rather than emit an empty result — handles the "first ingestion
-            # didn't tag session_id" case gracefully.
 
-        # 1. Vector search
         [q_vec] = await self._embed.embed([query])
         vec_matches = await self._vec.search(q_vec, scope, k=candidate_k)
         vec_scores: dict[UUID, float] = {m.fact_id: m.score for m in vec_matches}
 
-        # 2. Keyword search
-        kw_facts = await self._facts.keyword_search(query, scope, limit=candidate_k)
-        # Normalize by inverse rank (top result -> 1.0, last -> 1/candidate_k)
+        kw_facts = await self._facts.keyword_search(
+            query,
+            scope,
+            limit=candidate_k,
+            memory_systems=active_memory_systems if strict_filter else None,
+            memory_subtypes=active_memory_subtypes,
+            tags=active_tags,
+            include_lifecycle_states=active_include_lifecycle,
+            exclude_lifecycle_states=active_exclude_lifecycle,
+        )
         kw_scores: dict[UUID, float] = {}
         for i, f in enumerate(kw_facts):
             kw_scores[f.id] = 1.0 - (i / max(1, candidate_k))
 
-        # 3. Merge candidate IDs
         all_ids: set[UUID] = set(vec_scores.keys()) | set(kw_scores.keys())
         if not all_ids:
             return []
 
-        # Phase 9 — Stage 2 filter: drop candidates whose session isn't in the top-K
-        # Applied to facts we have full rows for; for vector-only IDs we'll check
-        # after fetching them below.
-
-        # 4. Resolve full Fact rows (some IDs may live only in vec store, some only in kw)
-        # First, the keyword side already has the full Fact rows
         facts_by_id: dict[UUID, Fact] = {f.id: f for f in kw_facts}
-        # Then fetch any missing IDs from fact_store
         missing = [fid for fid in all_ids if fid not in facts_by_id]
         for fid in missing:
             fetched = await self._facts.get_fact(fid, scope)
             if fetched is not None:
                 facts_by_id[fid] = fetched
 
-        # 5. Compute merged score (Stage 2 + Phase 13 superseded filters happen here)
         scored: list[ScoredFact] = []
         for fid, fact in facts_by_id.items():
-            # Phase 13: exclude superseded facts by default
             if cfg.exclude_superseded and fact.superseded_by is not None:
+                continue
+            if (
+                strict_filter
+                and active_memory_systems is not None
+                and fact.memory_system not in active_memory_systems
+            ):
+                continue
+            if (
+                active_memory_subtypes is not None
+                and fact.memory_subtype not in active_memory_subtypes
+            ):
+                continue
+            if active_tags is not None and not set(active_tags).issubset(set(fact.tags)):
+                continue
+            if (
+                active_include_lifecycle is not None
+                and fact.lifecycle_state not in active_include_lifecycle
+            ):
+                continue
+            if fact.lifecycle_state in active_exclude_lifecycle:
                 continue
             if (
                 allowed_sessions is not None
                 and fact.session_id is not None
                 and fact.session_id not in allowed_sessions
+            ):
+                continue
+            if (
+                not allow_sensitive_recall
+                and fact.retrieval_policy == "explicit_only"
+                and not active_memory_subtypes
+                and not active_tags
             ):
                 continue
             vs = vec_scores.get(fid, 0.0)
@@ -117,7 +170,21 @@ class HybridRetriever:
                 if intent is not None
                 else 0.0
             )
-            final = cfg.vector_weight * vs + cfg.keyword_weight * ks + cfg.temporal_weight * ts
+
+            boost = 0.0
+            if (
+                boost_weight > 0
+                and active_memory_systems is not None
+                and fact.memory_system in active_memory_systems
+            ):
+                boost = boost_weight
+
+            final = (
+                cfg.vector_weight * vs
+                + cfg.keyword_weight * ks
+                + cfg.temporal_weight * ts
+                + boost
+            )
             scored.append(
                 ScoredFact(
                     fact=fact,
@@ -130,13 +197,11 @@ class HybridRetriever:
 
         scored.sort(key=lambda s: s.score, reverse=True)
 
-        # 6. Optional rerank — over-fetch then truncate
         if self._reranker is not None:
             scored = await self._reranker.rerank(query, scored, top_k=top_k)
         else:
             scored = scored[:top_k]
 
-        # 7. Record access for the surviving results
         for sf in scored:
             await self._facts.record_access(sf.fact.id)
 
@@ -146,13 +211,6 @@ class HybridRetriever:
 def _temporal_score(
     fact: Fact, anchor: datetime, intent: TemporalIntent, sigma_days: float
 ) -> float:
-    """Return a [0, 1] temporal-relevance score for a fact given query intent.
-
-    - If the fact has no event_date AND no mention_date, return 0.
-    - For RECENCY/POINT_IN_TIME: Gaussian decay from anchor.
-    - For DURATION: prefer facts with explicit event_date over those without.
-    - For ORDERING: same as RECENCY (most recent gets highest score).
-    """
     ref = fact.event_date or fact.mention_date
     if ref is None:
         return 0.5 if intent == TemporalIntent.DURATION else 0.0

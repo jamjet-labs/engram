@@ -2,7 +2,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from engram.models import ChatMessage, Fact
+from engram.models import (
+    ChatMessage,
+    Fact,
+    LifecycleState,
+    MemorySystem,
+    PromotionState,
+)
 from engram.scope import Scope
 from engram.store.sqlite import SqliteStore
 
@@ -179,3 +185,57 @@ async def test_record_access_increments_count(store: SqliteStore, acme_alice: Sc
     got = await store.get_fact(f.id, acme_alice)
     assert got is not None
     assert got.access_count == 2
+
+
+async def test_upsert_fact_roundtrips_typed_memory_metadata(
+    store: SqliteStore, acme_alice: Scope
+) -> None:
+    f = Fact(
+        text="alice prefers espresso",
+        scope=acme_alice,
+        valid_from=_now(),
+        memory_system=MemorySystem.PREFERENCE,
+        memory_subtype="tool_preference",
+        secondary_systems=[MemorySystem.SEMANTIC],
+        tags=["espresso"],
+        lifecycle_state=LifecycleState.CANONICAL,
+        promotion_state=PromotionState.PROMOTED,
+        retrieval_policy="always",
+    )
+    await store.upsert_fact(f)
+    got = await store.get_fact(f.id, acme_alice)
+    assert got is not None
+    assert got.memory_system == MemorySystem.PREFERENCE
+    assert got.memory_subtype == "tool_preference"
+    assert got.secondary_systems == [MemorySystem.SEMANTIC]
+    assert got.tags == ["espresso"]
+    assert got.lifecycle_state == LifecycleState.CANONICAL
+    assert got.promotion_state == PromotionState.PROMOTED
+    assert got.retrieval_policy == "always"
+
+
+async def test_typed_metadata_does_not_overwrite_user_metadata_keys(
+    store: SqliteStore, acme_alice: Scope
+) -> None:
+    f = Fact(
+        text="alice prefers espresso",
+        scope=acme_alice,
+        valid_from=_now(),
+        memory_system=MemorySystem.PREFERENCE,
+        memory_subtype="tool_preference",
+        tags=["typed"],
+        metadata={
+            "memory_system": "legacy-custom",
+            "memory_subtype": "legacy-subtype",
+            "tags": ["legacy"],
+        },
+    )
+    await store.upsert_fact(f)
+    got = await store.get_fact(f.id, acme_alice)
+    assert got is not None
+    assert got.memory_system == MemorySystem.PREFERENCE
+    assert got.memory_subtype == "tool_preference"
+    assert got.tags == ["typed"]
+    assert got.metadata["memory_system"] == "legacy-custom"
+    assert got.metadata["memory_subtype"] == "legacy-subtype"
+    assert got.metadata["tags"] == ["legacy"]

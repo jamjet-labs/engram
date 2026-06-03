@@ -33,6 +33,38 @@ class Polarity(StrEnum):
     HYPOTHETICAL = "hypothetical"
 
 
+class MemorySystem(StrEnum):
+    """Functional memory system for typed-memory retrieval."""
+
+    WORKING = "working"
+    EPISODIC = "episodic"
+    SEMANTIC = "semantic"
+    PROCEDURAL = "procedural"
+    PROSPECTIVE = "prospective"
+    PREFERENCE = "preference"
+
+
+class LifecycleState(StrEnum):
+    """Lifecycle state for typed memory facts."""
+
+    TEMPORARY = "temporary"
+    DURABLE = "durable"
+    CANONICAL = "canonical"
+    DEPRECATED = "deprecated"
+    SUPERSEDED = "superseded"
+    EXPIRED = "expired"
+
+
+class PromotionState(StrEnum):
+    """Promotion/consolidation state for typed memory facts."""
+
+    RAW = "raw"
+    CANDIDATE = "candidate"
+    PROMOTED = "promoted"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"
+
+
 class Entity(BaseModel):
     """A named entity referenced by one or more facts."""
 
@@ -88,6 +120,15 @@ class Fact(BaseModel):
     category: str | None = None
     polarity: Polarity = Polarity.AFFIRMATIVE
     tier: MemoryTier = MemoryTier.WORKING
+
+    memory_system: MemorySystem = MemorySystem.WORKING
+    memory_subtype: str | None = None
+    secondary_systems: list[MemorySystem] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    lifecycle_state: LifecycleState = LifecycleState.DURABLE
+    promotion_state: PromotionState = PromotionState.RAW
+    retrieval_policy: str | None = None
+    valid_until: datetime | None = None
 
     event_date: datetime | None = None
     mention_date: datetime | None = None

@@ -64,6 +64,8 @@ Issues = "https://github.com/jamjet-labs/engram/issues"
 
 [project.scripts]
 engram-server = "engram.cli:app"
+engram-context = "engram.profile_cli:main"
+engram-mcp-stdio = "engram.server.stdio_mcp:main"
 
 [build-system]
 requires = ["hatchling"]

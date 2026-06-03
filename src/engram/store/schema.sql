@@ -1,4 +1,4 @@
--- Engram v2 SQLite schema (Phase 1)
+-- Engram v2 SQLite schema
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
