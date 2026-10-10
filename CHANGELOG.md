@@ -4,14 +4,26 @@ All notable changes to Engram v2.0 (the Python rewrite) are documented here. For
 
 ## [Unreleased]
 
-### Changed
-- **License: MIT → Apache 2.0.** Aligns with `jamjet-labs/jamjet` (Rust runtime) and the rest of the agent-memory ecosystem (Mem0, Letta, Zep all Apache 2.0). Apache 2.0 also includes an explicit patent grant from contributors, valued by enterprise adopters. Clean switch — repo was private during the MIT period, no MIT-licensed copies are in the wild.
+Target version: 0.3.0.
 
 ### Added
+- **Revocation enforced at retrieval.** `Engram.revoke()` writes a tombstone; `Engram.supersede()` now revokes the old fact and links the replacement. Revoked facts are withheld from every read path through one SQL view (`hidden_facts`), including vector hits from a stale index, keyword search, session ranking, events linked by `source_fact_ids`, transcript reads used by query-time re-extraction, the reader tools, HTTP and MCP. Motivated by arXiv 2609.08258.
+- Content tombstones: re-recording revoked text, or a trivial variant of it, is stored but withheld. `record(reject_revoked=True)` raises `RevokedContentError` instead. `Engram.reinstate()` is the only way back and is audited.
+- `record(derived_from=[...])`: a fact concluded from a revoked fact is withheld too, transitively.
+- `Engram.erase()`: hard delete of a fact, its copies, derived facts, linked events and transcript turns, with a content-free `ErasureRecord`. Enables SQLite `secure_delete` and FTS5 `secure-delete`, checkpoints the WAL, and rebuilds the vector index without the erased vectors.
+- Provenance: `ScoredFact.provenance`, `Engram.explain()`, `Engram.context_entries()`, `POST /v1/memory/recall_with_provenance`, and `include_provenance` on the MCP `memory_recall` tool. `record()` takes `actor` and `source_message_id`; the HTTP and MCP record calls take optional `actor` and `derived_from`.
+- `Engram.revocations()` and `Engram.erasures()` list the audit records.
 - `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md`, `.github/pull_request_template.md` — inbound contribution scaffolding for the public-launch transition.
 - `.github/workflows/release.yml` — automated release on `v*.*.*` tag push: builds wheel + sdist with `uv build`, publishes to PyPI via OIDC trusted publisher (no long-lived secrets), creates a GitHub Release with auto-generated notes. One-time PyPI side setup needed to register the trusted publisher (instructions in the workflow header).
 
+### Changed
+- `Engram.supersede()` returns the `Revocation` it wrote and accepts optional `actor` and `reason`. Superseded facts are now withheld even with `RetrievalConfig(exclude_superseded=False)`; that flag now only applies to `superseded_by` values set by hand.
+- Version 0.3.0 in `pyproject.toml` (not yet published).
+- New side tables (`fact_meta`, `fact_derivations`, `revocations`, `erasures`) and views are created on open; rows from 0.2 databases are backfilled with content hashes. No change to the existing HTTP response shapes.
+- **License: MIT → Apache 2.0.** Aligns with `jamjet-labs/jamjet` (Rust runtime) and the rest of the agent-memory ecosystem (Mem0, Letta, Zep all Apache 2.0). Apache 2.0 also includes an explicit patent grant from contributors, valued by enterprise adopters. Clean switch — repo was private during the MIT period, no MIT-licensed copies are in the wild.
+
 ### Fixed
+- HNSW search returned no vector hits after a fact was deleted and added again (the live count included superseded labels, so `k` exceeded the live set and hnswlib raised).
 - `benchmarks/smoke_runner.py` and `benchmarks/longmemeval_v2.py`: replaced developer-machine-specific oracle-path fallbacks (`../jamjet-research/...`) with a generic `./longmemeval_oracle.json` default. The `LONGMEMEVAL_ORACLE` env var still takes priority; the new default is a sensible cwd-relative path that fails fast with a clear message if the file isn't there.
 
 ## [0.2.0] — 2026-05-09
