@@ -146,6 +146,45 @@ class HnswVectorStore:
                 pass
             si.deleted.add(fact_id)
 
+    async def purge(self, fact_ids: list[UUID], scope: Scope) -> int:
+        """Physically drop vectors by rebuilding the scope's index without them.
+
+        ``delete`` only marks an element deleted; hnswlib keeps its vector in
+        the index memory. Erasure needs the vector gone from the structure, so
+        this copies the live vectors into a fresh index and discards the old
+        one. Returns how many of ``fact_ids`` had a vector in the index.
+        The old index's memory is released to the allocator, not zeroed.
+        """
+        si = self._scopes.get(scope)
+        if si is None:
+            return 0
+        with self._lock:
+            targets = {fid for fid in fact_ids if fid in si.uuid_to_int}
+            keep = sorted(
+                (label, uid)
+                for uid, label in si.uuid_to_int.items()
+                if uid not in targets and uid not in si.deleted
+            )
+            idx = hnswlib.Index(space="cosine", dim=self._dim)
+            idx.init_index(
+                max_elements=self._max_elements,
+                ef_construction=self._ef_construction,
+                M=self._m,
+                random_seed=self._random_seed,
+            )
+            idx.set_ef(64)
+            fresh = _ScopeIndex(index=idx)
+            if keep:
+                vectors = si.index.get_items([label for label, _ in keep])
+                labels = list(range(len(keep)))
+                idx.add_items(np.array(vectors, dtype=np.float32), labels)
+                for new_label, (_, uid) in zip(labels, keep, strict=True):
+                    fresh.uuid_to_int[uid] = new_label
+                    fresh.int_to_uuid[new_label] = uid
+                fresh.next_id = len(keep)
+            self._scopes[scope] = fresh
+        return len(targets)
+
     async def count(self, scope: Scope) -> int:
         si = self._scopes.get(scope)
         if si is None:

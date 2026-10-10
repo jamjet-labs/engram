@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
+from engram.governance import Provenance
 from engram.models import ChatMessage, Event, Fact
 from engram.scope import Scope
 
@@ -16,13 +18,33 @@ class EngramStore(Protocol):
     """Async storage interface for facts + raw chat messages.
 
     Concrete implementations: `engram.store.sqlite.SqliteStore`.
+
+    Revocation contract: every method that returns facts, events or messages
+    must withhold revoked content (see `engram.governance`). `provenance()` is
+    the last check retrieval runs before handing results back, so it must
+    omit ids that are not visible at the time of the call.
     """
 
     @abstractmethod
-    async def upsert_fact(self, fact: Fact) -> None: ...
+    async def upsert_fact(
+        self,
+        fact: Fact,
+        *,
+        writer: str | None = None,
+        source: str = "upsert",
+        derived_from: Iterable[UUID] | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    async def provenance(
+        self, fact_ids: Iterable[UUID], scope: Scope
+    ) -> dict[UUID, Provenance]: ...
 
     @abstractmethod
     async def get_fact(self, fact_id: UUID, scope: Scope) -> Fact | None: ...
+
+    @abstractmethod
+    async def get_facts(self, fact_ids: Iterable[UUID], scope: Scope) -> list[Fact]: ...
 
     @abstractmethod
     async def list_facts_by_session(

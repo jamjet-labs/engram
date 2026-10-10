@@ -21,6 +21,14 @@ from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
+from engram.governance import (
+    ErasureRecord,
+    Provenance,
+    Revocation,
+    RevokedContentError,
+    content_hash,
+    require_text,
+)
 from engram.llm.base import LLMClient
 from engram.llm.tier import ModelTier
 from engram.models import ChatMessage, Event, ExtractedFact, Fact, MemoryTier, Polarity
@@ -164,26 +172,130 @@ class Engram:
         new_fact_id: UUID,
         user_id: str = "default",
         org_id: str = "default",
-    ) -> None:
-        """Mark `old_fact_id` as superseded by `new_fact_id`.
+        actor: str | None = None,
+        reason: str | None = None,
+    ) -> Revocation:
+        """Revoke ``old_fact_id`` and link ``new_fact_id`` as its replacement.
 
-        Phase 13 active versioning: superseded facts are filtered out of
-        default retrieval (set `RetrievalConfig.exclude_superseded=False` to
-        include the history).
-
-        Both facts must exist in the same scope.
+        The old fact (and any copy of its text in this scope) is withheld from
+        every read path from now on, whatever ``RetrievalConfig`` says. The
+        replacement must be visible and must say something different: a
+        replacement that normalizes to the same text would be hidden by the
+        tombstone it creates.
         """
         scope = Scope(org_id=org_id, user_id=user_id)
-        old = await self._store.get_fact(old_fact_id, scope)
-        new = await self._store.get_fact(new_fact_id, scope)
+        old = await self._store.explain(old_fact_id, scope)
         if old is None:
             raise ValueError(f"old fact {old_fact_id} not found in scope")
+        new = await self._store.get_fact(new_fact_id, scope)
         if new is None:
+            if await self._store.explain(new_fact_id, scope) is not None:
+                raise ValueError(f"new fact {new_fact_id} is revoked and cannot be a replacement")
             raise ValueError(f"new fact {new_fact_id} not found in scope")
-        old.superseded_by = new_fact_id
-        new.supersedes = old_fact_id
-        await self._store.upsert_fact(old)
-        await self._store.upsert_fact(new)
+        if await self._store.content_hash_of(old_fact_id, scope) == content_hash(new.text):
+            raise ValueError("replacement has the same normalized text as the fact it replaces")
+        rev = await self._store.revoke(
+            old_fact_id,
+            scope,
+            reason=reason or f"superseded by {new_fact_id}",
+            actor=actor or "unspecified",
+            replaced_by=new_fact_id,
+        )
+        await self._vec.delete(old_fact_id, scope)
+        return rev
+
+    async def revoke(
+        self,
+        fact: Fact | UUID,
+        *,
+        reason: str,
+        actor: str,
+        user_id: str = "default",
+        org_id: str = "default",
+    ) -> Revocation:
+        """Tombstone a fact so no read path returns it again.
+
+        Also withholds every fact in this scope with the same normalized text
+        and every fact recorded with ``derived_from`` pointing at it. The fact
+        stays in the database for audit; use :meth:`erase` to delete it.
+        Idempotent: revoking a revoked fact returns the existing tombstone.
+        """
+        reason = require_text("reason", reason)
+        actor = require_text("actor", actor)
+        scope = Scope(org_id=org_id, user_id=user_id)
+        fact_id = fact.id if isinstance(fact, Fact) else fact
+        rev = await self._store.revoke(fact_id, scope, reason=reason, actor=actor)
+        # Not needed for correctness (the store withholds it), but keeps the
+        # revoked vector from taking a slot in the candidate pool.
+        await self._vec.delete(fact_id, scope)
+        return rev
+
+    async def reinstate(
+        self,
+        fact: Fact | UUID,
+        *,
+        reason: str,
+        actor: str,
+        user_id: str = "default",
+        org_id: str = "default",
+    ) -> list[Revocation]:
+        """Lift the tombstones hiding a fact. The only way to un-revoke.
+
+        The tombstones stay in the audit trail with who lifted them and why.
+        """
+        reason = require_text("reason", reason)
+        actor = require_text("actor", actor)
+        scope = Scope(org_id=org_id, user_id=user_id)
+        fact_id = fact.id if isinstance(fact, Fact) else fact
+        lifted, visible = await self._store.reinstate(fact_id, scope, reason=reason, actor=actor)
+        if visible:
+            vecs = await self._embed.embed([f.text for f in visible])
+            for f, v in zip(visible, vecs, strict=True):
+                await self._vec.add(f.id, v, scope)
+        return lifted
+
+    async def erase(
+        self,
+        fact: Fact | UUID,
+        *,
+        reason: str,
+        actor: str,
+        user_id: str = "default",
+        org_id: str = "default",
+    ) -> ErasureRecord:
+        """Hard-delete a fact, its copies, what was derived from it, and their vectors.
+
+        Returns a content-free :class:`ErasureRecord`. ``reason`` must not
+        quote the erased text. See the README section on erasure for what the
+        backend can and cannot vouch for.
+        """
+        reason = require_text("reason", reason)
+        actor = require_text("actor", actor)
+        scope = Scope(org_id=org_id, user_id=user_id)
+        fact_id = fact.id if isinstance(fact, Fact) else fact
+        record = await self._store.erase(fact_id, scope, reason=reason, actor=actor)
+        removed = await self._vec.purge(record.fact_ids, scope)
+        return await self._store.finalize_erasure(
+            record, {"vectors": removed}, {"vector_index_rebuilt": True}
+        )
+
+    async def explain(
+        self, fact_id: UUID, user_id: str = "default", org_id: str = "default"
+    ) -> Provenance | None:
+        """Provenance and revocation status for a fact, visible or not. Never its text."""
+        return await self._store.explain(fact_id, Scope(org_id=org_id, user_id=user_id))
+
+    async def revocations(
+        self, user_id: str = "default", org_id: str = "default", include_reinstated: bool = False
+    ) -> list[Revocation]:
+        return await self._store.list_revocations(
+            Scope(org_id=org_id, user_id=user_id), include_reinstated=include_reinstated
+        )
+
+    async def erasures(
+        self, user_id: str = "default", org_id: str = "default"
+    ) -> list[ErasureRecord]:
+        return await self._store.list_erasures(Scope(org_id=org_id, user_id=user_id))
 
     async def record(
         self,
@@ -199,6 +311,10 @@ class Engram:
         event_date: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         role: str | None = None,
+        actor: str | None = None,
+        derived_from: list[UUID] | None = None,
+        source_message_id: UUID | None = None,
+        reject_revoked: bool = False,
     ) -> Fact:
         """Record a single fact (no LLM extraction). Embeds + stores in one call.
 
@@ -207,8 +323,19 @@ class Engram:
 
         Pass `role` (e.g., "user", "assistant") to tag the fact's origin role.
         Stored in ``metadata["role"]``; queryable via ``Engram.context(role_filter=...)``.
+
+        Governance:
+
+        - ``actor`` is stored as the writer in the fact's provenance.
+        - ``derived_from`` names facts this one was concluded from. If any of
+          them is revoked (now or later) this fact is withheld too.
+        - ``source_message_id`` links the transcript turn the fact came from.
+        - Text that matches revoked content is stored but withheld (a write
+          cannot un-revoke). ``reject_revoked=True`` raises instead.
         """
         scope = Scope(org_id=org_id, user_id=user_id)
+        if reject_revoked and await self._store.is_content_revoked(text, scope):
+            raise RevokedContentError("text matches revoked content in this scope")
         md = dict(metadata or {})
         if role is not None:
             md["role"] = role
@@ -223,8 +350,11 @@ class Engram:
             tier=tier,
             event_date=event_date,
             metadata=md,
+            source_message_id=source_message_id,
         )
-        await self._store.upsert_fact(fact)
+        await self._store.upsert_fact(
+            fact, writer=actor, source="record", derived_from=derived_from
+        )
         [vec] = await self._embed.embed([text])
         await self._vec.add(fact.id, vec, scope)
         return fact
@@ -254,6 +384,7 @@ class Engram:
         messages: list[ChatMessage],
         session_date: datetime | None = None,
         persist: bool = True,
+        actor: str | None = None,
     ) -> list[Fact]:
         """Extract durable facts from a conversation. Optionally persist them.
 
@@ -284,7 +415,7 @@ class Engram:
                     event_date=ef.event_date,
                     mention_date=ef.mention_date,
                 )
-                await self._store.upsert_fact(fact)
+                await self._store.upsert_fact(fact, writer=actor, source="extract")
                 [vec] = await self._embed.embed([ef.text])
                 await self._vec.add(fact.id, vec, scope)
                 out.append(fact)
@@ -318,6 +449,40 @@ class Engram:
         return await self._retrieve.search(
             query, Scope(org_id=org_id, user_id=user_id), top_k=top_k
         )
+
+    async def context_entries(
+        self,
+        query: str,
+        user_id: str = "default",
+        org_id: str = "default",
+        decompose: bool = False,
+        role_filter: tuple[str, ...] | None = None,
+    ) -> list[ScoredFact]:
+        """The ranked memories :meth:`context` renders, each with its provenance.
+
+        Use this when the caller needs to show why a memory went into a prompt.
+        """
+        candidates: list[ScoredFact]
+        if decompose and self._decomposer is not None and should_decompose(query):
+            subqueries = await self._decomposer.decompose(query)
+        else:
+            subqueries = [query]
+
+        if len(subqueries) == 1:
+            candidates = await self.recall(subqueries[0], user_id=user_id, org_id=org_id, top_k=30)
+        else:
+            per_q = await asyncio.gather(
+                *[self.recall(sq, user_id=user_id, org_id=org_id, top_k=15) for sq in subqueries]
+            )
+            ranked_lists = [[sf.fact.id for sf in lst] for lst in per_q]
+            fused_ids = reciprocal_rank_fusion(ranked_lists, k=60)
+            by_id: dict[UUID, ScoredFact] = {sf.fact.id: sf for lst in per_q for sf in lst}
+            candidates = [by_id[fid] for fid in fused_ids if fid in by_id]
+
+        # Role filter — applied AFTER recall, BEFORE the token-budget loop.
+        if role_filter is not None:
+            candidates = [c for c in candidates if c.fact.metadata.get("role") in role_filter]
+        return candidates
 
     async def context(
         self,
@@ -353,26 +518,9 @@ class Engram:
             token_budget = budget_for(qt)
         char_budget = token_budget * chars_per_token
 
-        candidates: list[ScoredFact]
-        if decompose and self._decomposer is not None and should_decompose(query):
-            subqueries = await self._decomposer.decompose(query)
-        else:
-            subqueries = [query]
-
-        if len(subqueries) == 1:
-            candidates = await self.recall(subqueries[0], user_id=user_id, org_id=org_id, top_k=30)
-        else:
-            per_q = await asyncio.gather(
-                *[self.recall(sq, user_id=user_id, org_id=org_id, top_k=15) for sq in subqueries]
-            )
-            ranked_lists = [[sf.fact.id for sf in lst] for lst in per_q]
-            fused_ids = reciprocal_rank_fusion(ranked_lists, k=60)
-            by_id: dict[UUID, ScoredFact] = {sf.fact.id: sf for lst in per_q for sf in lst}
-            candidates = [by_id[fid] for fid in fused_ids if fid in by_id]
-
-        # Role filter — applied AFTER recall, BEFORE the token-budget loop.
-        if role_filter is not None:
-            candidates = [c for c in candidates if c.fact.metadata.get("role") in role_filter]
+        candidates = await self.context_entries(
+            query, user_id=user_id, org_id=org_id, decompose=decompose, role_filter=role_filter
+        )
 
         lines: list[str] = []
         running = 0

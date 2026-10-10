@@ -93,10 +93,8 @@ class HybridRetriever:
         facts_by_id: dict[UUID, Fact] = {f.id: f for f in kw_facts}
         # Then fetch any missing IDs from fact_store
         missing = [fid for fid in all_ids if fid not in facts_by_id]
-        for fid in missing:
-            fetched = await self._facts.get_fact(fid, scope)
-            if fetched is not None:
-                facts_by_id[fid] = fetched
+        for fetched in await self._facts.get_facts(missing, scope):
+            facts_by_id[fetched.id] = fetched
 
         # 5. Compute merged score (Stage 2 + Phase 13 superseded filters happen here)
         scored: list[ScoredFact] = []
@@ -136,7 +134,16 @@ class HybridRetriever:
         else:
             scored = scored[:top_k]
 
-        # 7. Record access for the surviving results
+        # 7. Final visibility check + provenance. A revocation can land while
+        #    the reranker awaits; anything no longer visible is dropped here.
+        prov = await self._facts.provenance([sf.fact.id for sf in scored], scope)
+        scored = [
+            sf.model_copy(update={"provenance": prov[sf.fact.id]})
+            for sf in scored
+            if sf.fact.id in prov
+        ]
+
+        # 8. Record access for the surviving results
         for sf in scored:
             await self._facts.record_access(sf.fact.id)
 

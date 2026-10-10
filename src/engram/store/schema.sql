@@ -162,3 +162,119 @@ CREATE TRIGGER IF NOT EXISTS facts_fts_update AFTER UPDATE ON facts BEGIN
     INSERT INTO facts_fts(rowid, text, org_id, user_id)
     VALUES (new.rowid, new.text, new.org_id, new.user_id);
 END;
+
+-- ── Governance (0.3): provenance, revocation, erasure ──────────────────────
+-- Side tables rather than new columns on `facts`, so databases created by
+-- 0.1/0.2 pick them up on open without a migration.
+
+CREATE TABLE IF NOT EXISTS fact_meta (
+    fact_id       TEXT PRIMARY KEY NOT NULL,
+    org_id        TEXT NOT NULL,
+    user_id       TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    writer        TEXT,
+    source        TEXT NOT NULL,
+    recorded_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fact_meta_hash
+    ON fact_meta(org_id, user_id, content_hash);
+
+CREATE TABLE IF NOT EXISTS fact_derivations (
+    fact_id         TEXT NOT NULL,
+    source_fact_id  TEXT NOT NULL,
+    PRIMARY KEY (fact_id, source_fact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fact_derivations_source
+    ON fact_derivations(source_fact_id);
+
+CREATE TABLE IF NOT EXISTS revocations (
+    id               TEXT PRIMARY KEY NOT NULL,
+    org_id           TEXT NOT NULL,
+    user_id          TEXT NOT NULL,
+    fact_id          TEXT NOT NULL,
+    content_hash     TEXT,
+    reason           TEXT NOT NULL,
+    actor            TEXT NOT NULL,
+    revoked_at       TEXT NOT NULL,
+    replaced_by      TEXT,
+    reinstated_at    TEXT,
+    reinstated_by    TEXT,
+    reinstate_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_revocations_fact ON revocations(fact_id);
+CREATE INDEX IF NOT EXISTS idx_revocations_hash
+    ON revocations(org_id, user_id, content_hash);
+
+CREATE TABLE IF NOT EXISTS erasures (
+    id          TEXT PRIMARY KEY NOT NULL,
+    org_id      TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    fact_ids    TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    erased_at   TEXT NOT NULL,
+    artifacts   TEXT NOT NULL DEFAULT '{}',
+    guarantees  TEXT NOT NULL DEFAULT '{}'
+);
+
+-- The single visibility decision. Recreated on every open so a newer library
+-- version always runs its own definition against an older database file.
+DROP VIEW IF EXISTS live_messages;
+DROP VIEW IF EXISTS live_events;
+DROP VIEW IF EXISTS live_facts;
+DROP VIEW IF EXISTS hidden_facts;
+
+CREATE VIEW hidden_facts AS
+WITH RECURSIVE hidden(id) AS (
+    SELECT r.fact_id
+      FROM revocations r
+     WHERE r.reinstated_at IS NULL
+    UNION
+    SELECT m.fact_id
+      FROM fact_meta m
+      JOIN revocations r
+        ON r.content_hash = m.content_hash
+       AND r.org_id = m.org_id
+       AND r.user_id = m.user_id
+     WHERE r.reinstated_at IS NULL
+    UNION
+    SELECT d.fact_id
+      FROM fact_derivations d
+      JOIN hidden h ON d.source_fact_id = h.id
+)
+SELECT id FROM hidden;
+
+CREATE VIEW live_facts AS
+SELECT facts.rowid AS fact_rowid, facts.*
+  FROM facts
+ WHERE facts.id NOT IN (SELECT id FROM hidden_facts);
+
+-- An event is withheld when any fact it was derived from is hidden.
+-- Events with no source_fact_ids cannot be linked and stay visible.
+CREATE VIEW live_events AS
+SELECT events.rowid AS event_rowid, events.*
+  FROM events
+ WHERE NOT EXISTS (
+        SELECT 1 FROM json_each(events.source_fact_ids) j
+         WHERE j.value IN (SELECT id FROM hidden_facts)
+       );
+
+-- A transcript turn is withheld when a hidden fact points at it via
+-- source_message_id. When a hidden fact has no such link, every turn of its
+-- session is withheld, because there is no way to tell which turn carried it.
+CREATE VIEW live_messages AS
+SELECT messages.*
+  FROM messages
+ WHERE messages.id NOT IN (
+        SELECT f.source_message_id FROM facts f
+         WHERE f.source_message_id IS NOT NULL
+           AND f.id IN (SELECT id FROM hidden_facts)
+       )
+   AND NOT EXISTS (
+        SELECT 1 FROM facts f
+         WHERE f.source_message_id IS NULL
+           AND f.session_id = messages.session_id
+           AND f.org_id = messages.org_id
+           AND f.user_id = messages.user_id
+           AND f.id IN (SELECT id FROM hidden_facts)
+       );
