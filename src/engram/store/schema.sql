@@ -193,6 +193,9 @@ CREATE TABLE IF NOT EXISTS revocations (
     user_id          TEXT NOT NULL,
     fact_id          TEXT NOT NULL,
     content_hash     TEXT,
+    -- Normalized revoked text, used to find later writes that quote it.
+    -- NULL when the text normalizes to nothing, and after erasure.
+    content_norm     TEXT,
     reason           TEXT NOT NULL,
     actor            TEXT NOT NULL,
     revoked_at       TEXT NOT NULL,
@@ -204,6 +207,17 @@ CREATE TABLE IF NOT EXISTS revocations (
 CREATE INDEX IF NOT EXISTS idx_revocations_fact ON revocations(fact_id);
 CREATE INDEX IF NOT EXISTS idx_revocations_hash
     ON revocations(org_id, user_id, content_hash);
+
+-- Items (facts, transcript turns, events) whose text quotes a revoked text.
+-- Computed when the revocation is written and when the item is written, so
+-- the view below stays an indexed lookup instead of a text scan per query.
+CREATE TABLE IF NOT EXISTS content_matches (
+    kind           TEXT NOT NULL CHECK (kind IN ('fact','message','event')),
+    item_id        TEXT NOT NULL,
+    revocation_id  TEXT NOT NULL,
+    PRIMARY KEY (kind, item_id, revocation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_content_matches_rev ON content_matches(revocation_id);
 
 CREATE TABLE IF NOT EXISTS erasures (
     id          TEXT PRIMARY KEY NOT NULL,
@@ -238,6 +252,11 @@ WITH RECURSIVE hidden(id) AS (
        AND r.user_id = m.user_id
      WHERE r.reinstated_at IS NULL
     UNION
+    SELECT cm.item_id
+      FROM content_matches cm
+      JOIN revocations r ON r.id = cm.revocation_id
+     WHERE cm.kind = 'fact' AND r.reinstated_at IS NULL
+    UNION
     SELECT d.fact_id
       FROM fact_derivations d
       JOIN hidden h ON d.source_fact_id = h.id
@@ -257,11 +276,20 @@ SELECT events.rowid AS event_rowid, events.*
  WHERE NOT EXISTS (
         SELECT 1 FROM json_each(events.source_fact_ids) j
          WHERE j.value IN (SELECT id FROM hidden_facts)
+       )
+   AND NOT EXISTS (
+        SELECT 1 FROM content_matches cm
+          JOIN revocations r ON r.id = cm.revocation_id
+         WHERE cm.kind = 'event' AND cm.item_id = events.id
+           AND r.reinstated_at IS NULL
        );
 
--- A transcript turn is withheld when a hidden fact points at it via
--- source_message_id. When a hidden fact has no such link, every turn of its
--- session is withheld, because there is no way to tell which turn carried it.
+-- A transcript turn is withheld when (a) a hidden fact points at it via
+-- source_message_id, (b) its text quotes a revoked text (content_matches), or
+-- (c) an operator revoked a fact by id that sits in the turn's session with no
+-- message link, since there is no way to tell which turn carried it. Rule (c)
+-- keys on the revocation itself, not on facts hidden by content or
+-- derivation, so a plain write of revoked text cannot withhold a session.
 CREATE VIEW live_messages AS
 SELECT messages.*
   FROM messages
@@ -271,10 +299,17 @@ SELECT messages.*
            AND f.id IN (SELECT id FROM hidden_facts)
        )
    AND NOT EXISTS (
-        SELECT 1 FROM facts f
-         WHERE f.source_message_id IS NULL
+        SELECT 1 FROM content_matches cm
+          JOIN revocations r ON r.id = cm.revocation_id
+         WHERE cm.kind = 'message' AND cm.item_id = messages.id
+           AND r.reinstated_at IS NULL
+       )
+   AND NOT EXISTS (
+        SELECT 1 FROM revocations r
+          JOIN facts f ON f.id = r.fact_id
+         WHERE r.reinstated_at IS NULL
+           AND f.source_message_id IS NULL
            AND f.session_id = messages.session_id
            AND f.org_id = messages.org_id
            AND f.user_id = messages.user_id
-           AND f.id IN (SELECT id FROM hidden_facts)
        );

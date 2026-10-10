@@ -36,6 +36,11 @@ class EngramStore(Protocol):
     ) -> None: ...
 
     @abstractmethod
+    async def is_content_revoked(self, text: str, scope: Scope) -> bool:
+        """True if an active tombstone in scope would withhold this text."""
+        ...
+
+    @abstractmethod
     async def provenance(
         self, fact_ids: Iterable[UUID], scope: Scope
     ) -> dict[UUID, Provenance]: ...

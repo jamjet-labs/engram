@@ -106,17 +106,21 @@ async def test_erase_requires_actor_and_reason_and_scope() -> None:
         with pytest.raises(ValueError):
             await memory.erase(s["fact"], reason="r", actor="", user_id="alice")
         with pytest.raises(NotFoundError):
+            await memory.erase(s["fact"].id, reason="r", actor="dpo", user_id="mallory")  # type: ignore[attr-defined]
+        with pytest.raises(ValueError):  # a Fact carries its own scope
             await memory.erase(s["fact"], reason="r", actor="dpo", user_id="mallory")
 
 
-async def test_erase_scrubs_revocation_tombstones_and_frees_the_content() -> None:
-    """After erasure the store forgets the claim, so the same text may be recorded anew."""
+async def test_erase_scrubs_revocation_tombstones_and_can_free_the_content() -> None:
+    """With block_reinsertion=False the store forgets the claim entirely."""
     async with await Engram.open(":memory:") as memory:
         s = await _seed(memory)
         rev = await memory.revoke(
             s["fact"], reason="wrong: zebracornitis was ruled out", actor="dr", user_id="alice"
         )
-        await memory.erase(s["fact"], reason="request 42", actor="dpo", user_id="alice")
+        await memory.erase(
+            s["fact"], reason="request 42", actor="dpo", user_id="alice", block_reinsertion=False
+        )
         [listed] = await memory.revocations(user_id="alice", include_reinstated=True)
         assert listed.id == rev.id
         assert "zebracorn" not in listed.model_dump_json().lower()

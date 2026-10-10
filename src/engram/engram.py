@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
+from engram.errors import NotFoundError
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.governance import (
@@ -26,7 +27,6 @@ from engram.governance import (
     Provenance,
     Revocation,
     RevokedContentError,
-    content_hash,
     require_text,
 )
 from engram.llm.base import LLMClient
@@ -177,32 +177,44 @@ class Engram:
     ) -> Revocation:
         """Revoke ``old_fact_id`` and link ``new_fact_id`` as its replacement.
 
-        The old fact (and any copy of its text in this scope) is withheld from
-        every read path from now on, whatever ``RetrievalConfig`` says. The
-        replacement must be visible and must say something different: a
-        replacement that normalizes to the same text would be hidden by the
-        tombstone it creates.
+        The old fact (and any copy or quote of its text in this scope) is
+        withheld from every read path from now on, whatever
+        ``RetrievalConfig`` says. The replacement must be visible and must not
+        repeat the old text, or it would be hidden by the tombstone it creates.
+        If the old fact is already revoked, the replacement is attached to the
+        existing tombstone; a different replacement than the recorded one is
+        refused.
         """
         scope = Scope(org_id=org_id, user_id=user_id)
-        old = await self._store.explain(old_fact_id, scope)
-        if old is None:
-            raise ValueError(f"old fact {old_fact_id} not found in scope")
-        new = await self._store.get_fact(new_fact_id, scope)
-        if new is None:
-            if await self._store.explain(new_fact_id, scope) is not None:
-                raise ValueError(f"new fact {new_fact_id} is revoked and cannot be a replacement")
-            raise ValueError(f"new fact {new_fact_id} not found in scope")
-        if await self._store.content_hash_of(old_fact_id, scope) == content_hash(new.text):
-            raise ValueError("replacement has the same normalized text as the fact it replaces")
-        rev = await self._store.revoke(
-            old_fact_id,
-            scope,
-            reason=reason or f"superseded by {new_fact_id}",
-            actor=actor or "unspecified",
-            replaced_by=new_fact_id,
-        )
-        await self._vec.delete(old_fact_id, scope)
+        try:
+            rev = await self._store.revoke(
+                old_fact_id,
+                scope,
+                reason=reason or f"superseded by {new_fact_id}",
+                actor=actor or "unspecified",
+                replaced_by=new_fact_id,
+            )
+        except NotFoundError as e:
+            raise ValueError(str(e)) from e
+        await self._drop_hidden_vectors(scope)
         return rev
+
+    async def _drop_hidden_vectors(self, scope: Scope) -> None:
+        # Not needed for correctness (the store withholds hidden facts), but
+        # keeps hidden vectors from filling the fixed candidate pool.
+        for fid in await self._store.hidden_fact_ids(scope):
+            await self._vec.delete(fid, scope)
+
+    @staticmethod
+    def _governed_scope(fact: Fact | UUID, user_id: str | None, org_id: str | None) -> Scope:
+        """Scope for a governance call: the fact's own, or the one passed with an id."""
+        if isinstance(fact, Fact):
+            if (user_id is not None and user_id != fact.scope.user_id) or (
+                org_id is not None and org_id != fact.scope.org_id
+            ):
+                raise ValueError("user_id/org_id do not match the fact's scope")
+            return fact.scope
+        return Scope(org_id=org_id or "default", user_id=user_id or "default")
 
     async def revoke(
         self,
@@ -210,24 +222,23 @@ class Engram:
         *,
         reason: str,
         actor: str,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
     ) -> Revocation:
         """Tombstone a fact so no read path returns it again.
 
-        Also withholds every fact in this scope with the same normalized text
-        and every fact recorded with ``derived_from`` pointing at it. The fact
-        stays in the database for audit; use :meth:`erase` to delete it.
-        Idempotent: revoking a revoked fact returns the existing tombstone.
+        Also withholds every fact, transcript turn and event in this scope
+        whose text equals or quotes it, and every fact recorded with
+        ``derived_from`` pointing at it. The fact stays in the database for
+        audit; use :meth:`erase` to delete it. Idempotent. Pass a ``Fact`` to
+        use its scope, or an id with ``user_id``/``org_id``.
         """
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = Scope(org_id=org_id, user_id=user_id)
+        scope = self._governed_scope(fact, user_id, org_id)
         fact_id = fact.id if isinstance(fact, Fact) else fact
         rev = await self._store.revoke(fact_id, scope, reason=reason, actor=actor)
-        # Not needed for correctness (the store withholds it), but keeps the
-        # revoked vector from taking a slot in the candidate pool.
-        await self._vec.delete(fact_id, scope)
+        await self._drop_hidden_vectors(scope)
         return rev
 
     async def reinstate(
@@ -236,16 +247,19 @@ class Engram:
         *,
         reason: str,
         actor: str,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
     ) -> list[Revocation]:
-        """Lift the tombstones hiding a fact. The only way to un-revoke.
+        """Lift the tombstones placed on this fact. The only way to un-revoke.
 
-        The tombstones stay in the audit trail with who lifted them and why.
+        Works on the revoked fact itself, not on a copy hidden by its
+        tombstone. The tombstones stay in the audit trail with who lifted
+        them and why. The fact can stay hidden if another tombstone also
+        covers it; check :meth:`explain`.
         """
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = Scope(org_id=org_id, user_id=user_id)
+        scope = self._governed_scope(fact, user_id, org_id)
         fact_id = fact.id if isinstance(fact, Fact) else fact
         lifted, visible = await self._store.reinstate(fact_id, scope, reason=reason, actor=actor)
         if visible:
@@ -260,20 +274,25 @@ class Engram:
         *,
         reason: str,
         actor: str,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
+        block_reinsertion: bool = True,
     ) -> ErasureRecord:
-        """Hard-delete a fact, its copies, what was derived from it, and their vectors.
+        """Hard-delete a fact, its copies and quotes, what was derived from it, and their vectors.
 
-        Returns a content-free :class:`ErasureRecord`. ``reason`` must not
-        quote the erased text. See the README section on erasure for what the
-        backend can and cannot vouch for.
+        Returns a content-free :class:`ErasureRecord`. ``reason`` and ``actor``
+        must not quote the erased text. If the fact was revoked, its tombstone
+        keeps the content hash so the text stays blocked; pass
+        ``block_reinsertion=False`` to drop it too. See the README section on
+        erasure for what the backend can and cannot vouch for.
         """
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = Scope(org_id=org_id, user_id=user_id)
+        scope = self._governed_scope(fact, user_id, org_id)
         fact_id = fact.id if isinstance(fact, Fact) else fact
-        record = await self._store.erase(fact_id, scope, reason=reason, actor=actor)
+        record = await self._store.erase(
+            fact_id, scope, reason=reason, actor=actor, block_reinsertion=block_reinsertion
+        )
         removed = await self._vec.purge(record.fact_ids, scope)
         return await self._store.finalize_erasure(
             record, {"vectors": removed}, {"vector_index_rebuilt": True}
@@ -355,8 +374,9 @@ class Engram:
         await self._store.upsert_fact(
             fact, writer=actor, source="record", derived_from=derived_from
         )
-        [vec] = await self._embed.embed([text])
-        await self._vec.add(fact.id, vec, scope)
+        if await self._store.provenance([fact.id], scope):
+            [vec] = await self._embed.embed([text])
+            await self._vec.add(fact.id, vec, scope)
         return fact
 
     async def record_message(
@@ -416,12 +436,17 @@ class Engram:
                     mention_date=ef.mention_date,
                 )
                 await self._store.upsert_fact(fact, writer=actor, source="extract")
+                if not await self._store.provenance([fact.id], scope):
+                    continue  # stored, but born withheld: matches revoked content
                 [vec] = await self._embed.embed([ef.text])
                 await self._vec.add(fact.id, vec, scope)
                 out.append(fact)
         else:
-            # Non-persisting branch: synthesize Facts in-memory only
+            # Non-persisting branch: synthesize Facts in-memory only, minus
+            # anything a tombstone would withhold if it were stored.
             for ef in extracted:
+                if await self._store.is_content_revoked(ef.text, scope):
+                    continue
                 out.append(
                     Fact(
                         id=uuid4(),

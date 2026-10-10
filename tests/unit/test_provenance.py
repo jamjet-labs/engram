@@ -128,6 +128,7 @@ async def test_pre_0_3_databases_are_backfilled_on_open(tmp_path: Path) -> None:
         p = await memory.explain(f.id, user_id="u")
         assert p is not None
         assert p.source == "legacy"
+        assert await memory._store.content_hash_of(f.id, Scope(user_id="u")) is not None
         dup = await memory.record("LEGACY claim!", user_id="u")
         await memory.revoke(dup, reason="r", actor="a", user_id="u")
         assert await memory._store.get_fact(f.id, Scope(user_id="u")) is None

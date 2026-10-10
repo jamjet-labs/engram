@@ -10,17 +10,25 @@ from __future__ import annotations
 
 import ast
 import inspect
+import pathlib
 import re
 
 import engram.store.sqlite as sqlite_mod
 
-BASE_TABLE_READ = re.compile(r"\b(?:FROM|JOIN)\s+(facts|events|messages)\b(?!_)", re.IGNORECASE)
+BASE_TABLE_READ = re.compile(
+    r"(?:\bFROM|\bJOIN|,)\s+(?:main\.)?[\"`\[]?(facts|events|messages)\b(?!_)",
+    re.IGNORECASE,
+)
+# FTS5 tables with content='facts' read text through the base table.
+FTS_TEXT_READ = re.compile(r"\b(facts_fts|events_fts)\.text\b|SELECT\s+\*\s+FROM\s+\w+_fts", re.I)
 
 GOVERNANCE_METHODS = {
     "_backfill_fact_meta",  # computes content hashes for pre-0.3 rows
-    "_governance_fact",  # unfiltered lookup used by revoke/reinstate/erase
+    "_governance_fact",  # unfiltered lookup used by revoke/reinstate/erase/supersede
+    "_message_in_scope",  # existence check, returns a bool
     "derivation_targets_in_scope",  # returns ids only
-    "erase",  # finds what to delete
+    "hidden_fact_ids",  # returns ids only
+    "_erase_in_tx",  # finds what to delete
     "explain",  # returns status and provenance, never text
 }
 
@@ -54,9 +62,27 @@ def test_governance_allowlist_has_no_stale_entries() -> None:
     assert set(_sql_reads_by_method()) == GOVERNANCE_METHODS
 
 
+def test_no_fts_text_reads_and_no_sql_outside_the_store() -> None:
+    src = inspect.getsource(sqlite_mod)
+    assert not FTS_TEXT_READ.search(src)
+    pkg = pathlib.Path(sqlite_mod.__file__).parents[1]
+    for path in pkg.rglob("*.py"):
+        if path.name == "sqlite.py" and path.parent.name == "store":
+            continue
+        text = path.read_text(encoding="utf-8")
+        # Only the store talks SQL; everything else goes through its methods.
+        assert not re.search(r"\bSELECT\b[^\n]*\bFROM\b", text), path
+        assert not re.search(r"^\s*(import|from) (aiosqlite|sqlite3)\b", text, re.M), path
+
+
 def test_guard_detects_a_base_table_read() -> None:
     """Control for the guard itself: the pattern must match what it is meant to catch."""
     assert BASE_TABLE_READ.search("SELECT * FROM facts WHERE id=?")
     assert BASE_TABLE_READ.search("x JOIN messages ON")
     assert not BASE_TABLE_READ.search("SELECT * FROM live_facts")
     assert not BASE_TABLE_READ.search("FROM facts_fts WHERE")
+    assert BASE_TABLE_READ.search("FROM fact_meta m, facts f")
+    assert BASE_TABLE_READ.search("SELECT * FROM main.facts")
+    assert BASE_TABLE_READ.search('SELECT * FROM "facts"')
+    assert FTS_TEXT_READ.search("SELECT facts_fts.text FROM facts_fts")
+    assert FTS_TEXT_READ.search("SELECT * FROM facts_fts")

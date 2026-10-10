@@ -73,6 +73,10 @@ class QueryConditionedReextractor:
             for entry in data.get("facts", []):
                 if not isinstance(entry, dict) or "text" not in entry:
                     continue
+                # Transcripts can carry revoked claims the fact store withholds;
+                # never hand one back to the reader through this side door.
+                if await store.is_content_revoked(str(entry["text"]), scope):
+                    continue
                 out.append(
                     Fact(
                         id=uuid4(),

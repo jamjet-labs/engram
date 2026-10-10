@@ -14,7 +14,7 @@ from uuid import UUID
 
 import aiosqlite
 
-from engram.errors import NotFoundError, StoreError
+from engram.errors import NotFoundError, ScopeError, StoreError
 from engram.governance import (
     ErasureRecord,
     HiddenReason,
@@ -22,6 +22,8 @@ from engram.governance import (
     Revocation,
     content_hash,
     normalize_text,
+    quotes,
+    quotes_any_run,
 )
 from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
 from engram.scope import Scope
@@ -29,17 +31,13 @@ from engram.scope import Scope
 logger = logging.getLogger(__name__)
 
 _FTS_TABLES = ("facts_fts", "events_fts")
+_INSERT_MATCH = (
+    "INSERT OR IGNORE INTO content_matches (kind, item_id, revocation_id) VALUES (?,?,?)"
+)
 
 
 def _now() -> datetime:
     return datetime.now().astimezone()
-
-
-def _contains_phrase(haystack_norm: str, needle_norm: str) -> bool:
-    """Whole-word containment on normalized text."""
-    if not needle_norm:
-        return False
-    return f" {needle_norm} " in f" {haystack_norm} "
 
 
 def _load_schema() -> str:
@@ -143,8 +141,12 @@ class SqliteStore:
             missing = [s for s in sources if s not in found]
             if missing:
                 raise NotFoundError(f"derived_from facts not found in scope: {missing}")
+        if fact.source_message_id is not None and not await self._message_in_scope(
+            fact.source_message_id, fact.scope
+        ):
+            raise NotFoundError(f"source message {fact.source_message_id} not found in scope")
         try:
-            await self._conn.execute(
+            cur = await self._conn.execute(
                 """
                 INSERT INTO facts (
                     id, org_id, user_id, text, valid_from, invalid_at,
@@ -174,6 +176,7 @@ class SqliteStore:
                     last_accessed=excluded.last_accessed,
                     metadata=excluded.metadata,
                     session_id=excluded.session_id
+                WHERE facts.org_id = excluded.org_id AND facts.user_id = excluded.user_id
                 """,
                 (
                     str(fact.id),
@@ -200,7 +203,12 @@ class SqliteStore:
                     fact.session_id,
                 ),
             )
+            if cur.rowcount == 0:
+                # The id exists in another scope: the conditional update did nothing.
+                await self._conn.rollback()
+                raise ScopeError(f"fact {fact.id} belongs to another scope")
             await self._write_fact_meta(fact, writer=writer, source=source)
+            await self._match_item("fact", str(fact.id), fact.text, fact.scope)
             if sources:
                 await self._conn.executemany(
                     "INSERT OR IGNORE INTO fact_derivations (fact_id, source_fact_id) VALUES (?,?)",
@@ -228,6 +236,45 @@ class SqliteStore:
                 source,
                 _dt(_now()),
             ),
+        )
+
+    async def _message_in_scope(self, message_id: UUID, scope: Scope) -> bool:
+        async with self._conn.execute(
+            "SELECT 1 FROM messages WHERE id = ? AND org_id = ? AND user_id = ?",
+            (str(message_id), scope.org_id, scope.user_id),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def _active_revoked_norms(self, scope: Scope) -> list[tuple[str, str]]:
+        async with self._conn.execute(
+            """SELECT id, content_norm FROM revocations
+                WHERE org_id = ? AND user_id = ? AND reinstated_at IS NULL
+                  AND content_norm IS NOT NULL""",
+            (scope.org_id, scope.user_id),
+        ) as cur:
+            return [(r["id"], r["content_norm"]) for r in await cur.fetchall()]
+
+    async def _match_item(self, kind: str, item_id: str, text: str, scope: Scope) -> None:
+        """Record which active revocations this item's text quotes. No commit."""
+        await self._conn.execute(
+            "DELETE FROM content_matches WHERE kind = ? AND item_id = ?", (kind, item_id)
+        )
+        norm = normalize_text(text)
+        rows = [
+            (kind, item_id, rev_id)
+            for rev_id, rev_norm in await self._active_revoked_norms(scope)
+            if quotes(norm, rev_norm)
+        ]
+        if rows:
+            await self._conn.executemany(
+                _INSERT_MATCH,
+                rows,
+            )
+
+    @staticmethod
+    def _event_text(event: Event) -> str:
+        return " ".join(
+            [event.subject_canonical, event.verb, event.object_canonical, *event.aliases]
         )
 
     async def derivation_targets_in_scope(self, ids: Iterable[UUID], scope: Scope) -> set[UUID]:
@@ -357,7 +404,7 @@ class SqliteStore:
     # ── Messages ─────────────────────────────────────────────────────────
 
     async def upsert_message(self, message: ChatMessage) -> None:
-        await self._conn.execute(
+        cur = await self._conn.execute(
             """INSERT INTO messages (
                 id, org_id, user_id, session_id, role, content, timestamp, metadata
             ) VALUES (?,?,?,?,?,?,?,?)
@@ -366,7 +413,8 @@ class SqliteStore:
                 role=excluded.role,
                 content=excluded.content,
                 timestamp=excluded.timestamp,
-                metadata=excluded.metadata""",
+                metadata=excluded.metadata
+            WHERE messages.org_id = excluded.org_id AND messages.user_id = excluded.user_id""",
             (
                 str(message.id),
                 message.scope.org_id,
@@ -378,13 +426,17 @@ class SqliteStore:
                 json.dumps(message.metadata),
             ),
         )
+        if cur.rowcount == 0:
+            await self._conn.rollback()
+            raise ScopeError(f"message {message.id} belongs to another scope")
+        await self._match_item("message", str(message.id), message.content, message.scope)
         await self._conn.commit()
 
     # ── Events (Phase 11) ────────────────────────────────────────────────
 
     async def upsert_event(self, event: Event) -> None:
         try:
-            await self._conn.execute(
+            cur = await self._conn.execute(
                 """INSERT INTO events (
                     id, org_id, user_id, subject_canonical, verb, object_canonical,
                     time_start, time_end, confidence, aliases, source_fact_ids, metadata
@@ -398,7 +450,8 @@ class SqliteStore:
                     confidence=excluded.confidence,
                     aliases=excluded.aliases,
                     source_fact_ids=excluded.source_fact_ids,
-                    metadata=excluded.metadata""",
+                    metadata=excluded.metadata
+                WHERE events.org_id = excluded.org_id AND events.user_id = excluded.user_id""",
                 (
                     str(event.id),
                     event.scope.org_id,
@@ -414,8 +467,13 @@ class SqliteStore:
                     json.dumps(event.metadata),
                 ),
             )
+            if cur.rowcount == 0:
+                await self._conn.rollback()
+                raise ScopeError(f"event {event.id} belongs to another scope")
+            await self._match_item("event", str(event.id), self._event_text(event), event.scope)
             await self._conn.commit()
         except aiosqlite.Error as e:
+            await self._conn.rollback()
             raise StoreError(f"upsert_event: {e}") from e
 
     async def get_event(self, event_id: UUID, scope: Scope) -> Event | None:
@@ -640,11 +698,14 @@ class SqliteStore:
             return "revoked", direct
         async with self._conn.execute(
             """SELECT r.id FROM revocations r
-                 JOIN fact_meta m
-                   ON m.content_hash = r.content_hash
-                  AND m.org_id = r.org_id AND m.user_id = r.user_id
-                WHERE m.fact_id = ? AND r.reinstated_at IS NULL ORDER BY r.revoked_at""",
-            (fid,),
+                WHERE r.reinstated_at IS NULL
+                  AND (r.id IN (SELECT revocation_id FROM content_matches
+                                 WHERE kind = 'fact' AND item_id = ?)
+                       OR EXISTS (SELECT 1 FROM fact_meta m
+                                   WHERE m.fact_id = ? AND m.content_hash = r.content_hash
+                                     AND m.org_id = r.org_id AND m.user_id = r.user_id))
+                ORDER BY r.revoked_at""",
+            (fid, fid),
         ) as cur:
             by_content = [UUID(r["id"]) for r in await cur.fetchall()]
         if by_content:
@@ -658,6 +719,8 @@ class SqliteStore:
                SELECT DISTINCT r.id, r.revoked_at FROM revocations r
                 WHERE r.reinstated_at IS NULL
                   AND (r.fact_id IN (SELECT id FROM anc)
+                       OR r.id IN (SELECT revocation_id FROM content_matches
+                                    WHERE kind = 'fact' AND item_id IN (SELECT id FROM anc))
                        OR EXISTS (SELECT 1 FROM fact_meta m
                                    WHERE m.fact_id IN (SELECT id FROM anc)
                                      AND m.content_hash = r.content_hash
@@ -689,13 +752,34 @@ class SqliteStore:
         return str(row["content_hash"]) if row else None
 
     async def is_content_revoked(self, text: str, scope: Scope) -> bool:
+        """Would this text be withheld by an active tombstone in scope?
+
+        True when the text equals a revoked text after normalization (including
+        tombstones whose text was erased but whose hash was kept), or quotes a
+        revoked text long enough for containment to count.
+        """
+        norm = normalize_text(text)
+        if not norm:
+            return False
         async with self._conn.execute(
             """SELECT 1 FROM revocations
                 WHERE org_id = ? AND user_id = ? AND content_hash = ?
                   AND reinstated_at IS NULL LIMIT 1""",
             (scope.org_id, scope.user_id, content_hash(text)),
         ) as cur:
-            return await cur.fetchone() is not None
+            if await cur.fetchone() is not None:
+                return True
+        return any(quotes(norm, rev) for _, rev in await self._active_revoked_norms(scope))
+
+    async def hidden_fact_ids(self, scope: Scope) -> set[UUID]:
+        """Ids of facts in scope that are currently withheld. Ids only."""
+        async with self._conn.execute(
+            """SELECT f.id FROM facts f
+                WHERE f.org_id = ? AND f.user_id = ?
+                  AND f.id IN (SELECT id FROM hidden_facts)""",
+            (scope.org_id, scope.user_id),
+        ) as cur:
+            return {UUID(r["id"]) for r in await cur.fetchall()}
 
     async def revoke(
         self,
@@ -706,68 +790,141 @@ class SqliteStore:
         actor: str,
         replaced_by: UUID | None = None,
     ) -> Revocation:
-        """Tombstone a fact (and, through its content hash, every copy of it in scope)."""
-        fact = await self._governance_fact(fact_id, scope)
-        if fact is None:
-            raise NotFoundError(f"fact {fact_id} not found in scope")
-        async with self._conn.execute(
-            """SELECT * FROM revocations
-                WHERE fact_id = ? AND reinstated_at IS NULL ORDER BY revoked_at LIMIT 1""",
-            (str(fact_id),),
-        ) as cur:
-            existing = await cur.fetchone()
-        if existing is not None:
-            return self._row_to_revocation(existing)
-        rev = Revocation(
-            org_id=scope.org_id,
-            user_id=scope.user_id,
-            fact_id=fact_id,
-            reason=reason,
-            actor=actor,
-            revoked_at=_now(),
-            replaced_by=replaced_by,
-        )
+        """Tombstone a fact, every copy of its text in scope, and items quoting it.
+
+        Idempotent per fact. Calling it with a replacement on a fact that is
+        already revoked without one attaches the replacement; a different
+        replacement than the one recorded is refused.
+        """
         try:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            fact = await self._governance_fact(fact_id, scope)
+            if fact is None:
+                raise NotFoundError(f"fact {fact_id} not found in scope")
+            if replaced_by is not None:
+                await self._check_replacement(fact, replaced_by, scope)
+            async with self._conn.execute(
+                """SELECT * FROM revocations
+                    WHERE fact_id = ? AND reinstated_at IS NULL ORDER BY revoked_at LIMIT 1""",
+                (str(fact_id),),
+            ) as cur:
+                existing_row = await cur.fetchone()
+            if existing_row is not None:
+                existing = self._row_to_revocation(existing_row)
+                if replaced_by is not None and existing.replaced_by not in (None, replaced_by):
+                    raise ValueError(
+                        f"fact {fact_id} is already superseded by {existing.replaced_by}"
+                    )
+                if replaced_by is not None and existing.replaced_by is None:
+                    await self._conn.execute(
+                        "UPDATE revocations SET replaced_by = ? WHERE id = ?",
+                        (str(replaced_by), str(existing.id)),
+                    )
+                    await self._link_supersession(fact_id, replaced_by)
+                    existing = existing.model_copy(update={"replaced_by": replaced_by})
+                await self._conn.commit()
+                return existing
+            rev = Revocation(
+                org_id=scope.org_id,
+                user_id=scope.user_id,
+                fact_id=fact_id,
+                reason=reason,
+                actor=actor,
+                revoked_at=_now(),
+                replaced_by=replaced_by,
+            )
+            norm = normalize_text(fact.text)
             await self._conn.execute(
                 """INSERT INTO revocations
-                   (id, org_id, user_id, fact_id, content_hash, reason, actor,
+                   (id, org_id, user_id, fact_id, content_hash, content_norm, reason, actor,
                     revoked_at, replaced_by)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     str(rev.id),
                     rev.org_id,
                     rev.user_id,
                     str(fact_id),
-                    content_hash(fact.text),
+                    content_hash(fact.text) if norm else None,
+                    norm or None,
                     reason,
                     actor,
                     _dt(rev.revoked_at),
                     str(replaced_by) if replaced_by else None,
                 ),
             )
+            if norm:
+                await self._match_scope(str(rev.id), norm, scope)
             if replaced_by is not None:
-                await self._conn.execute(
-                    "UPDATE facts SET superseded_by = ? WHERE id = ?",
-                    (str(replaced_by), str(fact_id)),
-                )
-                await self._conn.execute(
-                    "UPDATE facts SET supersedes = ? WHERE id = ?",
-                    (str(fact_id), str(replaced_by)),
-                )
+                await self._link_supersession(fact_id, replaced_by)
             await self._conn.commit()
-        except aiosqlite.Error as e:
+        except (aiosqlite.Error, NotFoundError, ValueError) as e:
             await self._conn.rollback()
-            raise StoreError(f"revoke: {e}") from e
+            if isinstance(e, aiosqlite.Error):
+                raise StoreError(f"revoke: {e}") from e
+            raise
         return rev
+
+    async def _check_replacement(self, old: Fact, new_id: UUID, scope: Scope) -> None:
+        new = await self.get_fact(new_id, scope)
+        if new is None:
+            if await self._governance_fact(new_id, scope) is not None:
+                raise ValueError(f"new fact {new_id} is revoked and cannot be a replacement")
+            raise ValueError(f"new fact {new_id} not found in scope")
+        if quotes(normalize_text(new.text), normalize_text(old.text)):
+            raise ValueError(
+                "replacement repeats the text of the fact it replaces and would be withheld"
+            )
+
+    async def _link_supersession(self, old_id: UUID, new_id: UUID) -> None:
+        await self._conn.execute(
+            "UPDATE facts SET superseded_by = ? WHERE id = ?", (str(new_id), str(old_id))
+        )
+        await self._conn.execute(
+            "UPDATE facts SET supersedes = ? WHERE id = ?", (str(old_id), str(new_id))
+        )
+
+    async def _match_scope(self, revocation_id: str, revoked_norm: str, scope: Scope) -> None:
+        """Find every fact, turn and event in scope quoting a newly revoked text."""
+        rows: list[tuple[str, str, str]] = []
+        async with self._conn.execute(
+            "SELECT id, text FROM live_facts WHERE org_id = ? AND user_id = ?",
+            (scope.org_id, scope.user_id),
+        ) as cur:
+            for r in await cur.fetchall():
+                if quotes(normalize_text(r["text"]), revoked_norm):
+                    rows.append(("fact", r["id"], revocation_id))
+        async with self._conn.execute(
+            "SELECT id, content FROM live_messages WHERE org_id = ? AND user_id = ?",
+            (scope.org_id, scope.user_id),
+        ) as cur:
+            for r in await cur.fetchall():
+                if quotes(normalize_text(r["content"]), revoked_norm):
+                    rows.append(("message", r["id"], revocation_id))
+        async with self._conn.execute(
+            "SELECT * FROM live_events WHERE org_id = ? AND user_id = ?",
+            (scope.org_id, scope.user_id),
+        ) as cur:
+            for r in await cur.fetchall():
+                text = self._event_text(self._row_to_event(r))
+                if quotes(normalize_text(text), revoked_norm):
+                    rows.append(("event", r["id"], revocation_id))
+        if rows:
+            await self._conn.executemany(
+                _INSERT_MATCH,
+                rows,
+            )
 
     async def reinstate(
         self, fact_id: UUID, scope: Scope, *, reason: str, actor: str
     ) -> tuple[list[Revocation], list[Fact]]:
-        """Lift the tombstones that hide this fact directly (by id or by content).
+        """Lift the tombstones placed on this fact itself.
 
-        Returns the lifted revocations and the facts that are visible again.
-        A fact hidden only because it was derived from a revoked fact cannot be
-        reinstated on its own: the source has to be reinstated.
+        Returns the lifted revocations and the facts that are visible again
+        (the fact and copies hidden only by those tombstones). A fact hidden
+        because its text matches another fact's tombstone, or because it was
+        derived from a revoked fact, cannot be reinstated on its own: reinstate
+        the revoked fact named in ``explain().hidden_by`` instead. That keeps a
+        write of revoked text from being a handle to un-revoke the original.
         """
         fact = await self._governance_fact(fact_id, scope)
         if fact is None:
@@ -775,10 +932,11 @@ class SqliteStore:
         explained = await self.explain(fact_id, scope)
         if explained is None or explained.revocation_status == "active":
             return [], []
-        if explained.hidden_reason == "derived_from_revoked":
+        if explained.hidden_reason != "revoked":
             raise ValueError(
-                f"fact {fact_id} is hidden because it derives from revoked facts "
-                f"(revocations {explained.hidden_by}); reinstate the source instead"
+                f"fact {fact_id} is hidden by tombstones on other facts "
+                f"({explained.hidden_reason}, revocations {explained.hidden_by}); "
+                "reinstate the revoked fact itself"
             )
         lifted_ids = [str(r) for r in explained.hidden_by]
         placeholders = ",".join("?" * len(lifted_ids))
@@ -797,14 +955,17 @@ class SqliteStore:
             f"SELECT * FROM revocations WHERE id IN ({placeholders})", tuple(lifted_ids)
         ) as cur:
             lifted = [self._row_to_revocation(r) for r in await cur.fetchall()]
-        hashes = list({content_hash(fact.text)})
         async with self._conn.execute(
             f"""SELECT lf.* FROM live_facts lf
                  WHERE lf.org_id = ? AND lf.user_id = ?
                    AND (lf.id IN (SELECT fact_id FROM revocations WHERE id IN ({placeholders}))
-                        OR lf.id IN (SELECT fact_id FROM fact_meta
-                                      WHERE org_id = ? AND user_id = ? AND content_hash = ?))""",
-            (scope.org_id, scope.user_id, *lifted_ids, scope.org_id, scope.user_id, hashes[0]),
+                        OR lf.id IN (SELECT item_id FROM content_matches
+                                      WHERE kind = 'fact' AND revocation_id IN ({placeholders}))
+                        OR lf.id IN (SELECT m.fact_id FROM fact_meta m
+                                       JOIN revocations r ON r.content_hash = m.content_hash
+                                      WHERE r.id IN ({placeholders})
+                                        AND m.org_id = r.org_id AND m.user_id = r.user_id))""",
+            (scope.org_id, scope.user_id, *lifted_ids, *lifted_ids, *lifted_ids),
         ) as cur:
             visible = [self._row_to_fact(r) for r in await cur.fetchall()]
         return lifted, visible
@@ -836,77 +997,119 @@ class SqliteStore:
             reinstate_reason=row["reinstate_reason"],
         )
 
-    async def erase(self, fact_id: UUID, scope: Scope, *, reason: str, actor: str) -> ErasureRecord:
-        """Hard-delete a fact and what was derived from or copied out of it.
+    async def erase(
+        self,
+        fact_id: UUID,
+        scope: Scope,
+        *,
+        reason: str,
+        actor: str,
+        block_reinsertion: bool = True,
+    ) -> ErasureRecord:
+        """Hard-delete a fact and what was copied out of or derived from it.
 
-        Removed, inside one transaction: the fact; every fact in scope with the
-        same normalized text; facts recorded with ``derived_from`` pointing at
-        any of those (transitively, with their own copies); events listing any
-        of them in ``source_fact_ids``; the transcript turns they cite through
-        ``source_message_id``; and any transcript turn in scope whose
-        normalized text contains one of the erased texts. FTS rows go with
-        their base rows via triggers. Tombstones that named the content keep
-        their ids but lose the content hash and the free-text reasons.
+        Removed, in one write transaction held from discovery to commit:
 
-        The caller (``Engram.erase``) drops the vectors and then calls
-        :meth:`finalize_erasure`.
+        - the fact, every fact in scope whose normalized text equals it or
+          quotes it (see :func:`engram.governance.quotes`), and facts recorded
+          with ``derived_from`` pointing at any of those, repeated to a fixpoint;
+        - events listing any of them in ``source_fact_ids`` or whose text
+          quotes an erased text;
+        - transcript turns cited through ``source_message_id`` or whose text
+          quotes an erased text;
+        - the free text of any tombstone or reinstatement note that quotes it.
+
+        Tombstones on the erased facts lose their normalized text. Their
+        content hash is kept when ``block_reinsertion`` is true, so revoked
+        content stays blocked after erasure; the hash of a short text can be
+        confirmed by guessing, so pass False when that matters more.
+
+        ``reason`` and ``actor`` are refused if they contain any three-token
+        run of an erased text. The caller (``Engram.erase``) drops the vectors
+        and then calls :meth:`finalize_erasure`.
         """
-        root = await self._governance_fact(fact_id, scope)
-        if root is None:
-            raise NotFoundError(f"fact {fact_id} not found in scope")
+        try:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            record = await self._erase_in_tx(
+                fact_id, scope, reason=reason, actor=actor, block_reinsertion=block_reinsertion
+            )
+            await self._conn.commit()
+        except (aiosqlite.Error, NotFoundError, ValueError) as e:
+            await self._conn.rollback()
+            if isinstance(e, aiosqlite.Error):
+                raise StoreError(f"erase: {e}") from e
+            raise
+        return record
 
-        erased: dict[str, Fact] = {}
-        frontier: list[Fact] = [root]
+    async def _erase_in_tx(
+        self,
+        fact_id: UUID,
+        scope: Scope,
+        *,
+        reason: str,
+        actor: str,
+        block_reinsertion: bool,
+    ) -> ErasureRecord:
+        if await self._governance_fact(fact_id, scope) is None:
+            raise NotFoundError(f"fact {fact_id} not found in scope")
+        sc = (scope.org_id, scope.user_id)
+        async with self._conn.execute(
+            "SELECT id, text, source_message_id FROM facts WHERE org_id = ? AND user_id = ?", sc
+        ) as cur:
+            facts = {
+                r["id"]: (r["text"], normalize_text(r["text"]), r["source_message_id"])
+                for r in await cur.fetchall()
+            }
+        async with self._conn.execute(
+            "SELECT fact_id, source_fact_id FROM fact_derivations"
+        ) as cur:
+            children: dict[str, list[str]] = {}
+            for r in await cur.fetchall():
+                children.setdefault(r["source_fact_id"], []).append(r["fact_id"])
+
+        erased: set[str] = set()
+        frontier = [str(fact_id)]
         while frontier:
-            f = frontier.pop()
-            if str(f.id) in erased:
+            fid = frontier.pop()
+            if fid in erased or fid not in facts:
                 continue
-            erased[str(f.id)] = f
-            async with self._conn.execute(
-                """SELECT f.* FROM facts f
-                    WHERE f.org_id = ? AND f.user_id = ?
-                      AND (f.id IN (SELECT fact_id FROM fact_meta
-                                     WHERE org_id = ? AND user_id = ? AND content_hash = ?)
-                           OR f.id IN (SELECT fact_id FROM fact_derivations
-                                        WHERE source_fact_id = ?))""",
-                (
-                    scope.org_id,
-                    scope.user_id,
-                    scope.org_id,
-                    scope.user_id,
-                    content_hash(f.text),
-                    str(f.id),
-                ),
-            ) as cur:
+            erased.add(fid)
+            norm = facts[fid][1]
+            frontier.extend(c for c in children.get(fid, []) if c not in erased)
+            if norm:
                 frontier.extend(
-                    self._row_to_fact(r) for r in await cur.fetchall() if r["id"] not in erased
+                    other
+                    for other, (_, other_norm, _) in facts.items()
+                    if other not in erased and quotes(other_norm, norm)
                 )
 
-        norms = {normalize_text(f.text) for f in erased.values()} - {""}
-        norm_reason = normalize_text(reason)
-        if any(_contains_phrase(norm_reason, n) for n in norms):
-            raise ValueError("erasure reason must not quote the content being erased")
+        norms = {facts[f][1] for f in erased} - {""}
+        for label, value in (("reason", reason), ("actor", actor)):
+            value_norm = normalize_text(value)
+            if any(quotes_any_run(value_norm, n) for n in norms):
+                raise ValueError(f"erasure {label} must not quote the content being erased")
 
-        ids = list(erased)
-        id_ph = ",".join("?" * len(ids))
-        hashes = list({content_hash(f.text) for f in erased.values()})
-        hash_ph = ",".join("?" * len(hashes))
+        ids = sorted(erased)
+        hashes = {content_hash(facts[f][0]) for f in erased if facts[f][1]}
 
-        message_ids = {str(f.source_message_id) for f in erased.values() if f.source_message_id}
+        message_ids = {facts[f][2] for f in erased if facts[f][2]}
         async with self._conn.execute(
-            "SELECT id, content FROM messages WHERE org_id = ? AND user_id = ?",
-            (scope.org_id, scope.user_id),
+            "SELECT id, content FROM messages WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
             for r in await cur.fetchall():
                 content_norm = normalize_text(r["content"])
-                if any(_contains_phrase(content_norm, n) for n in norms):
+                if any(quotes(content_norm, n) for n in norms):
                     message_ids.add(r["id"])
+        event_ids: set[str] = set()
         async with self._conn.execute(
-            f"""SELECT DISTINCT e.id FROM events e, json_each(e.source_fact_ids) j
-                 WHERE e.org_id = ? AND e.user_id = ? AND j.value IN ({id_ph})""",
-            (scope.org_id, scope.user_id, *ids),
+            "SELECT * FROM events WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            event_ids = [r["id"] for r in await cur.fetchall()]
+            for r in await cur.fetchall():
+                ev = self._row_to_event(r)
+                linked = any(str(s) in erased for s in ev.source_fact_ids)
+                ev_norm = normalize_text(self._event_text(ev))
+                if linked or any(quotes(ev_norm, n) for n in norms):
+                    event_ids.add(r["id"])
 
         record = ErasureRecord(
             org_id=scope.org_id,
@@ -922,55 +1125,79 @@ class SqliteStore:
             },
         )
         scrubbed = f"[scrubbed by erasure {record.id}]"
-        msg_list = list(message_ids)
-        try:
-            if event_ids:
+
+        kept_hashes = 0
+        async with self._conn.execute(
+            "SELECT * FROM revocations WHERE org_id = ? AND user_id = ?", sc
+        ) as cur:
+            revs = await cur.fetchall()
+        for r in revs:
+            names_content = r["fact_id"] in erased or (
+                r["content_hash"] is not None and r["content_hash"] in hashes
+            )
+            reason_quotes = any(
+                quotes_any_run(normalize_text(r["reason"]), n)
+                or quotes_any_run(normalize_text(r["reinstate_reason"] or ""), n)
+                for n in norms
+            )
+            if not (names_content or reason_quotes):
+                continue
+            keep_hash = names_content and block_reinsertion and r["content_hash"] is not None
+            kept_hashes += int(keep_hash)
+            await self._conn.execute(
+                """UPDATE revocations
+                      SET reason = ?,
+                          reinstate_reason = CASE WHEN reinstate_reason IS NULL
+                                                  THEN NULL ELSE ? END,
+                          content_norm = CASE WHEN ? THEN NULL ELSE content_norm END,
+                          content_hash = CASE WHEN ? THEN content_hash ELSE
+                                              CASE WHEN ? THEN NULL ELSE content_hash END
+                                         END
+                    WHERE id = ?""",
+                (scrubbed, scrubbed, names_content, keep_hash, names_content, r["id"]),
+            )
+        record.guarantees["reinsertion_hashes_kept"] = kept_hashes
+
+        def ph(n: int) -> str:
+            return ",".join("?" * n)
+
+        for kind, items in (("fact", ids), ("message", message_ids), ("event", event_ids)):
+            if items:
                 await self._conn.execute(
-                    f"DELETE FROM events WHERE id IN ({','.join('?' * len(event_ids))})",
-                    tuple(event_ids),
+                    f"DELETE FROM content_matches WHERE kind = ? AND item_id IN ({ph(len(items))})",
+                    (kind, *items),
                 )
+        if event_ids:
             await self._conn.execute(
-                f"""DELETE FROM fact_derivations
-                     WHERE fact_id IN ({id_ph}) OR source_fact_id IN ({id_ph})""",
-                (*ids, *ids),
+                f"DELETE FROM events WHERE id IN ({ph(len(event_ids))})", tuple(event_ids)
             )
+        await self._conn.execute(
+            f"""DELETE FROM fact_derivations
+                 WHERE fact_id IN ({ph(len(ids))}) OR source_fact_id IN ({ph(len(ids))})""",
+            (*ids, *ids),
+        )
+        await self._conn.execute(f"DELETE FROM fact_meta WHERE fact_id IN ({ph(len(ids))})", ids)
+        await self._conn.execute(f"DELETE FROM facts WHERE id IN ({ph(len(ids))})", ids)
+        if message_ids:
             await self._conn.execute(
-                f"""UPDATE revocations
-                       SET content_hash = NULL,
-                           reason = ?,
-                           reinstate_reason = CASE WHEN reinstate_reason IS NULL
-                                                   THEN NULL ELSE ? END
-                     WHERE org_id = ? AND user_id = ?
-                       AND (fact_id IN ({id_ph}) OR content_hash IN ({hash_ph}))""",
-                (scrubbed, scrubbed, scope.org_id, scope.user_id, *ids, *hashes),
+                f"DELETE FROM messages WHERE id IN ({ph(len(message_ids))})", tuple(message_ids)
             )
-            await self._conn.execute(f"DELETE FROM fact_meta WHERE fact_id IN ({id_ph})", ids)
-            await self._conn.execute(f"DELETE FROM facts WHERE id IN ({id_ph})", ids)
-            if msg_list:
-                await self._conn.execute(
-                    f"DELETE FROM messages WHERE id IN ({','.join('?' * len(msg_list))})",
-                    tuple(msg_list),
-                )
-            await self._conn.execute(
-                """INSERT INTO erasures
-                   (id, org_id, user_id, fact_ids, actor, reason, erased_at, artifacts, guarantees)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
-                    str(record.id),
-                    record.org_id,
-                    record.user_id,
-                    json.dumps(ids),
-                    actor,
-                    reason,
-                    _dt(record.erased_at),
-                    json.dumps(record.artifacts),
-                    json.dumps(record.guarantees),
-                ),
-            )
-            await self._conn.commit()
-        except aiosqlite.Error as e:
-            await self._conn.rollback()
-            raise StoreError(f"erase: {e}") from e
+        await self._conn.execute(
+            """INSERT INTO erasures
+               (id, org_id, user_id, fact_ids, actor, reason, erased_at, artifacts, guarantees)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                str(record.id),
+                record.org_id,
+                record.user_id,
+                json.dumps(ids),
+                actor,
+                reason,
+                _dt(record.erased_at),
+                json.dumps(record.artifacts),
+                json.dumps(record.guarantees),
+            ),
+        )
         return record
 
     async def finalize_erasure(
@@ -981,6 +1208,7 @@ class SqliteStore:
             row = await cur.fetchone()
         secure = bool(row and row[0])
         guarantees: dict[str, Any] = {
+            **record.guarantees,
             "sqlite_secure_delete": secure,
             "fts_secure_delete": self._fts_secure_delete,
             **extra,
