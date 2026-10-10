@@ -90,8 +90,11 @@ class HnswVectorStore:
             si.deleted.discard(fact_id)
             existing = si.uuid_to_int.get(fact_id)
             if existing is not None:
-                # Replace by deleting + re-adding under same int id
-                si.index.mark_deleted(existing)
+                # Replace by deleting + re-adding under a fresh int id
+                try:
+                    si.index.mark_deleted(existing)
+                except RuntimeError:
+                    pass  # already marked deleted (revoked, now reinstated)
             int_id = si.next_id
             si.next_id += 1
             si.uuid_to_int[fact_id] = int_id
@@ -104,8 +107,10 @@ class HnswVectorStore:
         si = self._scopes.get(scope)
         if si is None:
             return []
-        # Live count = num_elements - deleted
-        live = max(0, si.index.element_count - len(si.deleted))
+        # Live count = current uuids minus deleted ones. element_count also
+        # counts superseded labels left behind by re-adds, which made k exceed
+        # the live set and hnswlib raise (silently returning no matches).
+        live = max(0, len(si.uuid_to_int) - len(si.deleted))
         if live == 0:
             return []
         k = min(k, live)
@@ -145,7 +150,7 @@ class HnswVectorStore:
         si = self._scopes.get(scope)
         if si is None:
             return 0
-        return int(max(0, si.index.element_count - len(si.deleted)))
+        return int(max(0, len(si.uuid_to_int) - len(si.deleted)))
 
     async def close(self) -> None:
         # In-memory only; nothing to release.

@@ -114,6 +114,21 @@ async def test_delete_removes_from_search(vec_store: HnswVectorStore, acme_alice
     assert results == []
 
 
+async def test_readd_after_delete_is_searchable(
+    vec_store: HnswVectorStore, acme_alice: Scope
+) -> None:
+    e = SyntheticEmbedding(dim=64)
+    [v, w] = await e.embed(["bring me back", "a neighbour"])
+    fid = uuid4()
+    await vec_store.add(fid, v, acme_alice)
+    await vec_store.add(uuid4(), w, acme_alice)
+    await vec_store.delete(fid, acme_alice)
+    await vec_store.add(fid, v, acme_alice)
+    assert await vec_store.count(acme_alice) == 2
+    results = await vec_store.search(v, acme_alice, k=10)
+    assert fid in {r.fact_id for r in results}
+
+
 async def test_delete_unknown_id_is_noop(vec_store: HnswVectorStore, acme_alice: Scope) -> None:
     await vec_store.delete(uuid4(), acme_alice)  # nothing to delete in empty scope
     assert await vec_store.count(acme_alice) == 0
