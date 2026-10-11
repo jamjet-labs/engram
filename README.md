@@ -33,7 +33,7 @@ There are several memory libraries for agents already ([Mem0](https://github.com
 
 **3. Local-first OR cloud.** Pluggable providers for both LLM (Ollama / OpenAI / Anthropic) and embeddings (Ollama / OpenAI / synthetic). Run completely offline with `nomic-embed-text` + `llama3.2:3b`, or swap in cloud providers when you need throughput.
 
-**4. Active fact versioning.** `Engram.supersede(old_id, new_id)` marks a fact as replaced. Recall filters superseded facts by default. So when a user changes a preference, the old one doesn't poison future answers.
+**4. Revocation that holds.** `Engram.revoke()` and `Engram.supersede(old_id, new_id)` write a tombstone, and the store withholds the revoked fact from every read path: vector, keyword, session ranking, events, transcripts, tools, HTTP and MCP. Writing the same text again does not bring it back. `Engram.erase()` hard-deletes a fact and what was derived from it. See [Revocation, erasure and provenance](#revocation-erasure-and-provenance).
 
 **5. Benchmarked, not vapor.** Reproducible LongMemEval-S runs in [`benchmarks/`](benchmarks/). We publish overall and per-category numbers (currently **71% overall**, see below). The 25-point gap to AgentMemory's frontier 96.2% is a public roadmap item — not hidden.
 
@@ -144,6 +144,54 @@ server = build_mcp_server(memory)
 async with mcp.server.stdio.stdio_server() as streams:
     await server.run(streams[0], streams[1], server.create_initialization_options())
 ```
+
+---
+
+## Revocation, erasure and provenance
+
+A 2026 study of five agent-memory systems found that none enforced revocation by default: the revoked fact was still returned, ranked above its replacement, and led agents to the unsafe action ([Shen, Toyoda, Leung, "Revoked but Still Authoritative", arXiv 2609.08258](https://arxiv.org/abs/2609.08258)). `tests/unit/test_revocation.py` reproduces that scenario against this library.
+
+```python
+old = await memory.record("Production deploys need approval from one reviewer.", user_id="ops")
+new = await memory.record("Production deploys need approval from two reviewers.", user_id="ops")
+
+await memory.supersede(old.id, new.id, user_id="ops", actor="sec-team", reason="policy v2")
+# or, with no replacement:
+# await memory.revoke(old, reason="policy withdrawn", actor="sec-team", user_id="ops")
+
+hits = await memory.recall("deploy approval reviewers", user_id="ops")
+# only the two-reviewer policy comes back, from recall, context, tools, HTTP and MCP
+```
+
+**Where it is enforced.** In one place: the `hidden_facts` view in [`schema.sql`](src/engram/store/schema.sql). Every store read selects from `live_facts`, `live_events` or `live_messages`, which are built on it. The vector index only returns ids, and ids resolve through `live_facts`, so a stale in-memory index (for example in a second process on the same database file) cannot hand back revoked text. The retriever re-checks visibility after reranking, so a revocation that lands mid-query still applies. A test fails if a new store read touches the base tables directly.
+
+**What a tombstone hides.**
+
+- the revoked fact, by id, even if its text is later rewritten;
+- every fact, transcript turn and event in the same `(org_id, user_id)` scope whose text equals the revoked text after normalization, or quotes it whole when the revoked text is at least four tokens long, whether written before or after the revocation. Normalization applies Unicode NFKC, drops format and other default-ignorable characters (zero-width space, soft hyphen, variation selectors, fillers), folds case, and treats punctuation and whitespace as separators. Symbols (`<`, `>`, `+`, currency, emoji), a minus sign before a number, and `% # @ &` are kept, so "> 10000" and "< 10000" stay different claims. Texts that normalize to nothing (only punctuation) get no content tombstone;
+- every fact recorded with `derived_from=[...]` pointing at a hidden fact, transitively. This covers the write-back case from the study, where an agent records a decision it reached from the old policy;
+- events whose `source_fact_ids` include a hidden fact;
+- transcript turns linked to a hidden fact through `source_message_id`. When an operator revokes a fact that has a `session_id` but no message link, all turns of that session are withheld from transcript reads, since there is no way to tell which turn carried it. That rule keys on the revocation, so a plain write of revoked text cannot be used to withhold a session.
+
+Query-time re-extraction and `extract()` drop any fact a tombstone would withhold before handing it back.
+
+**The re-insertion rule.** A write cannot un-revoke. Recording the same claim again stores it but it is born hidden (`record(..., reject_revoked=True)` raises `RevokedContentError` instead). Making the claim visible again takes `Engram.reinstate(fact, actor=..., reason=...)` on the revoked fact itself, which is recorded on the tombstone; reinstating a copy that was born hidden is refused, so a write is never a handle on the original. Matching is on normalized text, not meaning: a paraphrase, a number written differently, or a lookalike letter from another script is a new claim and needs its own revocation or a `derived_from` link.
+
+**What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Revoke, supersede, reinstate and erase are Python API only in this release, because the `/v1/memory/*` HTTP routes are unauthenticated. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
+
+**Erasure.** `Engram.erase(fact, actor=..., reason=...)` deletes, in one write transaction held from discovery to commit, the fact; every fact in its scope that equals or quotes it (same matching rule as above), and facts derived from any of them, repeated until nothing new is found; events listing them or quoting an erased text; the transcript turns they cite or that quote an erased text; and the free text of any tombstone or reinstatement note that quotes it. A short text such as a single word only matches on equality, so erasing "Paris" does not delete every turn that mentions Paris. FTS rows go with their base rows. The vector index for the scope is rebuilt without the erased vectors. It returns an `ErasureRecord` with ids, counts, actor and reason, and no content. A reason or actor containing any three-token run of an erased text is rejected; a single distinctive word can still get through, so keep audit fields to ticket numbers and roles.
+
+If the erased fact was revoked, its tombstone keeps the SHA-256 of the normalized text so the claim stays blocked. For a short text that hash can be confirmed by guessing; pass `block_reinsertion=False` to drop it as well, after which the same text can be recorded again.
+
+What the backend can show and what it cannot:
+
+| Layer | After `erase()` |
+|---|---|
+| SQLite main file and WAL | Rows deleted with `PRAGMA secure_delete=ON`, so freed pages are zeroed; FTS5 `secure-delete` removes the tokens from the full-text index (needs SQLite 3.44+, reported in `guarantees`); the WAL is checkpointed and truncated. A test greps the database files for the erased text. If another connection holds a read snapshot, the checkpoint cannot complete and `guarantees["wal_checkpointed"]` is `False`; old pages may stay in the `-wal` file until the next checkpoint. |
+| Vector index | Rebuilt without the erased vectors (hnswlib's own delete only marks them). The old index's memory goes back to the allocator without being zeroed. The index is in process memory only and is never written to disk. |
+| Not provable from here | Filesystem or SSD remnants, snapshots and backups, OS page cache, other processes' memory, and anything sent to an embedding or LLM provider. |
+
+**Provenance.** Every result of `recall()` and `context_entries()` carries `ScoredFact.provenance`: writer (`actor=` at record time), source (`record`, `extract`, `upsert` or `legacy`), recorded time, session, source message, `derived_from`, supersession links, revocation status and the time that status was checked. `Engram.explain(fact_id)` returns the same for any fact, including why a hidden one is hidden, without its text. Over HTTP use `POST /v1/memory/recall_with_provenance` (the existing `/search` and `/recall` shapes are unchanged); over MCP pass `include_provenance: true` to `memory_recall`.
 
 ---
 

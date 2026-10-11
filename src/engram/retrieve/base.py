@@ -7,6 +7,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from engram.governance import Provenance
 from engram.models import Fact
 
 
@@ -21,6 +22,9 @@ class ScoredFact(BaseModel):
     keyword_score: float = 0.0
     rerank_score: float = 0.0
     temporal_score: float = 0.0
+    # Set by the retriever's final visibility check; None only on objects
+    # built by hand (tests, custom rerankers before the check runs).
+    provenance: Provenance | None = None
 
 
 class RetrievalConfig(BaseModel):
@@ -48,6 +52,9 @@ class RetrievalConfig(BaseModel):
     # Phase 13: active fact-versioning. When True (default), facts whose
     # `superseded_by` is set are excluded from results — only the canonical
     # latest version surfaces. Set False to include the full history.
+    # Revoked facts (including those revoked via `Engram.supersede`) are
+    # withheld by the store regardless of this flag; it only affects facts
+    # whose `superseded_by` was set by hand without a revocation.
     exclude_superseded: bool = True
 
 

@@ -14,10 +14,25 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import UUID
 
 from engram.engram import Engram
+from engram.retrieve.base import ScoredFact
 
 logger = logging.getLogger(__name__)
+
+
+def _with_provenance(sf: ScoredFact) -> str:
+    p = sf.provenance
+    if p is None:
+        return f"- [score={sf.score:.3f}] {sf.fact.text} (fact={sf.fact.id})"
+    recorded = p.recorded_at.isoformat() if p.recorded_at else "unknown"
+    return (
+        f"- [score={sf.score:.3f}] {sf.fact.text} "
+        f"(fact={p.fact_id} writer={p.writer or 'unknown'} source={p.source} "
+        f"recorded={recorded} status={p.revocation_status} "
+        f"checked={p.checked_at.isoformat()})"
+    )
 
 
 def build_mcp_server(engram: Engram, name: str = "engram") -> Any:
@@ -43,6 +58,18 @@ def build_mcp_server(engram: Engram, name: str = "engram") -> Any:
                         "user_id": {"type": "string", "default": "default"},
                         "org_id": {"type": "string", "default": "default"},
                         "category": {"type": "string"},
+                        "actor": {
+                            "type": "string",
+                            "description": "Who is writing this memory (stored as provenance).",
+                        },
+                        "derived_from": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Fact ids this memory was concluded from. If any is "
+                                "revoked, this memory is withheld too."
+                            ),
+                        },
                     },
                     "required": ["text"],
                 },
@@ -59,6 +86,11 @@ def build_mcp_server(engram: Engram, name: str = "engram") -> Any:
                         "user_id": {"type": "string", "default": "default"},
                         "org_id": {"type": "string", "default": "default"},
                         "top_k": {"type": "integer", "default": 10},
+                        "include_provenance": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Append fact id, writer, source and status to each hit.",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -89,6 +121,8 @@ def build_mcp_server(engram: Engram, name: str = "engram") -> Any:
                 user_id=arguments.get("user_id", "default"),
                 org_id=arguments.get("org_id", "default"),
                 category=arguments.get("category"),
+                actor=arguments.get("actor"),
+                derived_from=[UUID(str(x)) for x in arguments.get("derived_from") or []] or None,
             )
             return [TextContent(type="text", text=f"recorded fact {fact.id}")]
 
@@ -99,7 +133,10 @@ def build_mcp_server(engram: Engram, name: str = "engram") -> Any:
                 org_id=arguments.get("org_id", "default"),
                 top_k=arguments.get("top_k", 10),
             )
-            lines = [f"- [score={sf.score:.3f}] {sf.fact.text}" for sf in results]
+            if arguments.get("include_provenance"):
+                lines = [_with_provenance(sf) for sf in results]
+            else:
+                lines = [f"- [score={sf.score:.3f}] {sf.fact.text}" for sf in results]
             return [TextContent(type="text", text="\n".join(lines) or "(no matches)")]
 
         if name == "memory_context":

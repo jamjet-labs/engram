@@ -1,6 +1,6 @@
 [project]
 name = "jamjet-engram"
-version = "0.2.0"
+version = "0.3.0"
 description = "Engram — durable memory layer for AI agents. Temporal knowledge graph, semantic search, and MCP-native tools."
 readme = "README.md"
 license = { text = "Apache-2.0" }

@@ -36,6 +36,11 @@ class VectorStore(Protocol):
     async def delete(self, fact_id: UUID, scope: Scope) -> None: ...
 
     @abstractmethod
+    async def purge(self, fact_ids: list[UUID], scope: Scope) -> int:
+        """Remove vectors from the index structure itself (erasure), not just mark them."""
+        ...
+
+    @abstractmethod
     async def count(self, scope: Scope) -> int: ...
 
     @abstractmethod

@@ -15,6 +15,7 @@ async def test_reextract_calls_llm_per_session_and_returns_facts():
         '{"facts": [{"text": "alice runs marathons", "confidence": 0.9}]}'
     )
     fake_store = AsyncMock()
+    fake_store.is_content_revoked = AsyncMock(return_value=False)
     scope = Scope(org_id="default", user_id="alice")
     fake_store.list_messages = AsyncMock(
         return_value=[
@@ -43,6 +44,7 @@ async def test_reextract_returns_empty_on_malformed_json():
     fake_llm = AsyncMock()
     fake_llm.generate.return_value.content = "not json"
     fake_store = AsyncMock()
+    fake_store.is_content_revoked = AsyncMock(return_value=False)
     fake_store.list_messages = AsyncMock(
         return_value=[
             ChatMessage(
@@ -69,6 +71,7 @@ async def test_reextract_caps_at_max_sessions():
     fake_llm = AsyncMock()
     fake_llm.generate.return_value.content = '{"facts": []}'
     fake_store = AsyncMock()
+    fake_store.is_content_revoked = AsyncMock(return_value=False)
     fake_store.list_messages = AsyncMock(return_value=[])
     rx = QueryConditionedReextractor(llm=fake_llm, max_sessions=2)
     await rx.reextract(
@@ -85,6 +88,7 @@ async def test_reextract_caps_at_max_sessions():
 async def test_reextract_skips_sessions_with_no_messages():
     fake_llm = AsyncMock()
     fake_store = AsyncMock()
+    fake_store.is_content_revoked = AsyncMock(return_value=False)
     fake_store.list_messages = AsyncMock(return_value=[])
     rx = QueryConditionedReextractor(llm=fake_llm)
     facts = await rx.reextract(

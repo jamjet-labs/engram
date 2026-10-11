@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from starlette.routing import Route
 
 from engram.engram import Engram
+from engram.errors import NotFoundError
+from engram.governance import Provenance
 from engram.models import ChatMessage, MemoryTier, Polarity
 from engram.scope import Scope
 from engram.server.auth import auth_asgi_wrapper
@@ -33,6 +35,9 @@ class _RecordRequest(BaseModel):
     tier: MemoryTier = MemoryTier.WORKING
     event_date: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Optional, additive in 0.3: who wrote it, and what it was concluded from.
+    actor: str | None = None
+    derived_from: list[UUID] | None = None
 
 
 class _RecordResponse(BaseModel):
@@ -61,6 +66,14 @@ class _SearchHit(BaseModel):
 
 class _SearchResponse(BaseModel):
     hits: list[_SearchHit]
+
+
+class _ProvenanceHit(_SearchHit):
+    provenance: Provenance
+
+
+class _ProvenanceSearchResponse(BaseModel):
+    hits: list[_ProvenanceHit]
 
 
 class _MessageRequest(BaseModel):
@@ -128,7 +141,7 @@ def build_http_app(
             async with manager.run():
                 yield
 
-        app = FastAPI(title="Engram", version="0.2.0", lifespan=lifespan)
+        app = FastAPI(title="Engram", version="0.3.0", lifespan=lifespan)
 
         wrapped_handler = auth_asgi_wrapper(handler, expected_token=auth_token)
 
@@ -143,7 +156,7 @@ def build_http_app(
 
         app.router.routes.append(Route("/mcp", endpoint=_MCPHandler()))
     else:
-        app = FastAPI(title="Engram", version="0.2.0")
+        app = FastAPI(title="Engram", version="0.3.0")
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -151,17 +164,22 @@ def build_http_app(
 
     @app.post("/v1/memory/record", response_model=_RecordResponse)
     async def record(req: _RecordRequest) -> _RecordResponse:
-        fact = await engram.record(
-            text=req.text,
-            user_id=req.user_id,
-            org_id=req.org_id,
-            category=req.category,
-            confidence=req.confidence,
-            polarity=req.polarity,
-            tier=req.tier,
-            event_date=req.event_date,
-            metadata=req.metadata,
-        )
+        try:
+            fact = await engram.record(
+                text=req.text,
+                user_id=req.user_id,
+                org_id=req.org_id,
+                category=req.category,
+                confidence=req.confidence,
+                polarity=req.polarity,
+                tier=req.tier,
+                event_date=req.event_date,
+                metadata=req.metadata,
+                actor=req.actor,
+                derived_from=req.derived_from,
+            )
+        except NotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
         return _RecordResponse(fact_id=fact.id, text=fact.text)
 
     @app.post("/v1/memory/search", response_model=_SearchResponse)
@@ -184,6 +202,35 @@ def build_http_app(
             for sf in results
         ]
         return _SearchResponse(hits=hits)
+
+    @app.post("/v1/memory/recall_with_provenance", response_model=_ProvenanceSearchResponse)
+    async def recall_with_provenance(req: _SearchRequest) -> _ProvenanceSearchResponse:
+        """Like /search, plus where each hit came from and when its status was checked.
+
+        A separate route so the /search and /recall shapes stay identical to
+        Rust v0.5.x for existing clients.
+        """
+        results = await engram.recall(
+            query=req.query, user_id=req.user_id, org_id=req.org_id, top_k=req.top_k
+        )
+        return _ProvenanceSearchResponse(
+            hits=[
+                _ProvenanceHit(
+                    fact_id=sf.fact.id,
+                    text=sf.fact.text,
+                    score=sf.score,
+                    vector_score=sf.vector_score,
+                    keyword_score=sf.keyword_score,
+                    rerank_score=sf.rerank_score,
+                    category=sf.fact.category,
+                    polarity=sf.fact.polarity,
+                    event_date=sf.fact.event_date,
+                    provenance=sf.provenance,
+                )
+                for sf in results
+                if sf.provenance is not None
+            ]
+        )
 
     # Alias for parity with Rust v0.5.x; Rust uses /recall as a GET.
     @app.get("/v1/memory/recall", response_model=_SearchResponse)

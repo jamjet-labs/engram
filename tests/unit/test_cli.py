@@ -12,7 +12,7 @@ runner = CliRunner()
 def test_version_flag():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.0" in result.stdout
+    assert "0.3.0" in result.stdout
 
 
 def test_transport_must_be_http():

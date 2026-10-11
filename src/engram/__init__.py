@@ -9,6 +9,7 @@ from engram.classify.base import QuestionType
 from engram.classify.rules import RuleBasedClassifier
 from engram.engram import Engram
 from engram.errors import EngramError, ExtractionError, NotFoundError, StoreError
+from engram.governance import ErasureRecord, Provenance, Revocation, RevokedContentError
 from engram.llm.base import LLMClient, LLMMessage, LLMResponse
 from engram.models import ChatMessage, Fact, MemoryTier, Polarity
 from engram.read.preference_gate import is_preference_question
@@ -21,6 +22,7 @@ __all__ = [
     "ChatMessage",
     "Engram",
     "EngramError",
+    "ErasureRecord",
     "ExtractionError",
     "Fact",
     "LLMClient",
@@ -29,10 +31,13 @@ __all__ = [
     "MemoryTier",
     "NotFoundError",
     "Polarity",
+    "Provenance",
     "QuestionType",
     "Reader",
     "ReaderConfig",
     "RetrievalConfig",
+    "Revocation",
+    "RevokedContentError",
     "RuleBasedClassifier",
     "Scope",
     "StoreError",
