@@ -102,7 +102,7 @@ async def test_healthz_stays_open(app: FastAPI) -> None:
 async def test_healthz_exemption_is_exact(app: FastAPI) -> None:
     # Only the exact path is open; lookalikes fall through to the token check.
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        for path in ("/healthz/", "/healthzz", "//healthz"):
+        for path in ("/healthz/", "/healthzz", "/healthz.json"):
             resp = await c.get(path)
             assert resp.status_code == 401, f"{path} -> {resp.status_code}"
 
@@ -115,5 +115,20 @@ async def test_empty_token_is_refused(tmp_path: Any, monkeypatch: pytest.MonkeyP
     try:
         with pytest.raises(ValueError, match="auth_token"):
             build_http_app(engram, auth_token="")
+    finally:
+        await engram.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", [" secret123", "secret123 ", "   ", "secret123\n"])
+async def test_token_with_outer_whitespace_is_refused(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    # HTTP servers strip header whitespace, so such a token can never match.
+    monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
+    engram = await Engram.open(path=str(tmp_path / "engram.db"))
+    try:
+        with pytest.raises(ValueError, match="whitespace"):
+            build_http_app(engram, auth_token=token)
     finally:
         await engram.close()

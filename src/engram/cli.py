@@ -19,6 +19,7 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 MIN_TOKEN_LEN = 32
 ALLOW_UNAUTHENTICATED_ENV = "ENGRAM_ALLOW_UNAUTHENTICATED"
 ALLOWED_ORIGINS_ENV = "ENGRAM_ALLOWED_ORIGINS"
+ALLOWED_HOSTS_ENV = "ENGRAM_ALLOWED_HOSTS"
 _YES = frozenset({"1", "true", "yes", "on"})
 _TOKEN_HINT = "python -c 'import secrets; print(secrets.token_urlsafe(32))'"
 
@@ -36,12 +37,9 @@ def _print_version() -> None:
     raise typer.Exit(0)
 
 
-def _resolve_origins(flag_values: list[str] | None) -> list[str]:
-    from engram.server.auth import normalize_origin
-
+def _flag_and_env(flag_values: list[str] | None, env_name: str) -> list[str]:
     raw = list(flag_values or [])
-    raw += [o for o in os.environ.get(ALLOWED_ORIGINS_ENV, "").split(",") if o.strip()]
-    return [normalize_origin(o) for o in raw]
+    return raw + [v for v in os.environ.get(env_name, "").split(",") if v.strip()]
 
 
 @app.command()
@@ -70,6 +68,15 @@ def main(
             f"unaffected. Env: {ALLOWED_ORIGINS_ENV} (comma-separated)."
         ),
     ),
+    allowed_host: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--allowed-host",
+        help=(
+            "Hostname besides 127.0.0.1, localhost and ::1 that requests may use in "
+            "the Host header when running without a token. Repeatable. Env: "
+            f"{ALLOWED_HOSTS_ENV} (comma-separated)."
+        ),
+    ),
     db_path: str | None = typer.Option(None, "--db-path", help="SQLite path."),
     log_level: str = typer.Option("INFO", "--log-level"),
     version: bool = typer.Option(False, "--version", help="Print version and exit."),
@@ -89,8 +96,11 @@ def main(
         or os.environ.get(ALLOW_UNAUTHENTICATED_ENV, "").strip().lower() in _YES
     )
 
+    from engram.server.auth import check_token, normalize_host, normalize_origin
+
     try:
-        origins = _resolve_origins(allowed_origin)
+        origins = [normalize_origin(o) for o in _flag_and_env(allowed_origin, ALLOWED_ORIGINS_ENV)]
+        hosts = [normalize_host(h) for h in _flag_and_env(allowed_host, ALLOWED_HOSTS_ENV)]
     except ValueError as e:
         _eprint(str(e))
         raise typer.Exit(2) from e
@@ -126,9 +136,17 @@ def main(
 
         _eprint(
             f"warning: running without auth on {host}:{port}. Anyone who can reach it can "
-            "read and write all memory."
+            "read and write all memory. Requests must name 127.0.0.1, localhost or ::1 "
+            "in the Host header; add other names with --allowed-host."
         )
-    elif len(auth_token) < MIN_TOKEN_LEN:
+    else:
+        try:
+            check_token(auth_token)
+        except ValueError as e:
+            _eprint(f"refusing to start: ${auth_token_env}: {e}")
+            raise typer.Exit(2) from e
+
+    if auth_token is not None and len(auth_token) < MIN_TOKEN_LEN:
         # Rule 4: short-token warning (not blocking)
         _eprint(
             f"warning: ${auth_token_env} is shorter than {MIN_TOKEN_LEN} chars; "
@@ -147,6 +165,7 @@ def main(
             db_path=resolved_db,
             auth_token=auth_token,
             allowed_origins=origins,
+            allowed_hosts=hosts,
             log_level=log_level,
         )
     )
@@ -160,6 +179,7 @@ async def serve_engram(
     auth_token: str | None,
     log_level: str,
     allowed_origins: list[str] | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> None:
     """Open Engram and serve the FastAPI app via uvicorn — all on one event loop.
 
@@ -184,6 +204,7 @@ async def serve_engram(
             mcp_server=mcp_server,
             auth_token=auth_token,
             allowed_origins=allowed_origins or (),
+            allowed_hosts=allowed_hosts or None,
         )
         config = uvicorn.Config(fast_app, host=host, port=port, log_level=log_level.lower())
         server = uvicorn.Server(config)

@@ -357,10 +357,13 @@ The server returns `MCP-Session-Id` in the response headers; subsequent requests
 - The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset, and says why. To run without a token on purpose:
   - `--no-auth --host 127.0.0.1` (or `::1`) for local use. `localhost` is rejected because `/etc/hosts` can redirect it.
   - `--allow-unauthenticated` (or `ENGRAM_ALLOW_UNAUTHENTICATED=1`) on any host, for example behind a proxy that does its own auth. The server prints a warning at startup.
-- Browser requests are checked against an Origin allowlist, as the MCP Streamable HTTP spec requires to stop DNS rebinding. A request with an `Origin` header that is not on the list gets 403. Requests without `Origin` (MCP clients, curl, server-side SDKs) are not affected. The list is empty by default; add entries with `--allowed-origin https://app.example.com` (repeatable) or `ENGRAM_ALLOWED_ORIGINS` (comma-separated).
+- DNS rebinding (a web page pointing its own hostname at your server) is blocked in two ways, as the MCP Streamable HTTP spec asks:
+  - A request with an `Origin` header that is not on the allowlist gets 403. Requests without `Origin` (MCP clients, curl, server-side SDKs) are not affected. The list is empty by default; add entries with `--allowed-origin https://app.example.com` (repeatable) or `ENGRAM_ALLOWED_ORIGINS` (comma-separated). The server sends no CORS headers, so listing an origin does not by itself let a web app on that origin call it with the token.
+  - Without a token, a rebound page's same-origin GETs carry no `Origin`, so the server also checks `Host`: only `127.0.0.1`, `localhost` and `::1` (any port) are served, and other names get 421. Add names with `--allowed-host engram.internal` (repeatable) or `ENGRAM_ALLOWED_HOSTS`. With a token this check is off unless you pass `--allowed-host`, because a rebound page cannot present the token.
+- The token must not start or end with whitespace (a stray newline from a secrets file, say); the server refuses to start rather than reject every request.
 - OAuth2 dynamic client registration (the Claude Desktop remote-server flavor) is on the roadmap.
 
-**Upgrading from 0.2.** REST clients of a server started with a token now need to send it too. The Java SDK's `EngramClient` reads it from `ENGRAM_TOKEN`; other clients add the `Authorization` header. Browser callers need their origin on the allowlist.
+**Upgrading from 0.2.** REST clients of a server started with a token now need to send it too. The Java SDK's `EngramClient` reads it from `ENGRAM_TOKEN`; other clients add the `Authorization` header. A server without a token only answers requests addressed to a loopback name, so a proxy or a test client that uses another hostname (Starlette's `TestClient` sends `testserver`) needs `--allowed-host`, `build_http_app(allowed_hosts=[...])`, or a loopback base URL.
 
 ### Tenancy: one token is one trust domain
 

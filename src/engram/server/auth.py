@@ -1,9 +1,15 @@
-"""ASGI guards for the Engram HTTP server: bearer-token auth and Origin checks.
+"""ASGI guards for the Engram HTTP server: bearer token, Origin and Host checks.
 
-`build_http_app` wraps the whole app, REST routes and `/mcp` alike, in both.
-Only `/healthz` is exempt. One token gates everything the server can reach, so
-one token is one trust domain: whoever holds it can read and write every
+`build_http_app` wraps the whole app, REST routes and `/mcp` alike. Only
+`/healthz` is exempt. One token gates everything the server can reach, so one
+token is one trust domain: whoever holds it can read and write every
 `(org_id, user_id)` scope in that database.
+
+DNS rebinding: a web page can point its own hostname at 127.0.0.1 and then talk
+to a local server. Its cross-origin requests and POSTs carry an `Origin` header
+(checked by `OriginGuardMiddleware`). Its same-origin GETs carry none, but
+their `Host` is the attacker's name (checked by `HostGuardMiddleware`, which
+`build_http_app` turns on when there is no token).
 """
 
 from __future__ import annotations
@@ -19,6 +25,11 @@ HEALTHZ_PATH = "/healthz"
 
 _UNAUTH_BODY = json.dumps({"error": "invalid bearer token"}).encode("utf-8")
 _FORBIDDEN_ORIGIN_BODY = json.dumps({"error": "origin not allowed"}).encode("utf-8")
+_MISDIRECTED_BODY = json.dumps({"error": "host not allowed"}).encode("utf-8")
+
+# Hostnames that always reach a server bound to loopback.
+LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # RFC 6455 7.4.1: 1008 = policy violation.
 _WS_POLICY_VIOLATION = 1008
@@ -53,8 +64,7 @@ class BearerAuthMiddleware:
     def __init__(
         self, app: ASGIApp, *, expected_token: str, exempt_paths: Iterable[str] = ()
     ) -> None:
-        if not expected_token:
-            raise ValueError("expected_token must be a non-empty string")
+        check_token(expected_token)
         self.app = app
         self._token = expected_token.encode("utf-8")
         self._exempt = frozenset(exempt_paths)
@@ -84,6 +94,17 @@ class BearerAuthMiddleware:
         await _reject(scope, send, 401, _UNAUTH_BODY)
 
 
+def check_token(token: str) -> None:
+    """Raise ValueError for a token no client could ever present."""
+    if not token:
+        raise ValueError("auth token must be a non-empty string")
+    if token != token.strip():
+        # HTTP servers strip whitespace around header values, so a token that
+        # starts or ends with whitespace (say, a newline from a secrets file)
+        # could never match and every request would get 401.
+        raise ValueError("auth token has leading or trailing whitespace")
+
+
 def normalize_origin(origin: str) -> str:
     """Validate one allowlist entry and return it in the form browsers send.
 
@@ -91,26 +112,64 @@ def normalize_origin(origin: str) -> str:
     wildcards, `null`, paths, queries, fragments and userinfo, so a typo cannot
     widen the allowlist.
     """
-    value = origin.strip().rstrip("/").lower()
-    parts = urlsplit(value)
-    if (
-        parts.scheme not in ("http", "https")
-        or not parts.hostname
-        or "*" in value
-        or parts.path
-        or parts.query
-        or parts.fragment
-        or "@" in parts.netloc
-    ):
-        raise ValueError(
-            f"invalid allowed origin {origin!r}: expected scheme://host[:port], "
+
+    def bad(why: str) -> ValueError:
+        return ValueError(
+            f"invalid allowed origin {origin!r}: {why}; expected scheme://host[:port], "
             "for example https://app.example.com"
         )
+
+    value = origin.strip().rstrip("/")
+    if "*" in value or "?" in value or "#" in value or "@" in value:
+        raise bad("no wildcards, query, fragment or userinfo")
     try:
-        parts.port  # noqa: B018 - raises ValueError on a malformed port
+        parts = urlsplit(value)
+        port = parts.port
     except ValueError as e:
-        raise ValueError(f"invalid allowed origin {origin!r}: bad port") from e
+        raise bad(str(e)) from e
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS or not parts.hostname or parts.path:
+        raise bad("http or https with a host and no path")
+    try:
+        host = parts.hostname.encode("idna").decode("ascii")
+    except UnicodeError as e:
+        raise bad("host is not a valid domain name") from e
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None and port != _DEFAULT_PORTS[scheme]:
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def normalize_host(host: str) -> str:
+    """Validate one allowed-host entry: a bare hostname or IP, matched on any port."""
+    value = host.strip().lower()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    bad_chars = set("/*@?#[] \t")
+    if not value or bad_chars & set(value) or (":" in value and value.count(":") < 2):
+        raise ValueError(
+            f"invalid allowed host {host!r}: expected a hostname or IP without scheme, "
+            "port or path, for example engram.internal"
+        )
     return value
+
+
+def _request_hostname(raw: bytes) -> str | None:
+    """Hostname part of a Host header, lowercased, or None if malformed."""
+    value = raw.decode("latin-1").strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        rest = value[end + 1 :]
+        if end == -1 or (rest and not (rest[:1] == ":" and rest[1:].isdigit())):
+            return None
+        return value[1:end] or None
+    name, sep, port = value.rpartition(":")
+    if not sep:
+        return value or None
+    if not port.isdigit():
+        return None
+    return name or None
 
 
 class OriginGuardMiddleware:
@@ -151,6 +210,42 @@ class OriginGuardMiddleware:
             await self.app(scope, receive, send)
             return
         await _reject(scope, send, 403, _FORBIDDEN_ORIGIN_BODY)
+
+
+class HostGuardMiddleware:
+    """Reject requests whose `Host` hostname is not on the allowlist (421).
+
+    Stops DNS-rebinding reads against a server without a token: the rebound
+    page is same-origin with the server, so its GETs carry no `Origin`, but
+    their `Host` is still the attacker's hostname. Any port is accepted.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        allowed_hosts: Iterable[str],
+        exempt_paths: Iterable[str] = (),
+    ) -> None:
+        self.app = app
+        self._allowed = frozenset(normalize_host(h) for h in allowed_hosts)
+        self._exempt = frozenset(exempt_paths)
+
+    def _allowed_request(self, scope: Scope) -> bool:
+        hosts = [value for name, value in scope.get("headers", []) if name == b"host"]
+        if len(hosts) != 1:
+            return False
+        return _request_hostname(hosts[0]) in self._allowed
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] == "lifespan"
+            or _is_exempt(scope, self._exempt)
+            or self._allowed_request(scope)
+        ):
+            await self.app(scope, receive, send)
+            return
+        await _reject(scope, send, 421, _MISDIRECTED_BODY)
 
 
 def auth_asgi_wrapper(

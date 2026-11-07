@@ -69,7 +69,12 @@ def test_short_token_warns_but_starts(monkeypatch):
 
 
 def _clear_env(monkeypatch):
-    for name in ("ENGRAM_AUTH_TOKEN", "ENGRAM_ALLOW_UNAUTHENTICATED", "ENGRAM_ALLOWED_ORIGINS"):
+    for name in (
+        "ENGRAM_AUTH_TOKEN",
+        "ENGRAM_ALLOW_UNAUTHENTICATED",
+        "ENGRAM_ALLOWED_ORIGINS",
+        "ENGRAM_ALLOWED_HOSTS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -174,3 +179,39 @@ def test_no_auth_ignores_the_token_and_passes_none(monkeypatch):
     result = runner.invoke(app, ["--no-auth", "--host", "127.0.0.1", "--db-path", "x.db"])
     assert result.exit_code == 0, result.output
     assert seen["auth_token"] is None
+
+
+def test_token_with_outer_whitespace_refuses(monkeypatch):
+    # A trailing newline from a secrets file would otherwise start a server
+    # that rejects every request.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "t" * 40 + "\n")
+    result = runner.invoke(app, ["--dry-run"])
+    assert result.exit_code != 0
+    assert "whitespace" in (result.stderr + result.output)
+
+
+def test_allowed_hosts_reach_the_server_and_are_validated(monkeypatch):
+    import engram.cli as cli
+
+    _clear_env(monkeypatch)
+    seen = {}
+
+    async def fake_serve(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli, "serve_engram", fake_serve)
+    monkeypatch.setenv("ENGRAM_ALLOWED_HOSTS", "b.internal")
+    result = runner.invoke(app, ["--no-auth", "--allowed-host", "A.internal", "--db-path", "x.db"])
+    assert result.exit_code == 0, result.output
+    assert seen["allowed_hosts"] == ["a.internal", "b.internal"]
+
+    result = runner.invoke(app, ["--no-auth", "--allowed-host", "http://x", "--dry-run"])
+    assert result.exit_code != 0
+
+
+def test_unauthenticated_warning_names_the_host_check(monkeypatch):
+    _clear_env(monkeypatch)
+    result = runner.invoke(app, ["--allow-unauthenticated", "--host", "0.0.0.0", "--dry-run"])
+    assert result.exit_code == 0
+    assert "--allowed-host" in (result.stderr + result.output)

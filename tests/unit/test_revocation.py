@@ -168,7 +168,7 @@ async def test_revoked_fact_is_withheld_from_http_routes() -> None:
     async with await Engram.open(":memory:") as memory:
         old, _ = await _seed(memory)
         await memory.revoke(old.id, reason="r", actor="a", user_id="ops")  # type: ignore[attr-defined]
-        client = TestClient(build_http_app(memory))
+        client = TestClient(build_http_app(memory), base_url="http://127.0.0.1")
         params = {"query": QUERY, "user_id": "ops"}
         bodies = [
             client.post("/v1/memory/search", json=params).text,

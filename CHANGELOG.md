@@ -14,14 +14,16 @@ Target version: 0.3.0.
 - Provenance: `ScoredFact.provenance`, `Engram.explain()`, `Engram.context_entries()`, `POST /v1/memory/recall_with_provenance`, and `include_provenance` on the MCP `memory_recall` tool. `record()` takes `actor` and `source_message_id`; the HTTP and MCP record calls take optional `actor` and `derived_from`.
 - `Engram.revocations()` and `Engram.erasures()` list the audit records.
 - `engram-server --allow-unauthenticated` (env `ENGRAM_ALLOW_UNAUTHENTICATED=1`): start without a token on a non-loopback host, with a startup warning. For deployments where a proxy in front does the auth.
-- `engram-server --allowed-origin <origin>` (repeatable; env `ENGRAM_ALLOWED_ORIGINS`, comma-separated) and `build_http_app(allowed_origins=...)`: browser origins allowed to call the server.
+- `engram-server --allowed-origin <origin>` (repeatable; env `ENGRAM_ALLOWED_ORIGINS`, comma-separated) and `build_http_app(allowed_origins=...)`: browser origins allowed to call the server. No CORS headers are added.
+- `engram-server --allowed-host <name>` (repeatable; env `ENGRAM_ALLOWED_HOSTS`) and `build_http_app(allowed_hosts=...)`: hostnames, besides the loopback names, a server without a token will answer.
 - `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md`, `.github/pull_request_template.md` — inbound contribution scaffolding for the public-launch transition.
 - `.github/workflows/release.yml` — automated release on `v*.*.*` tag push: builds wheel + sdist with `uv build`, publishes to PyPI via OIDC trusted publisher (no long-lived secrets), creates a GitHub Release with auto-generated notes. One-time PyPI side setup needed to register the trusted publisher (instructions in the workflow header).
 
 ### Changed
 - **Breaking: the bearer token now gates every HTTP route, not only `/mcp`.** With `ENGRAM_AUTH_TOKEN` set, `/v1/memory/*`, `/v1/sessions/*`, `/docs` and `/openapi.json` return 401 without `Authorization: Bearer <token>`. Only `/healthz` stays open. REST clients that talk to a server or Docker image started with a token must now send it (the Java SDK reads `ENGRAM_TOKEN`). The image already refused to start without a token in 0.2.0; that is unchanged, and the startup error now says what to set.
 - **Breaking: requests with a browser `Origin` header not on the allowlist get 403**, on every route except `/healthz`, including `build_http_app()` used as a library. The allowlist is empty by default. Requests with no `Origin` header are unaffected.
-- `build_http_app(auth_token="")` raises `ValueError` instead of meaning "no auth".
+- **Breaking: a server without a token only answers requests whose `Host` is `127.0.0.1`, `localhost` or `::1`** (any port); others get 421. This includes `build_http_app()` used as a library, so a Starlette `TestClient` (which sends `Host: testserver`) needs a loopback `base_url` or `allowed_hosts=["testserver"]`.
+- `build_http_app(auth_token="")` raises `ValueError` instead of meaning "no auth". A token with leading or trailing whitespace is refused at startup, since HTTP servers strip it from the header and no request could match.
 - `Engram.supersede()` returns the `Revocation` it wrote and accepts optional `actor` and `reason`. Superseded facts are now withheld even with `RetrievalConfig(exclude_superseded=False)`; that flag now only applies to `superseded_by` values set by hand.
 - Version 0.3.0 in `pyproject.toml` (not yet published).
 - New side tables (`fact_meta`, `fact_derivations`, `revocations`, `erasures`) and views are created on open; rows from 0.2 databases are backfilled with content hashes. No change to the existing HTTP response shapes.
@@ -35,7 +37,7 @@ Target version: 0.3.0.
 
 ### Security
 - The `/v1/memory/*` and `/v1/sessions/*` REST routes were never auth-gated, even with `ENGRAM_AUTH_TOKEN` set and the server bound to `0.0.0.0` (the Docker default). Anyone who could reach the port could read and write any user's memory without the token. Fixed by the app-wide token check above.
-- The MCP Streamable HTTP endpoint did not validate `Origin`, so a web page could reach a server on loopback through DNS rebinding. With `--no-auth` that meant full read and write access. Fixed by the Origin allowlist above.
+- The MCP Streamable HTTP endpoint did not validate `Origin`, so a web page could reach a server on loopback through DNS rebinding. With `--no-auth` that meant full read and write access. Fixed by the Origin allowlist above, plus the `Host` check for servers without a token, since a rebound page's same-origin GETs carry no `Origin`.
 - README: removed the claim of "no cross-tenant leakage by construction". `user_id` and `org_id` come from the request, so over HTTP and MCP one token is one trust domain: any holder can read and write every scope in that database. The README now says so and shows how to run one server per tenant.
 
 ## [0.2.0] — 2026-05-09
