@@ -120,15 +120,19 @@ async def test_empty_token_is_refused(tmp_path: Any, monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("token", [" secret123", "secret123 ", "   ", "secret123\n"])
-async def test_token_with_outer_whitespace_is_refused(
+@pytest.mark.parametrize(
+    "token",
+    [" secret123", "secret123 ", "   ", "secret123\n", "sec ret123", "sec\nret123", "s\u00e9cret"],
+)
+async def test_token_a_client_cannot_send_is_refused(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch, token: str
 ) -> None:
-    # HTTP servers strip header whitespace, so such a token can never match.
+    # Whitespace is stripped from header values, and control or non-ASCII
+    # characters are not sent by common clients, so such a token never matches.
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
     engram = await Engram.open(path=str(tmp_path / "engram.db"))
     try:
-        with pytest.raises(ValueError, match="whitespace"):
+        with pytest.raises(ValueError, match="printable ASCII"):
             build_http_app(engram, auth_token=token)
     finally:
         await engram.close()

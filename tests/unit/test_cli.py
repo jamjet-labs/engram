@@ -188,7 +188,7 @@ def test_token_with_outer_whitespace_refuses(monkeypatch):
     monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "t" * 40 + "\n")
     result = runner.invoke(app, ["--dry-run"])
     assert result.exit_code != 0
-    assert "whitespace" in (result.stderr + result.output)
+    assert "printable ASCII" in (result.stderr + result.output)
 
 
 def test_allowed_hosts_reach_the_server_and_are_validated(monkeypatch):

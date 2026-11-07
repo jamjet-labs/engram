@@ -163,6 +163,10 @@ def build_http_app(
             check_token(auth_token)
         except ValueError as e:
             raise ValueError(f"auth_token: {e}") from e
+    # A str is iterable, so "a.example" would become the hosts "a", ".", ...
+    for name, value in (("allowed_origins", allowed_origins), ("allowed_hosts", allowed_hosts)):
+        if isinstance(value, str | bytes):
+            raise TypeError(f"{name} must be a list of strings, not a single string")
     # Validate now: Starlette builds middleware lazily, on the first request.
     origins = tuple(normalize_origin(o) for o in allowed_origins)
     hosts = None if allowed_hosts is None else {normalize_host(h) for h in allowed_hosts}

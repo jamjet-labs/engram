@@ -95,14 +95,14 @@ class BearerAuthMiddleware:
 
 
 def check_token(token: str) -> None:
-    """Raise ValueError for a token no client could ever present."""
+    """Raise ValueError for a token no client could reliably present."""
     if not token:
         raise ValueError("auth token must be a non-empty string")
-    if token != token.strip():
-        # HTTP servers strip whitespace around header values, so a token that
-        # starts or ends with whitespace (say, a newline from a secrets file)
-        # could never match and every request would get 401.
-        raise ValueError("auth token has leading or trailing whitespace")
+    if not all("!" <= ch <= "~" for ch in token):
+        # Servers strip whitespace around header values, and common clients
+        # will not send control or non-ASCII characters. Such a token (say, one
+        # with a newline from a secrets file) would get 401 on every request.
+        raise ValueError("auth token must be printable ASCII with no spaces or control characters")
 
 
 def normalize_origin(origin: str) -> str:
@@ -130,10 +130,12 @@ def normalize_origin(origin: str) -> str:
     scheme = parts.scheme.lower()
     if scheme not in _DEFAULT_PORTS or not parts.hostname or parts.path:
         raise bad("http or https with a host and no path")
-    try:
-        host = parts.hostname.encode("idna").decode("ascii")
-    except UnicodeError as e:
-        raise bad("host is not a valid domain name") from e
+    host = parts.hostname
+    if not host.isascii():
+        # Python's idna codec is IDNA 2003, which maps some names to a
+        # different domain than browsers send (faß.de -> fass.de). Ask for
+        # the punycode form instead of guessing.
+        raise bad("write a non-ASCII host in its punycode (xn--) form")
     if ":" in host:
         host = f"[{host}]"
     if port is not None and port != _DEFAULT_PORTS[scheme]:
@@ -147,10 +149,15 @@ def normalize_host(host: str) -> str:
     if value.startswith("[") and value.endswith("]"):
         value = value[1:-1]
     bad_chars = set("/*@?#[] \t")
-    if not value or bad_chars & set(value) or (":" in value and value.count(":") < 2):
+    if (
+        not value
+        or not value.isascii()
+        or bad_chars & set(value)
+        or (":" in value and value.count(":") < 2)
+    ):
         raise ValueError(
-            f"invalid allowed host {host!r}: expected a hostname or IP without scheme, "
-            "port or path, for example engram.internal"
+            f"invalid allowed host {host!r}: expected an ASCII hostname or IP without "
+            "scheme, port or path (punycode for non-ASCII names), for example engram.internal"
         )
     return value
 
@@ -161,15 +168,20 @@ def _request_hostname(raw: bytes) -> str | None:
     if value.startswith("["):
         end = value.find("]")
         rest = value[end + 1 :]
-        if end == -1 or (rest and not (rest[:1] == ":" and rest[1:].isdigit())):
+        if end == -1 or (rest and not (rest[:1] == ":" and _is_port(rest[1:]))):
             return None
         return value[1:end] or None
     name, sep, port = value.rpartition(":")
     if not sep:
         return value or None
-    if not port.isdigit():
+    if not _is_port(port):
         return None
     return name or None
+
+
+def _is_port(value: str) -> bool:
+    # str.isdigit alone accepts superscripts and other non-ASCII digits.
+    return value.isascii() and value.isdigit()
 
 
 class OriginGuardMiddleware:

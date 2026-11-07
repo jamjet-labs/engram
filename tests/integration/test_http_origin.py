@@ -193,7 +193,7 @@ async def test_every_origin_header_must_be_allowed(app: FastAPI) -> None:
         ("http://app.example.com:80", "http://app.example.com"),
         ("http://localhost:3000", "http://localhost:3000"),
         ("http://[::1]:3000", "http://[::1]:3000"),
-        ("https://b\u00fccher.example", "https://xn--bcher-kva.example"),
+        ("https://xn--bcher-kva.example", "https://xn--bcher-kva.example"),
     ],
 )
 def test_allowlist_entries_are_stored_as_browsers_send_them(entry: str, expected: str) -> None:
@@ -202,7 +202,16 @@ def test_allowlist_entries_are_stored_as_browsers_send_them(entry: str, expected
 
 @pytest.mark.parametrize(
     "entry",
-    ["https://app.example.com?", "https://app.example.com#", "http://[::1", "https://x:99999"],
+    [
+        "https://app.example.com?",
+        "https://app.example.com#",
+        "http://[::1",
+        "https://x:99999",
+        # Python's idna codec (IDNA 2003) maps these to a different domain than
+        # browsers send (fass.de instead of xn--fa-hia.de). Require punycode.
+        "https://fa\u00df.de",
+        "https://a\u200db.example",
+    ],
 )
 def test_allowlist_rejects_entries_that_could_never_match(entry: str) -> None:
     with pytest.raises(ValueError, match="allowed origin"):
@@ -271,7 +280,9 @@ async def test_token_app_does_not_check_host_by_default(app: FastAPI) -> None:
         assert resp.status_code == 200
 
 
-@pytest.mark.parametrize("entry", ["http://x", "x/y", "*.example.com", "x:80", "", "a b"])
+@pytest.mark.parametrize(
+    "entry", ["http://x", "x/y", "*.example.com", "x:80", "", "a b", "fa\u00df.de"]
+)
 def test_allowed_host_entries_are_validated(entry: str) -> None:
     with pytest.raises(ValueError, match="allowed host"):
         normalize_host(entry)
@@ -306,3 +317,27 @@ async def test_host_check_is_on_by_default_without_a_token(
             assert resp.status_code == 200
     finally:
         await engram.close()
+
+
+@pytest.mark.asyncio
+async def test_a_bare_string_is_not_taken_as_a_list(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "engram.internal" iterated would allow hosts "e", "n", "g", ...
+    engram = await _engram(tmp_path, monkeypatch)
+    try:
+        with pytest.raises(TypeError, match="allowed_hosts"):
+            build_http_app(engram, allowed_hosts="engram.internal")
+        with pytest.raises(TypeError, match="allowed_origins"):
+            build_http_app(engram, allowed_origins="https://app.example.com")
+    finally:
+        await engram.close()
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_digits_are_not_a_port(open_app: FastAPI) -> None:
+    async with _client(open_app) as c:
+        # Latin-1 superscript two, sent as a raw byte.
+        headers = [(b"Host", b"localhost:\xb2")]
+        resp = await c.get("/v1/memory/recall", params={"query": "q"}, headers=headers)
+        assert resp.status_code == 421
