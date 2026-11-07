@@ -15,7 +15,7 @@ from engram.server.http import build_http_app
 async def client_engram() -> AsyncIterator[tuple[TestClient, Engram]]:
     memory = await Engram.open(":memory:")
     app = build_http_app(memory)
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://127.0.0.1")
     try:
         yield client, memory
     finally:

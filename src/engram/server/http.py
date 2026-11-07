@@ -6,7 +6,7 @@ existing clients (Spring Boot starter, langchain4j, Java SDK) keep working.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -21,7 +21,16 @@ from engram.errors import NotFoundError
 from engram.governance import Provenance
 from engram.models import ChatMessage, MemoryTier, Polarity
 from engram.scope import Scope
-from engram.server.auth import auth_asgi_wrapper
+from engram.server.auth import (
+    HEALTHZ_PATH,
+    LOOPBACK_HOSTNAMES,
+    BearerAuthMiddleware,
+    HostGuardMiddleware,
+    OriginGuardMiddleware,
+    check_token,
+    normalize_host,
+    normalize_origin,
+)
 from engram.server.transport import build_streamable_http_mount
 
 
@@ -122,6 +131,8 @@ def build_http_app(
     *,
     mcp_server: Any | None = None,
     auth_token: str | None = None,
+    allowed_origins: Iterable[str] = (),
+    allowed_hosts: Iterable[str] | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a single Engram instance.
 
@@ -129,10 +140,37 @@ def build_http_app(
         engram: The Engram instance to serve.
         mcp_server: Optional MCP `Server` (e.g. from `build_mcp_server`). If
             provided, a Streamable HTTP MCP endpoint is mounted at `/mcp`.
-        auth_token: Bearer token required on `/mcp`. If None, `/mcp` is unauthed
-            (only safe on loopback). The legacy `/v1/memory/*` routes are NEVER
-            auth-gated regardless of this argument — see v0.2 spec.
+        auth_token: Bearer token required on every route, `/v1/*` and `/mcp`
+            alike. Only `/healthz` is open. If None, nothing is gated, which is
+            only safe on loopback. One token is one trust domain: any holder can
+            read and write every `(org_id, user_id)` scope, because the scope
+            comes from the request. Run one server per tenant to separate them.
+        allowed_origins: Browser origins (`scheme://host[:port]`) allowed to
+            call the app. A request carrying any other `Origin` header gets 403;
+            requests with no `Origin` (non-browser clients) are not affected.
+            Empty by default, so every browser origin is refused. This adds no
+            CORS headers.
+        allowed_hosts: Hostnames, besides 127.0.0.1, localhost and ::1, that
+            requests may name in `Host` (any port). Others get 421. Checked
+            when there is no `auth_token`, or when this is given.
+
+    Raises:
+        ValueError: `auth_token` is empty or has outer whitespace, or an
+            allowed origin or host is malformed.
     """
+    if auth_token is not None:
+        try:
+            check_token(auth_token)
+        except ValueError as e:
+            raise ValueError(f"auth_token: {e}") from e
+    # A str is iterable, so "a.example" would become the hosts "a", ".", ...
+    for name, value in (("allowed_origins", allowed_origins), ("allowed_hosts", allowed_hosts)):
+        if isinstance(value, str | bytes):
+            raise TypeError(f"{name} must be a list of strings, not a single string")
+    # Validate now: Starlette builds middleware lazily, on the first request.
+    origins = tuple(normalize_origin(o) for o in allowed_origins)
+    hosts = None if allowed_hosts is None else {normalize_host(h) for h in allowed_hosts}
+
     if mcp_server is not None:
         manager, handler = build_streamable_http_mount(mcp_server)
 
@@ -143,22 +181,36 @@ def build_http_app(
 
         app = FastAPI(title="Engram", version="0.3.0", lifespan=lifespan)
 
-        wrapped_handler = auth_asgi_wrapper(handler, expected_token=auth_token)
-
         # Route (not Mount) so that POST /mcp hits the handler without a
         # 307 redirect. Starlette's Mount matches /mcp/ and below, but
         # redirects bare /mcp; Route matches the exact path.
         # The handler is wrapped in a class so Starlette treats it as an ASGI
         # app (methods=None = all HTTP methods) rather than a GET-only function.
+        # Auth, Origin and Host checks are app-wide middleware, added below.
         class _MCPHandler:
             async def __call__(self, scope_: Any, receive_: Any, send_: Any) -> None:
-                await wrapped_handler(scope_, receive_, send_)
+                await handler(scope_, receive_, send_)
 
         app.router.routes.append(Route("/mcp", endpoint=_MCPHandler()))
     else:
         app = FastAPI(title="Engram", version="0.3.0")
 
-    @app.get("/healthz")
+    # Middleware added last runs first: Host, Origin, auth, then routing.
+    if auth_token is not None:
+        app.add_middleware(
+            BearerAuthMiddleware, expected_token=auth_token, exempt_paths=(HEALTHZ_PATH,)
+        )
+    app.add_middleware(OriginGuardMiddleware, allowed_origins=origins, exempt_paths=(HEALTHZ_PATH,))
+    # Without a token, nothing else stops a DNS-rebound page from reading over
+    # same-origin GETs, so the Host check is on by default in that mode.
+    if auth_token is None or hosts is not None:
+        app.add_middleware(
+            HostGuardMiddleware,
+            allowed_hosts=LOOPBACK_HOSTNAMES | (hosts or set()),
+            exempt_paths=(HEALTHZ_PATH,),
+        )
+
+    @app.get(HEALTHZ_PATH)
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 

@@ -33,5 +33,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -fsS http://localhost:8765/healthz || exit 1
 
 # Default to HTTP transport binding all interfaces inside the container.
-# The operator MUST provide ENGRAM_AUTH_TOKEN at run time.
+# ENGRAM_AUTH_TOKEN is required at run time: without it the server exits at
+# startup with a message saying so. The token gates every route except
+# /healthz. To run without auth on purpose (for example behind a proxy that
+# does auth), set ENGRAM_ALLOW_UNAUTHENTICATED=1. Without a token the server
+# only answers Host 127.0.0.1, localhost or ::1; set ENGRAM_ALLOWED_HOSTS to the
+# name the proxy forwards, or every proxied request gets 421.
 CMD ["engram-server", "--transport", "http", "--host", "0.0.0.0", "--port", "8765"]
