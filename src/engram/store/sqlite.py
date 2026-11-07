@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
@@ -31,6 +31,12 @@ from engram.scope import Scope
 logger = logging.getLogger(__name__)
 
 _FTS_TABLES = ("facts_fts", "events_fts")
+# Bumped when a release changes what the schema means, not only its shape.
+# 1: 0.1/0.2. 2: 0.3 revocation views and side tables. A library refuses a
+# database whose recorded version is higher than this, before writing to it.
+# 0.2 never reads this table, so it cannot be stopped from opening a 0.3 file.
+SCHEMA_VERSION = 2
+
 _INSERT_MATCH = (
     "INSERT OR IGNORE INTO content_matches (kind, item_id, revocation_id) VALUES (?,?,?)"
 )
@@ -65,7 +71,15 @@ class SqliteStore:
     async def open(cls, path: str | Path) -> SqliteStore:
         conn = await aiosqlite.connect(str(path))
         conn.row_factory = aiosqlite.Row
+        try:
+            await cls._refuse_newer_schema(conn, path)
+        except BaseException:
+            await conn.close()
+            raise
         await conn.executescript(_load_schema())
+        await conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
+        )
         # Overwrite freed pages with zeros so deleted content does not linger
         # in the database file (per connection; see erase()).
         await conn.execute("PRAGMA secure_delete = ON")
@@ -74,6 +88,28 @@ class SqliteStore:
         await conn.commit()
         await store._backfill_fact_meta()
         return store
+
+    @staticmethod
+    async def _refuse_newer_schema(conn: aiosqlite.Connection, path: str | Path) -> None:
+        """Raise before touching a database written by a newer schema.
+
+        Opening recreates the visibility views from this library's schema.sql,
+        which would replace a newer version's revocation rules with older ones.
+        """
+        async with conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+        ) as cur:
+            if await cur.fetchone() is None:
+                return
+        async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
+            row = await cur.fetchone()
+        found = row[0] if row is not None else None
+        if found is not None and int(found) > SCHEMA_VERSION:
+            raise StoreError(
+                f"database {path} was written by a newer version of Engram "
+                f"(schema {found}; this version supports up to {SCHEMA_VERSION}). "
+                "Upgrade jamjet-engram to open it. Nothing was written."
+            )
 
     async def _enable_fts_secure_delete(self) -> bool:
         """Make FTS5 drop deleted tokens from its index (SQLite >= 3.44)."""
@@ -853,7 +889,7 @@ class SqliteStore:
                 ),
             )
             if norm:
-                await self._match_scope(str(rev.id), norm, scope)
+                await self._match_scope(scope, [(str(rev.id), norm)])
             if replaced_by is not None:
                 await self._link_supersession(fact_id, replaced_by)
             await self._conn.commit()
@@ -883,36 +919,43 @@ class SqliteStore:
             "UPDATE facts SET supersedes = ? WHERE id = ?", (str(old_id), str(new_id))
         )
 
-    async def _match_scope(self, revocation_id: str, revoked_norm: str, scope: Scope) -> None:
-        """Find every fact, turn and event in scope quoting a newly revoked text."""
+    async def _match_scope(self, scope: Scope, revoked: Sequence[tuple[str, str]]) -> None:
+        """Record every fact, turn and event in scope that quotes a revoked text.
+
+        `revoked` is `(revocation_id, normalized_text)` pairs. Scans the base
+        tables, not the live views: an item already hidden by another
+        tombstone or a derivation still needs a row for this one, or lifting
+        the other tombstone later brings it back while it quotes this text.
+        Only adds rows, so it can only hide more. Returns nothing. No commit.
+        """
+        if not revoked:
+            return
         rows: list[tuple[str, str, str]] = []
-        async with self._conn.execute(
-            "SELECT id, text FROM live_facts WHERE org_id = ? AND user_id = ?",
-            (scope.org_id, scope.user_id),
-        ) as cur:
-            for r in await cur.fetchall():
-                if quotes(normalize_text(r["text"]), revoked_norm):
-                    rows.append(("fact", r["id"], revocation_id))
-        async with self._conn.execute(
-            "SELECT id, content FROM live_messages WHERE org_id = ? AND user_id = ?",
-            (scope.org_id, scope.user_id),
-        ) as cur:
-            for r in await cur.fetchall():
-                if quotes(normalize_text(r["content"]), revoked_norm):
-                    rows.append(("message", r["id"], revocation_id))
-        async with self._conn.execute(
-            "SELECT * FROM live_events WHERE org_id = ? AND user_id = ?",
-            (scope.org_id, scope.user_id),
-        ) as cur:
-            for r in await cur.fetchall():
-                text = self._event_text(self._row_to_event(r))
-                if quotes(normalize_text(text), revoked_norm):
-                    rows.append(("event", r["id"], revocation_id))
-        if rows:
-            await self._conn.executemany(
-                _INSERT_MATCH,
-                rows,
+
+        def match(kind: str, item_id: str, text: str) -> None:
+            norm = normalize_text(text)
+            rows.extend(
+                (kind, item_id, rev_id) for rev_id, rev_norm in revoked if quotes(norm, rev_norm)
             )
+
+        sc = (scope.org_id, scope.user_id)
+        async with self._conn.execute(
+            "SELECT id, text FROM facts WHERE org_id = ? AND user_id = ?", sc
+        ) as cur:
+            for r in await cur.fetchall():
+                match("fact", r["id"], r["text"])
+        async with self._conn.execute(
+            "SELECT id, content FROM messages WHERE org_id = ? AND user_id = ?", sc
+        ) as cur:
+            for r in await cur.fetchall():
+                match("message", r["id"], r["content"])
+        async with self._conn.execute(
+            "SELECT * FROM events WHERE org_id = ? AND user_id = ?", sc
+        ) as cur:
+            for r in await cur.fetchall():
+                match("event", r["id"], self._event_text(self._row_to_event(r)))
+        if rows:
+            await self._conn.executemany(_INSERT_MATCH, rows)
 
     async def reinstate(
         self, fact_id: UUID, scope: Scope, *, reason: str, actor: str
@@ -941,12 +984,18 @@ class SqliteStore:
         lifted_ids = [str(r) for r in explained.hidden_by]
         placeholders = ",".join("?" * len(lifted_ids))
         try:
+            await self._conn.execute("BEGIN IMMEDIATE")
             await self._conn.execute(
                 f"""UPDATE revocations
                        SET reinstated_at = ?, reinstated_by = ?, reinstate_reason = ?
                      WHERE id IN ({placeholders}) AND reinstated_at IS NULL""",
                 (_dt(_now()), actor, reason, *lifted_ids),
             )
+            # Before anything becomes visible, re-check the scope against every
+            # tombstone still in force. Content that quotes another revoked
+            # fact must stay hidden even if its match row was never written
+            # (databases from before _match_scope scanned hidden rows).
+            await self._match_scope(scope, await self._active_revoked_norms(scope))
             await self._conn.commit()
         except aiosqlite.Error as e:
             await self._conn.rollback()
