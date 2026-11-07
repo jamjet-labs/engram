@@ -30,6 +30,7 @@ GOVERNANCE_METHODS = {
     "hidden_fact_ids",  # returns ids only
     "_erase_in_tx",  # finds what to delete
     "_match_scope",  # writes content_matches rows (hides more), returns nothing
+    "_lift_candidates",  # ids a tombstone may be hiding; returns ids only
     "explain",  # returns status and provenance, never text
 }
 

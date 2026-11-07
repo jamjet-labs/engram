@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import Iterable, Sequence
+import re
+import sqlite3
+from collections.abc import AsyncIterator, Collection, Iterable, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
@@ -50,6 +54,37 @@ def _load_schema() -> str:
     return (files("engram.store") / "schema.sql").read_text(encoding="utf-8")
 
 
+_LEADING_COMMENTS = re.compile(r"\A(?:\s*--[^\n]*\n)*\s*")
+
+
+def _schema_statements() -> tuple[list[str], list[str]]:
+    """Split schema.sql into PRAGMAs and everything else.
+
+    PRAGMAs such as journal_mode and foreign_keys do nothing (or fail) inside
+    a transaction, so they run first; the rest runs in one transaction with
+    the version check.
+    """
+    pragmas: list[str] = []
+    statements: list[str] = []
+    buf = ""
+    for line in _load_schema().splitlines(keepends=True):
+        buf += line
+        if not sqlite3.complete_statement(buf):
+            continue
+        stmt = _LEADING_COMMENTS.sub("", buf).strip()
+        buf = ""
+        if stmt:
+            (pragmas if stmt.upper().startswith("PRAGMA") else statements).append(stmt)
+    if _LEADING_COMMENTS.sub("", buf).strip():
+        raise StoreError("schema.sql ends with an incomplete statement")
+    return pragmas, statements
+
+
+def _ids_json(ids: Collection[str]) -> str:
+    """Bind a set of ids as one parameter: `x IN (SELECT value FROM json_each(?))`."""
+    return json.dumps(sorted(ids))
+
+
 def _dt(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
@@ -66,28 +101,71 @@ class SqliteStore:
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
         self._fts_secure_delete = False
+        # One Engram shares one connection across tasks, and SQLite has one
+        # transaction per connection. Every write transaction holds this lock
+        # (see _transaction), so two tasks never interleave inside one.
+        self._write_lock = asyncio.Lock()
 
     @classmethod
     async def open(cls, path: str | Path) -> SqliteStore:
         conn = await aiosqlite.connect(str(path))
         conn.row_factory = aiosqlite.Row
         try:
+            # Cheap early exit before even the PRAGMAs touch the file.
             await cls._refuse_newer_schema(conn, path)
+            pragmas, statements = _schema_statements()
+            for pragma in pragmas:
+                await conn.execute(pragma)
+            # Overwrite freed pages with zeros so deleted content does not linger
+            # in the database file (per connection; see erase()).
+            await conn.execute("PRAGMA secure_delete = ON")
+            # Check and create in one write transaction, so a newer library
+            # cannot record its version between our check and our views.
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                await cls._refuse_newer_schema(conn, path)
+                for stmt in statements:
+                    await conn.execute(stmt)
+                await conn.execute(
+                    "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
+                await conn.commit()
+            except BaseException:
+                await asyncio.shield(conn.rollback())
+                raise
         except BaseException:
             await conn.close()
             raise
-        await conn.executescript(_load_schema())
-        await conn.execute(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
-        )
-        # Overwrite freed pages with zeros so deleted content does not linger
-        # in the database file (per connection; see erase()).
-        await conn.execute("PRAGMA secure_delete = ON")
         store = cls(conn)
         store._fts_secure_delete = await store._enable_fts_secure_delete()
-        await conn.commit()
         await store._backfill_fact_meta()
         return store
+
+    @asynccontextmanager
+    async def _transaction(self) -> AsyncIterator[None]:
+        """Run the body as one write transaction, alone on this connection.
+
+        Commits on success. On any other exit, cancellation included, rolls
+        back before releasing the lock, so no later write can commit half of
+        this one. The rollback is shielded from a second cancellation;
+        sqlite3's rollback is a no-op outside a transaction, and aiosqlite runs
+        calls in order, so it always lands after the BEGIN.
+
+        BEGIN IMMEDIATE takes SQLite's write lock up front, so reads made at
+        the start of the body cannot go stale under another process's write.
+        """
+        async with self._write_lock:
+            try:
+                await self._conn.execute("BEGIN IMMEDIATE")
+                yield
+                await self._conn.commit()
+            except BaseException:
+                try:
+                    await asyncio.shield(self._conn.rollback())
+                except Exception:  # keep the original error
+                    logger.exception("rollback failed")
+                raise
 
     @staticmethod
     async def _refuse_newer_schema(conn: aiosqlite.Connection, path: str | Path) -> None:
@@ -114,10 +192,11 @@ class SqliteStore:
     async def _enable_fts_secure_delete(self) -> bool:
         """Make FTS5 drop deleted tokens from its index (SQLite >= 3.44)."""
         try:
-            for table in _FTS_TABLES:
-                await self._conn.execute(
-                    f"INSERT INTO {table}({table}, rank) VALUES('secure-delete', 1)"
-                )
+            async with self._transaction():
+                for table in _FTS_TABLES:
+                    await self._conn.execute(
+                        f"INSERT INTO {table}({table}, rank) VALUES('secure-delete', 1)"
+                    )
             return True
         except aiosqlite.Error as e:
             logger.warning("FTS5 secure-delete unavailable (%s); erased tokens may persist", e)
@@ -125,23 +204,24 @@ class SqliteStore:
 
     async def _backfill_fact_meta(self) -> None:
         """Give rows written before 0.3 a content hash so tombstones can match them."""
-        async with self._conn.execute(
-            """SELECT id, org_id, user_id, text FROM facts
-               WHERE id NOT IN (SELECT fact_id FROM fact_meta)"""
-        ) as cur:
-            rows = await cur.fetchall()
-        if not rows:
-            return
-        await self._conn.executemany(
-            """INSERT OR IGNORE INTO fact_meta
-               (fact_id, org_id, user_id, content_hash, writer, source, recorded_at)
-               VALUES (?,?,?,?,NULL,'legacy',NULL)""",
-            [(r["id"], r["org_id"], r["user_id"], content_hash(r["text"])) for r in rows],
-        )
-        await self._conn.commit()
+        async with self._transaction():
+            async with self._conn.execute(
+                """SELECT id, org_id, user_id, text FROM facts
+                   WHERE id NOT IN (SELECT fact_id FROM fact_meta)"""
+            ) as cur:
+                rows = await cur.fetchall()
+            if rows:
+                await self._conn.executemany(
+                    """INSERT OR IGNORE INTO fact_meta
+                       (fact_id, org_id, user_id, content_hash, writer, source, recorded_at)
+                       VALUES (?,?,?,?,NULL,'legacy',NULL)""",
+                    [(r["id"], r["org_id"], r["user_id"], content_hash(r["text"])) for r in rows],
+                )
 
     async def close(self) -> None:
-        await self._conn.close()
+        # Wait for an in-flight write transaction rather than cut it off.
+        async with self._write_lock:
+            await self._conn.close()
 
     async def __aenter__(self) -> SqliteStore:
         return self
@@ -172,87 +252,90 @@ class SqliteStore:
         write cannot lift a tombstone.
         """
         sources = list(derived_from or [])
-        if sources:
-            found = await self.derivation_targets_in_scope(sources, fact.scope)
-            missing = [s for s in sources if s not in found]
-            if missing:
-                raise NotFoundError(f"derived_from facts not found in scope: {missing}")
-        if fact.source_message_id is not None and not await self._message_in_scope(
-            fact.source_message_id, fact.scope
-        ):
-            raise NotFoundError(f"source message {fact.source_message_id} not found in scope")
         try:
-            cur = await self._conn.execute(
-                """
-                INSERT INTO facts (
-                    id, org_id, user_id, text, valid_from, invalid_at,
-                    confidence, category, polarity, tier,
-                    event_date, mention_date, source_event_id,
-                    source_message_id, source_span_start, source_span_end,
-                    supersedes, superseded_by,
-                    access_count, last_accessed, metadata, session_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET
-                    text=excluded.text,
-                    valid_from=excluded.valid_from,
-                    invalid_at=excluded.invalid_at,
-                    confidence=excluded.confidence,
-                    category=excluded.category,
-                    polarity=excluded.polarity,
-                    tier=excluded.tier,
-                    event_date=excluded.event_date,
-                    mention_date=excluded.mention_date,
-                    source_event_id=excluded.source_event_id,
-                    source_message_id=excluded.source_message_id,
-                    source_span_start=excluded.source_span_start,
-                    source_span_end=excluded.source_span_end,
-                    supersedes=excluded.supersedes,
-                    superseded_by=excluded.superseded_by,
-                    access_count=excluded.access_count,
-                    last_accessed=excluded.last_accessed,
-                    metadata=excluded.metadata,
-                    session_id=excluded.session_id
-                WHERE facts.org_id = excluded.org_id AND facts.user_id = excluded.user_id
-                """,
-                (
-                    str(fact.id),
-                    fact.scope.org_id,
-                    fact.scope.user_id,
-                    fact.text,
-                    _dt(fact.valid_from),
-                    _dt(fact.invalid_at),
-                    fact.confidence,
-                    fact.category,
-                    fact.polarity.value,
-                    fact.tier.value,
-                    _dt(fact.event_date),
-                    _dt(fact.mention_date),
-                    fact.source_event_id,
-                    str(fact.source_message_id) if fact.source_message_id else None,
-                    fact.source_span[0] if fact.source_span else None,
-                    fact.source_span[1] if fact.source_span else None,
-                    str(fact.supersedes) if fact.supersedes else None,
-                    str(fact.superseded_by) if fact.superseded_by else None,
-                    fact.access_count,
-                    _dt(fact.last_accessed),
-                    json.dumps(fact.metadata),
-                    fact.session_id,
-                ),
-            )
-            if cur.rowcount == 0:
-                # The id exists in another scope: the conditional update did nothing.
-                await self._conn.rollback()
-                raise ScopeError(f"fact {fact.id} belongs to another scope")
-            await self._write_fact_meta(fact, writer=writer, source=source)
-            await self._match_item("fact", str(fact.id), fact.text, fact.scope)
-            if sources:
-                await self._conn.executemany(
-                    "INSERT OR IGNORE INTO fact_derivations (fact_id, source_fact_id) VALUES (?,?)",
-                    [(str(fact.id), str(s)) for s in sources],
+            async with self._transaction():
+                # Checked inside the transaction, so a concurrent erase cannot
+                # remove a source between the check and the insert.
+                if sources:
+                    found = await self.derivation_targets_in_scope(sources, fact.scope)
+                    missing = [s for s in sources if s not in found]
+                    if missing:
+                        raise NotFoundError(f"derived_from facts not found in scope: {missing}")
+                if fact.source_message_id is not None and not await self._message_in_scope(
+                    fact.source_message_id, fact.scope
+                ):
+                    raise NotFoundError(
+                        f"source message {fact.source_message_id} not found in scope"
+                    )
+                cur = await self._conn.execute(
+                    """
+                    INSERT INTO facts (
+                        id, org_id, user_id, text, valid_from, invalid_at,
+                        confidence, category, polarity, tier,
+                        event_date, mention_date, source_event_id,
+                        source_message_id, source_span_start, source_span_end,
+                        supersedes, superseded_by,
+                        access_count, last_accessed, metadata, session_id
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        text=excluded.text,
+                        valid_from=excluded.valid_from,
+                        invalid_at=excluded.invalid_at,
+                        confidence=excluded.confidence,
+                        category=excluded.category,
+                        polarity=excluded.polarity,
+                        tier=excluded.tier,
+                        event_date=excluded.event_date,
+                        mention_date=excluded.mention_date,
+                        source_event_id=excluded.source_event_id,
+                        source_message_id=excluded.source_message_id,
+                        source_span_start=excluded.source_span_start,
+                        source_span_end=excluded.source_span_end,
+                        supersedes=excluded.supersedes,
+                        superseded_by=excluded.superseded_by,
+                        access_count=excluded.access_count,
+                        last_accessed=excluded.last_accessed,
+                        metadata=excluded.metadata,
+                        session_id=excluded.session_id
+                    WHERE facts.org_id = excluded.org_id AND facts.user_id = excluded.user_id
+                    """,
+                    (
+                        str(fact.id),
+                        fact.scope.org_id,
+                        fact.scope.user_id,
+                        fact.text,
+                        _dt(fact.valid_from),
+                        _dt(fact.invalid_at),
+                        fact.confidence,
+                        fact.category,
+                        fact.polarity.value,
+                        fact.tier.value,
+                        _dt(fact.event_date),
+                        _dt(fact.mention_date),
+                        fact.source_event_id,
+                        str(fact.source_message_id) if fact.source_message_id else None,
+                        fact.source_span[0] if fact.source_span else None,
+                        fact.source_span[1] if fact.source_span else None,
+                        str(fact.supersedes) if fact.supersedes else None,
+                        str(fact.superseded_by) if fact.superseded_by else None,
+                        fact.access_count,
+                        _dt(fact.last_accessed),
+                        json.dumps(fact.metadata),
+                        fact.session_id,
+                    ),
                 )
-            await self._conn.commit()
+                if cur.rowcount == 0:
+                    # The id exists in another scope: the conditional update did nothing.
+                    raise ScopeError(f"fact {fact.id} belongs to another scope")
+                await self._write_fact_meta(fact, writer=writer, source=source)
+                await self._match_item("fact", str(fact.id), fact.text, fact.scope)
+                if sources:
+                    await self._conn.executemany(
+                        "INSERT OR IGNORE INTO fact_derivations (fact_id, source_fact_id) "
+                        "VALUES (?,?)",
+                        [(str(fact.id), str(s)) for s in sources],
+                    )
         except aiosqlite.Error as e:
-            await self._conn.rollback()
             raise StoreError(f"upsert_fact: {e}") from e
 
     async def _write_fact_meta(self, fact: Fact, *, writer: str | None, source: str) -> None:
@@ -431,85 +514,82 @@ class SqliteStore:
         return ranked[:top_sessions]
 
     async def record_access(self, fact_id: UUID) -> None:
-        await self._conn.execute(
-            "UPDATE facts SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-            (_dt(datetime.now().astimezone()), str(fact_id)),
-        )
-        await self._conn.commit()
+        async with self._transaction():
+            await self._conn.execute(
+                "UPDATE facts SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                (_dt(datetime.now().astimezone()), str(fact_id)),
+            )
 
     # ── Messages ─────────────────────────────────────────────────────────
 
     async def upsert_message(self, message: ChatMessage) -> None:
-        cur = await self._conn.execute(
-            """INSERT INTO messages (
-                id, org_id, user_id, session_id, role, content, timestamp, metadata
-            ) VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET
-                session_id=excluded.session_id,
-                role=excluded.role,
-                content=excluded.content,
-                timestamp=excluded.timestamp,
-                metadata=excluded.metadata
-            WHERE messages.org_id = excluded.org_id AND messages.user_id = excluded.user_id""",
-            (
-                str(message.id),
-                message.scope.org_id,
-                message.scope.user_id,
-                message.session_id,
-                message.role,
-                message.content,
-                _dt(message.timestamp),
-                json.dumps(message.metadata),
-            ),
-        )
-        if cur.rowcount == 0:
-            await self._conn.rollback()
-            raise ScopeError(f"message {message.id} belongs to another scope")
-        await self._match_item("message", str(message.id), message.content, message.scope)
-        await self._conn.commit()
+        async with self._transaction():
+            cur = await self._conn.execute(
+                """INSERT INTO messages (
+                    id, org_id, user_id, session_id, role, content, timestamp, metadata
+                ) VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    session_id=excluded.session_id,
+                    role=excluded.role,
+                    content=excluded.content,
+                    timestamp=excluded.timestamp,
+                    metadata=excluded.metadata
+                WHERE messages.org_id = excluded.org_id AND messages.user_id = excluded.user_id""",
+                (
+                    str(message.id),
+                    message.scope.org_id,
+                    message.scope.user_id,
+                    message.session_id,
+                    message.role,
+                    message.content,
+                    _dt(message.timestamp),
+                    json.dumps(message.metadata),
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ScopeError(f"message {message.id} belongs to another scope")
+            await self._match_item("message", str(message.id), message.content, message.scope)
 
     # ── Events (Phase 11) ────────────────────────────────────────────────
 
     async def upsert_event(self, event: Event) -> None:
         try:
-            cur = await self._conn.execute(
-                """INSERT INTO events (
-                    id, org_id, user_id, subject_canonical, verb, object_canonical,
-                    time_start, time_end, confidence, aliases, source_fact_ids, metadata
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET
-                    subject_canonical=excluded.subject_canonical,
-                    verb=excluded.verb,
-                    object_canonical=excluded.object_canonical,
-                    time_start=excluded.time_start,
-                    time_end=excluded.time_end,
-                    confidence=excluded.confidence,
-                    aliases=excluded.aliases,
-                    source_fact_ids=excluded.source_fact_ids,
-                    metadata=excluded.metadata
-                WHERE events.org_id = excluded.org_id AND events.user_id = excluded.user_id""",
-                (
-                    str(event.id),
-                    event.scope.org_id,
-                    event.scope.user_id,
-                    event.subject_canonical,
-                    event.verb,
-                    event.object_canonical,
-                    _dt(event.time_start),
-                    _dt(event.time_end),
-                    event.confidence,
-                    json.dumps(event.aliases),
-                    json.dumps([str(fid) for fid in event.source_fact_ids]),
-                    json.dumps(event.metadata),
-                ),
-            )
-            if cur.rowcount == 0:
-                await self._conn.rollback()
-                raise ScopeError(f"event {event.id} belongs to another scope")
-            await self._match_item("event", str(event.id), self._event_text(event), event.scope)
-            await self._conn.commit()
+            async with self._transaction():
+                cur = await self._conn.execute(
+                    """INSERT INTO events (
+                        id, org_id, user_id, subject_canonical, verb, object_canonical,
+                        time_start, time_end, confidence, aliases, source_fact_ids, metadata
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        subject_canonical=excluded.subject_canonical,
+                        verb=excluded.verb,
+                        object_canonical=excluded.object_canonical,
+                        time_start=excluded.time_start,
+                        time_end=excluded.time_end,
+                        confidence=excluded.confidence,
+                        aliases=excluded.aliases,
+                        source_fact_ids=excluded.source_fact_ids,
+                        metadata=excluded.metadata
+                    WHERE events.org_id = excluded.org_id AND events.user_id = excluded.user_id""",
+                    (
+                        str(event.id),
+                        event.scope.org_id,
+                        event.scope.user_id,
+                        event.subject_canonical,
+                        event.verb,
+                        event.object_canonical,
+                        _dt(event.time_start),
+                        _dt(event.time_end),
+                        event.confidence,
+                        json.dumps(event.aliases),
+                        json.dumps([str(fid) for fid in event.source_fact_ids]),
+                        json.dumps(event.metadata),
+                    ),
+                )
+                if cur.rowcount == 0:
+                    raise ScopeError(f"event {event.id} belongs to another scope")
+                await self._match_item("event", str(event.id), self._event_text(event), event.scope)
         except aiosqlite.Error as e:
-            await self._conn.rollback()
             raise StoreError(f"upsert_event: {e}") from e
 
     async def get_event(self, event_id: UUID, scope: Scope) -> Event | None:
@@ -833,71 +913,66 @@ class SqliteStore:
         replacement than the one recorded is refused.
         """
         try:
-            await self._conn.execute("BEGIN IMMEDIATE")
-            fact = await self._governance_fact(fact_id, scope)
-            if fact is None:
-                raise NotFoundError(f"fact {fact_id} not found in scope")
-            if replaced_by is not None:
-                await self._check_replacement(fact, replaced_by, scope)
-            async with self._conn.execute(
-                """SELECT * FROM revocations
-                    WHERE fact_id = ? AND reinstated_at IS NULL ORDER BY revoked_at LIMIT 1""",
-                (str(fact_id),),
-            ) as cur:
-                existing_row = await cur.fetchone()
-            if existing_row is not None:
-                existing = self._row_to_revocation(existing_row)
-                if replaced_by is not None and existing.replaced_by not in (None, replaced_by):
-                    raise ValueError(
-                        f"fact {fact_id} is already superseded by {existing.replaced_by}"
-                    )
-                if replaced_by is not None and existing.replaced_by is None:
-                    await self._conn.execute(
-                        "UPDATE revocations SET replaced_by = ? WHERE id = ?",
-                        (str(replaced_by), str(existing.id)),
-                    )
+            async with self._transaction():
+                fact = await self._governance_fact(fact_id, scope)
+                if fact is None:
+                    raise NotFoundError(f"fact {fact_id} not found in scope")
+                if replaced_by is not None:
+                    await self._check_replacement(fact, replaced_by, scope)
+                async with self._conn.execute(
+                    """SELECT * FROM revocations
+                        WHERE fact_id = ? AND reinstated_at IS NULL ORDER BY revoked_at LIMIT 1""",
+                    (str(fact_id),),
+                ) as cur:
+                    existing_row = await cur.fetchone()
+                if existing_row is not None:
+                    existing = self._row_to_revocation(existing_row)
+                    if replaced_by is not None and existing.replaced_by not in (None, replaced_by):
+                        raise ValueError(
+                            f"fact {fact_id} is already superseded by {existing.replaced_by}"
+                        )
+                    if replaced_by is not None and existing.replaced_by is None:
+                        await self._conn.execute(
+                            "UPDATE revocations SET replaced_by = ? WHERE id = ?",
+                            (str(replaced_by), str(existing.id)),
+                        )
+                        await self._link_supersession(fact_id, replaced_by)
+                        existing = existing.model_copy(update={"replaced_by": replaced_by})
+                    return existing
+                rev = Revocation(
+                    org_id=scope.org_id,
+                    user_id=scope.user_id,
+                    fact_id=fact_id,
+                    reason=reason,
+                    actor=actor,
+                    revoked_at=_now(),
+                    replaced_by=replaced_by,
+                )
+                norm = normalize_text(fact.text)
+                await self._conn.execute(
+                    """INSERT INTO revocations
+                       (id, org_id, user_id, fact_id, content_hash, content_norm, reason, actor,
+                        revoked_at, replaced_by)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        str(rev.id),
+                        rev.org_id,
+                        rev.user_id,
+                        str(fact_id),
+                        content_hash(fact.text) if norm else None,
+                        norm or None,
+                        reason,
+                        actor,
+                        _dt(rev.revoked_at),
+                        str(replaced_by) if replaced_by else None,
+                    ),
+                )
+                if norm:
+                    await self._match_scope(scope, [(str(rev.id), norm)])
+                if replaced_by is not None:
                     await self._link_supersession(fact_id, replaced_by)
-                    existing = existing.model_copy(update={"replaced_by": replaced_by})
-                await self._conn.commit()
-                return existing
-            rev = Revocation(
-                org_id=scope.org_id,
-                user_id=scope.user_id,
-                fact_id=fact_id,
-                reason=reason,
-                actor=actor,
-                revoked_at=_now(),
-                replaced_by=replaced_by,
-            )
-            norm = normalize_text(fact.text)
-            await self._conn.execute(
-                """INSERT INTO revocations
-                   (id, org_id, user_id, fact_id, content_hash, content_norm, reason, actor,
-                    revoked_at, replaced_by)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    str(rev.id),
-                    rev.org_id,
-                    rev.user_id,
-                    str(fact_id),
-                    content_hash(fact.text) if norm else None,
-                    norm or None,
-                    reason,
-                    actor,
-                    _dt(rev.revoked_at),
-                    str(replaced_by) if replaced_by else None,
-                ),
-            )
-            if norm:
-                await self._match_scope(scope, [(str(rev.id), norm)])
-            if replaced_by is not None:
-                await self._link_supersession(fact_id, replaced_by)
-            await self._conn.commit()
-        except (aiosqlite.Error, NotFoundError, ValueError) as e:
-            await self._conn.rollback()
-            if isinstance(e, aiosqlite.Error):
-                raise StoreError(f"revoke: {e}") from e
-            raise
+        except aiosqlite.Error as e:
+            raise StoreError(f"revoke: {e}") from e
         return rev
 
     async def _check_replacement(self, old: Fact, new_id: UUID, scope: Scope) -> None:
@@ -919,14 +994,24 @@ class SqliteStore:
             "UPDATE facts SET supersedes = ? WHERE id = ?", (str(old_id), str(new_id))
         )
 
-    async def _match_scope(self, scope: Scope, revoked: Sequence[tuple[str, str]]) -> None:
+    async def _match_scope(
+        self,
+        scope: Scope,
+        revoked: Sequence[tuple[str, str]],
+        *,
+        facts: Collection[str] | None = None,
+        messages: Collection[str] | None = None,
+        events: Collection[str] | None = None,
+    ) -> None:
         """Record every fact, turn and event in scope that quotes a revoked text.
 
-        `revoked` is `(revocation_id, normalized_text)` pairs. Scans the base
-        tables, not the live views: an item already hidden by another
-        tombstone or a derivation still needs a row for this one, or lifting
-        the other tombstone later brings it back while it quotes this text.
-        Only adds rows, so it can only hide more. Returns nothing. No commit.
+        `revoked` is `(revocation_id, normalized_text)` pairs. `facts`,
+        `messages` and `events` limit the scan to those ids; None means all of
+        that kind in scope. Scans the base tables, not the live views: an item
+        already hidden by another tombstone or a derivation still needs a row
+        for this one, or lifting the other tombstone later brings it back
+        while it quotes this text. Only adds rows, so it can only hide more.
+        Returns nothing. Call inside a write transaction.
         """
         if not revoked:
             return
@@ -939,23 +1024,92 @@ class SqliteStore:
             )
 
         sc = (scope.org_id, scope.user_id)
-        async with self._conn.execute(
-            "SELECT id, text FROM facts WHERE org_id = ? AND user_id = ?", sc
-        ) as cur:
-            for r in await cur.fetchall():
-                match("fact", r["id"], r["text"])
-        async with self._conn.execute(
-            "SELECT id, content FROM messages WHERE org_id = ? AND user_id = ?", sc
-        ) as cur:
-            for r in await cur.fetchall():
-                match("message", r["id"], r["content"])
-        async with self._conn.execute(
-            "SELECT * FROM events WHERE org_id = ? AND user_id = ?", sc
-        ) as cur:
-            for r in await cur.fetchall():
-                match("event", r["id"], self._event_text(self._row_to_event(r)))
+        only = " AND id IN (SELECT value FROM json_each(?))"
+        scans = (
+            ("fact", "SELECT id, text AS body FROM facts WHERE org_id = ? AND user_id = ?", facts),
+            (
+                "message",
+                "SELECT id, content AS body FROM messages WHERE org_id = ? AND user_id = ?",
+                messages,
+            ),
+            ("event", "SELECT * FROM events WHERE org_id = ? AND user_id = ?", events),
+        )
+        for kind, sql, ids in scans:
+            if ids is not None and not ids:
+                continue
+            params: tuple[str, ...] = sc if ids is None else (*sc, _ids_json(ids))
+            async with self._conn.execute(sql if ids is None else sql + only, params) as cur:
+                for r in await cur.fetchall():
+                    if kind == "event":
+                        match(kind, r["id"], self._event_text(self._row_to_event(r)))
+                    else:
+                        match(kind, r["id"], r["body"])
         if rows:
             await self._conn.executemany(_INSERT_MATCH, rows)
+
+    async def _lift_candidates(
+        self, scope: Scope, revocation_ids: Collection[str]
+    ) -> tuple[set[str], set[str], set[str]]:
+        """Ids of facts, turns and events these tombstones may be hiding. Ids only.
+
+        Mirrors the hiding rules in schema.sql: the revoked fact, facts with its
+        content hash, items with a quote match, everything derived from those
+        facts, turns they cite or that share a session with a fact revoked by
+        id, and events linked to or quoting them. Nothing outside this set can
+        change visibility when these tombstones are lifted.
+        """
+        revs = _ids_json(revocation_ids)
+        sc = (scope.org_id, scope.user_id)
+        in_revs = "IN (SELECT value FROM json_each(?))"
+        async with self._conn.execute(
+            f"""WITH RECURSIVE seed(id) AS (
+                    SELECT fact_id FROM revocations WHERE id {in_revs}
+                    UNION
+                    SELECT m.fact_id FROM fact_meta m
+                      JOIN revocations r
+                        ON r.content_hash = m.content_hash
+                       AND r.org_id = m.org_id AND r.user_id = m.user_id
+                     WHERE r.id {in_revs}
+                    UNION
+                    SELECT item_id FROM content_matches
+                     WHERE kind = 'fact' AND revocation_id {in_revs}
+                ), fam(id) AS (
+                    SELECT id FROM seed
+                    UNION
+                    SELECT d.fact_id FROM fact_derivations d JOIN fam ON d.source_fact_id = fam.id
+                )
+                SELECT f.id, f.source_message_id FROM facts f
+                 WHERE f.id IN (SELECT id FROM fam) AND f.org_id = ? AND f.user_id = ?""",
+            (revs, revs, revs, *sc),
+        ) as cur:
+            fact_rows = await cur.fetchall()
+        facts = {r["id"] for r in fact_rows}
+        messages = {r["source_message_id"] for r in fact_rows if r["source_message_id"]}
+        async with self._conn.execute(
+            f"""SELECT item_id AS id FROM content_matches
+                 WHERE kind = 'message' AND revocation_id {in_revs}
+                UNION
+                SELECT m.id FROM messages m
+                  JOIN facts f
+                    ON f.session_id = m.session_id
+                   AND f.org_id = m.org_id AND f.user_id = m.user_id
+                  JOIN revocations r ON r.fact_id = f.id
+                 WHERE r.id {in_revs} AND f.source_message_id IS NULL""",
+            (revs, revs),
+        ) as cur:
+            messages |= {r["id"] for r in await cur.fetchall()}
+        async with self._conn.execute(
+            f"""SELECT item_id AS id FROM content_matches
+                 WHERE kind = 'event' AND revocation_id {in_revs}
+                UNION
+                SELECT e.id FROM events e
+                 WHERE e.org_id = ? AND e.user_id = ?
+                   AND EXISTS (SELECT 1 FROM json_each(e.source_fact_ids) j
+                                WHERE j.value IN (SELECT value FROM json_each(?)))""",
+            (revs, *sc, _ids_json(facts)),
+        ) as cur:
+            events = {r["id"] for r in await cur.fetchall()}
+        return facts, messages, events
 
     async def reinstate(
         self, fact_id: UUID, scope: Scope, *, reason: str, actor: str
@@ -969,52 +1123,54 @@ class SqliteStore:
         the revoked fact named in ``explain().hidden_by`` instead. That keeps a
         write of revoked text from being a handle to un-revoke the original.
         """
-        fact = await self._governance_fact(fact_id, scope)
-        if fact is None:
-            raise NotFoundError(f"fact {fact_id} not found in scope")
-        explained = await self.explain(fact_id, scope)
-        if explained is None or explained.revocation_status == "active":
-            return [], []
-        if explained.hidden_reason != "revoked":
-            raise ValueError(
-                f"fact {fact_id} is hidden by tombstones on other facts "
-                f"({explained.hidden_reason}, revocations {explained.hidden_by}); "
-                "reinstate the revoked fact itself"
-            )
-        lifted_ids = [str(r) for r in explained.hidden_by]
-        placeholders = ",".join("?" * len(lifted_ids))
         try:
-            await self._conn.execute("BEGIN IMMEDIATE")
-            await self._conn.execute(
-                f"""UPDATE revocations
-                       SET reinstated_at = ?, reinstated_by = ?, reinstate_reason = ?
-                     WHERE id IN ({placeholders}) AND reinstated_at IS NULL""",
-                (_dt(_now()), actor, reason, *lifted_ids),
-            )
-            # Before anything becomes visible, re-check the scope against every
-            # tombstone still in force. Content that quotes another revoked
-            # fact must stay hidden even if its match row was never written
-            # (databases from before _match_scope scanned hidden rows).
-            await self._match_scope(scope, await self._active_revoked_norms(scope))
-            await self._conn.commit()
+            async with self._transaction():
+                if await self._governance_fact(fact_id, scope) is None:
+                    raise NotFoundError(f"fact {fact_id} not found in scope")
+                explained = await self.explain(fact_id, scope)
+                if explained is None or explained.revocation_status == "active":
+                    return [], []
+                if explained.hidden_reason != "revoked":
+                    raise ValueError(
+                        f"fact {fact_id} is hidden by tombstones on other facts "
+                        f"({explained.hidden_reason}, revocations {explained.hidden_by}); "
+                        "reinstate the revoked fact itself"
+                    )
+                lifted_ids = {str(r) for r in explained.hidden_by}
+                facts, messages, events = await self._lift_candidates(scope, lifted_ids)
+                # Before anything is lifted, re-check what these tombstones were
+                # hiding against every tombstone that stays in force. Content that
+                # also quotes another revoked fact stays hidden, even if its match
+                # row was never written (databases from before _match_scope
+                # scanned hidden rows). Doing this first means no read on this
+                # connection ever sees such content visible mid-transaction.
+                staying = [
+                    (rev_id, norm)
+                    for rev_id, norm in await self._active_revoked_norms(scope)
+                    if rev_id not in lifted_ids
+                ]
+                await self._match_scope(
+                    scope, staying, facts=facts, messages=messages, events=events
+                )
+                await self._conn.execute(
+                    """UPDATE revocations
+                          SET reinstated_at = ?, reinstated_by = ?, reinstate_reason = ?
+                        WHERE id IN (SELECT value FROM json_each(?)) AND reinstated_at IS NULL""",
+                    (_dt(_now()), actor, reason, _ids_json(lifted_ids)),
+                )
         except aiosqlite.Error as e:
-            await self._conn.rollback()
             raise StoreError(f"reinstate: {e}") from e
         async with self._conn.execute(
-            f"SELECT * FROM revocations WHERE id IN ({placeholders})", tuple(lifted_ids)
+            "SELECT * FROM revocations WHERE id IN (SELECT value FROM json_each(?))",
+            (_ids_json(lifted_ids),),
         ) as cur:
             lifted = [self._row_to_revocation(r) for r in await cur.fetchall()]
+        # Everything that is visible again, including facts derived from the
+        # reinstated one, so the caller can restore their vectors.
         async with self._conn.execute(
-            f"""SELECT lf.* FROM live_facts lf
-                 WHERE lf.org_id = ? AND lf.user_id = ?
-                   AND (lf.id IN (SELECT fact_id FROM revocations WHERE id IN ({placeholders}))
-                        OR lf.id IN (SELECT item_id FROM content_matches
-                                      WHERE kind = 'fact' AND revocation_id IN ({placeholders}))
-                        OR lf.id IN (SELECT m.fact_id FROM fact_meta m
-                                       JOIN revocations r ON r.content_hash = m.content_hash
-                                      WHERE r.id IN ({placeholders})
-                                        AND m.org_id = r.org_id AND m.user_id = r.user_id))""",
-            (scope.org_id, scope.user_id, *lifted_ids, *lifted_ids, *lifted_ids),
+            """SELECT * FROM live_facts
+                WHERE org_id = ? AND user_id = ? AND id IN (SELECT value FROM json_each(?))""",
+            (scope.org_id, scope.user_id, _ids_json(facts)),
         ) as cur:
             visible = [self._row_to_fact(r) for r in await cur.fetchall()]
         return lifted, visible
@@ -1078,16 +1234,12 @@ class SqliteStore:
         and then calls :meth:`finalize_erasure`.
         """
         try:
-            await self._conn.execute("BEGIN IMMEDIATE")
-            record = await self._erase_in_tx(
-                fact_id, scope, reason=reason, actor=actor, block_reinsertion=block_reinsertion
-            )
-            await self._conn.commit()
-        except (aiosqlite.Error, NotFoundError, ValueError) as e:
-            await self._conn.rollback()
-            if isinstance(e, aiosqlite.Error):
-                raise StoreError(f"erase: {e}") from e
-            raise
+            async with self._transaction():
+                record = await self._erase_in_tx(
+                    fact_id, scope, reason=reason, actor=actor, block_reinsertion=block_reinsertion
+                )
+        except aiosqlite.Error as e:
+            raise StoreError(f"erase: {e}") from e
         return record
 
     async def _erase_in_tx(
@@ -1263,23 +1415,24 @@ class SqliteStore:
             **extra,
         }
         artifacts = {**record.artifacts, **extra_artifacts}
-        await self._conn.execute(
-            "UPDATE erasures SET artifacts = ?, guarantees = ? WHERE id = ?",
-            (json.dumps(artifacts), json.dumps(guarantees), str(record.id)),
-        )
-        await self._conn.commit()
+        async with self._transaction():
+            await self._conn.execute(
+                "UPDATE erasures SET artifacts = ?, guarantees = ? WHERE id = ?",
+                (json.dumps(artifacts), json.dumps(guarantees), str(record.id)),
+            )
         guarantees["wal_checkpointed"] = await self.checkpoint()
-        await self._conn.execute(
-            "UPDATE erasures SET guarantees = ? WHERE id = ?",
-            (json.dumps(guarantees), str(record.id)),
-        )
-        await self._conn.commit()
+        async with self._transaction():
+            await self._conn.execute(
+                "UPDATE erasures SET guarantees = ? WHERE id = ?",
+                (json.dumps(guarantees), str(record.id)),
+            )
         await self.checkpoint()
         return record.model_copy(update={"artifacts": artifacts, "guarantees": guarantees})
 
     async def checkpoint(self) -> bool:
         """Checkpoint and truncate the WAL. True unless a reader blocked it."""
-        async with self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)") as cur:
+        # Under the write lock: a checkpoint cannot run inside a transaction.
+        async with self._write_lock, self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)") as cur:
             row = await cur.fetchone()
         return row is not None and int(row[0]) == 0
 

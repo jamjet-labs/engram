@@ -67,3 +67,32 @@ async def test_fresh_and_in_memory_databases_open(tmp_path: Path) -> None:
     for target in (":memory:", tmp_path / "fresh.db"):
         store = await SqliteStore.open(target)
         await store.close()
+
+
+async def test_version_check_and_schema_writes_are_one_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If another process could record a newer version after our check but
+    # before our CREATE VIEW statements, we would still replace its views.
+    db = tmp_path / "e.db"
+    store = await SqliteStore.open(db)
+    await store.close()
+
+    outcomes: list[str] = []
+    real = SqliteStore._refuse_newer_schema
+
+    async def spy(conn: object, path: object) -> None:
+        await real(conn, path)  # type: ignore[arg-type]
+        with sqlite3.connect(db, timeout=0) as other:
+            try:
+                other.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION + 1,))
+                other.rollback()
+                outcomes.append("written")
+            except sqlite3.OperationalError as e:
+                outcomes.append(str(e))
+
+    monkeypatch.setattr(SqliteStore, "_refuse_newer_schema", staticmethod(spy))
+    store = await SqliteStore.open(db)
+    await store.close()
+    # The last check is the one the schema writes rely on: it must hold the lock.
+    assert outcomes[-1] == "database is locked", outcomes
