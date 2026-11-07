@@ -167,12 +167,15 @@ def build_http_app(
             given, `auth_token` is not a usable token, or an allowed origin or
             host is malformed.
     """
+    # A truthy string such as "false" from a config file must not open the app.
+    if not isinstance(allow_unauthenticated, bool):
+        raise TypeError("allow_unauthenticated must be True or False")
     if auth_token is not None:
         try:
             check_token(auth_token)
         except ValueError as e:
             raise ValueError(f"auth_token: {e}") from e
-    elif not allow_unauthenticated:
+    elif allow_unauthenticated is not True:
         raise ValueError(
             "build_http_app needs auth_token=... or allow_unauthenticated=True. Without a "
             "token anyone who can reach the server can read and write all memory; the Host "

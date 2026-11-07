@@ -39,6 +39,29 @@ def _print_version() -> None:
     raise typer.Exit(0)
 
 
+_PLACEHOLDERS = (
+    "changeme",
+    "change-me",
+    "change_me",
+    "replaceme",
+    "replace-me",
+    "your-token",
+    "your_token",
+    "yourtoken",
+    "placeholder",
+    "password",
+)
+
+
+def _remote_token_problem(token: str) -> str | None:
+    """Why a token is too weak for a host other machines can reach, or None."""
+    if len(token) < MIN_REMOTE_TOKEN_LEN:
+        return f"is shorter than {MIN_REMOTE_TOKEN_LEN} characters"
+    if len(set(token)) < 5 or any(p in token.lower() for p in _PLACEHOLDERS):
+        return "looks like a placeholder or repeats a few characters"
+    return None
+
+
 def _own_origins(port: int) -> list[str]:
     """Origins a browser uses for this server on this machine (for /docs)."""
     return [f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"]
@@ -153,20 +176,22 @@ def main(
             _eprint(f"refusing to start: ${auth_token_env}: {e}")
             raise typer.Exit(2) from e
 
-    if (
-        auth_token is not None
-        and host not in LOOPBACK_HOSTS
-        and len(auth_token) < MIN_REMOTE_TOKEN_LEN
-    ):
+    problem = (
+        _remote_token_problem(auth_token)
+        if auth_token is not None and host not in LOOPBACK_HOSTS
+        else None
+    )
+    if problem:
         _eprint(
-            f"refusing to start: ${auth_token_env} is shorter than {MIN_REMOTE_TOKEN_LEN} "
-            f"chars and --host {host} is reachable from other machines. "
-            f"Generate one with: {_TOKEN_HINT}"
+            f"refusing to start: ${auth_token_env} {problem}, and --host {host} is "
+            f"reachable from other machines. Generate one with: {_TOKEN_HINT}"
         )
         raise typer.Exit(2)
 
-    # The server's own origin, so "Try it out" on /docs works from this machine.
-    origins += [o for o in _own_origins(port) if o not in origins]
+    # On loopback, the server's own origins, so "Try it out" on /docs works.
+    # Bound elsewhere, the name browsers use is unknown: use --allowed-origin.
+    if host in LOOPBACK_HOSTS:
+        origins += [o for o in _own_origins(port) if o not in origins]
 
     if auth_token is not None and len(auth_token) < MIN_TOKEN_LEN:
         # Rule 4: short-token warning (not blocking)
@@ -186,6 +211,7 @@ def main(
             port=port,
             db_path=resolved_db,
             auth_token=auth_token,
+            allow_unauthenticated=auth_token is None,
             allowed_origins=origins,
             allowed_hosts=hosts,
             log_level=log_level,
@@ -200,6 +226,7 @@ async def serve_engram(
     db_path: str,
     auth_token: str | None,
     log_level: str,
+    allow_unauthenticated: bool = False,
     allowed_origins: list[str] | None = None,
     allowed_hosts: list[str] | None = None,
 ) -> None:
@@ -211,6 +238,18 @@ async def serve_engram(
     every MCP tool call would explode with "Event loop is closed". Keeping the
     full lifecycle inside one asyncio.run(serve_engram(...)) avoids that.
     """
+    # Called directly, this must not be a way around main()'s checks.
+    from engram.server.auth import check_token
+
+    if auth_token is None:
+        if allow_unauthenticated is not True:
+            raise ValueError("serve_engram needs auth_token=... or allow_unauthenticated=True")
+    else:
+        check_token(auth_token)
+        problem = _remote_token_problem(auth_token) if host not in LOOPBACK_HOSTS else None
+        if problem:
+            raise ValueError(f"auth token {problem}; --host {host} is reachable remotely")
+
     # Late imports — keep --version, --help, and dry-run fast.
     import uvicorn
 
@@ -225,8 +264,7 @@ async def serve_engram(
             engram,
             mcp_server=mcp_server,
             auth_token=auth_token,
-            # main() has already decided whether running without a token is allowed.
-            allow_unauthenticated=auth_token is None,
+            allow_unauthenticated=allow_unauthenticated,
             allowed_origins=allowed_origins or (),
             allowed_hosts=allowed_hosts or None,
         )

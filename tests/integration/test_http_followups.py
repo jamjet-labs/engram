@@ -136,3 +136,97 @@ async def test_head_healthz_is_200(open_app: FastAPI, token_app: FastAPI) -> Non
             resp = await c.head("/healthz")
             assert resp.status_code == 200
             assert resp.content == b""
+
+
+# ── review round 2 ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, "", None])
+async def test_allow_unauthenticated_must_be_a_real_bool(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, value: Any
+) -> None:
+    # "false" is truthy; only the literal True may build an open app.
+    engram = await _engram(tmp_path, monkeypatch)
+    try:
+        with pytest.raises(TypeError, match="allow_unauthenticated"):
+            build_http_app(engram, allow_unauthenticated=value)
+    finally:
+        await engram.close()
+
+
+@pytest.mark.asyncio
+async def test_same_site_link_to_docs_is_a_navigation_and_allowed(open_app: FastAPI) -> None:
+    # Clicking a link on http://localhost:3000 to the server's /docs.
+    nav = {
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+    }
+    async with _client(open_app) as c:
+        assert (await c.get("/docs", headers=nav)).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "headers"),
+    [
+        # cross-site navigation: still refused
+        (
+            "GET",
+            {
+                "Sec-Fetch-Site": "cross-site",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+            },
+        ),
+        # same-site, but framed or embedded, not top-level
+        (
+            "GET",
+            {
+                "Sec-Fetch-Site": "same-site",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "iframe",
+            },
+        ),
+        (
+            "GET",
+            {
+                "Sec-Fetch-Site": "same-site",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "object",
+            },
+        ),
+        # same-site form POST navigation
+        (
+            "POST",
+            {
+                "Sec-Fetch-Site": "same-site",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+            },
+        ),
+        # a list, or a value we do not know
+        ("GET", {"Sec-Fetch-Site": "same-origin, cross-site"}),
+        ("GET", {"Sec-Fetch-Site": "weird"}),
+    ],
+)
+async def test_other_foreign_requests_stay_refused(
+    open_app: FastAPI, method: str, headers: dict[str, str]
+) -> None:
+    async with _client(open_app) as c:
+        resp = await c.request(method, "/v1/memory/recall", params={"query": "q"}, headers=headers)
+        assert resp.status_code == 403, (method, headers, resp.status_code)
+
+
+@pytest.mark.asyncio
+async def test_rejections_say_which_check_refused(open_app: FastAPI) -> None:
+    async with _client(open_app) as c:
+        resp = await c.get(
+            "/v1/memory/recall", params={"query": "q"}, headers={"Sec-Fetch-Site": "cross-site"}
+        )
+        assert resp.json() == {"error": "cross-site request refused"}
+        resp = await c.get(
+            "/v1/memory/recall", params={"query": "q"}, headers={"Origin": "http://evil.example"}
+        )
+        assert resp.json() == {"error": "origin not allowed"}

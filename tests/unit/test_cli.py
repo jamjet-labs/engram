@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
 from typer.testing import CliRunner
 
 from engram.cli import app
 
 runner = CliRunner()
+GOOD_TOKEN = "Zt8qL2vNw5RkX0pHc7YmB3sJd9FgA1eU"
 
 
 def test_version_flag():
@@ -148,7 +150,7 @@ def test_settings_reach_the_server(monkeypatch):
     import engram.cli as cli
 
     _clear_env(monkeypatch)
-    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "t" * 40)
+    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", GOOD_TOKEN)
     monkeypatch.setenv("ENGRAM_ALLOWED_ORIGINS", "https://b.example")
     seen = {}
 
@@ -160,12 +162,9 @@ def test_settings_reach_the_server(monkeypatch):
         app, ["--host", "0.0.0.0", "--allowed-origin", "https://a.example", "--db-path", "x.db"]
     )
     assert result.exit_code == 0, result.output
-    assert seen["auth_token"] == "t" * 40
-    assert seen["allowed_origins"] == [
-        "https://a.example",
-        "https://b.example",
-        *cli._own_origins(8765),
-    ]
+    assert seen["auth_token"] == GOOD_TOKEN
+    # Bound to 0.0.0.0, so the loopback origins are not added.
+    assert seen["allowed_origins"] == ["https://a.example", "https://b.example"]
     assert seen["host"] == "0.0.0.0"
 
 
@@ -227,7 +226,7 @@ def test_short_token_refused_on_non_loopback_host(monkeypatch):
     result = runner.invoke(app, ["--host", "0.0.0.0", "--dry-run"])
     assert result.exit_code != 0
     assert "16" in (result.stderr + result.output)
-    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "x" * 16)
+    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "k7Qp2xVb9LmZ4tRw")
     result = runner.invoke(app, ["--host", "0.0.0.0", "--dry-run"])
     assert result.exit_code == 0
 
@@ -288,7 +287,60 @@ async def test_serve_engram_builds_an_unauthenticated_app_on_purpose(monkeypatch
         port=9999,
         db_path=":memory:",
         auth_token=None,
+        allow_unauthenticated=True,
         log_level="INFO",
         allowed_origins=cli._own_origins(9999),
     )
     assert statuses == [200, 200]
+
+
+@pytest.mark.parametrize(
+    "token", ["a" * 16, "ab" * 20, "changemechangeme", "CHANGEME" * 4, "your-token-here-please"]
+)
+def test_low_entropy_token_refused_on_non_loopback_host(monkeypatch, token):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", token)
+    result = runner.invoke(app, ["--host", "0.0.0.0", "--dry-run"])
+    assert result.exit_code != 0, token
+    result = runner.invoke(app, ["--host", "127.0.0.1", "--dry-run"])
+    assert result.exit_code == 0, token
+
+
+def test_own_origins_only_when_bound_to_loopback(monkeypatch):
+    import engram.cli as cli
+
+    _clear_env(monkeypatch)
+    seen = {}
+
+    async def fake_serve(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli, "serve_engram", fake_serve)
+    result = runner.invoke(app, ["--allow-unauthenticated", "--host", "0.0.0.0", "--db-path", "x"])
+    assert result.exit_code == 0, result.output
+    assert seen["allowed_origins"] == []
+
+
+async def test_serve_engram_applies_the_cli_rules(monkeypatch):
+    # Called directly, it must not be a way around the CLI's checks.
+    import uvicorn
+
+    import engram.cli as cli
+
+    async def no_serve(self, sockets=None):
+        raise AssertionError("server started")
+
+    async def no_open(*args, **kwargs):
+        raise AssertionError("opened the database before checking")
+
+    monkeypatch.setattr(uvicorn.Server, "serve", no_serve)
+    monkeypatch.setattr("engram.engram.Engram.open", no_open)
+    base = {"port": 9999, "db_path": ":memory:", "log_level": "INFO"}
+    with pytest.raises(ValueError, match="allow_unauthenticated"):
+        await cli.serve_engram(host="127.0.0.1", auth_token=None, **base)
+    with pytest.raises(ValueError, match="16"):
+        await cli.serve_engram(host="0.0.0.0", auth_token="k7Qp2xVb9", **base)
+    with pytest.raises(ValueError):
+        await cli.serve_engram(host="0.0.0.0", auth_token="a" * 40, **base)
+    with pytest.raises(ValueError, match="printable ASCII"):
+        await cli.serve_engram(host="127.0.0.1", auth_token="bad token", **base)
