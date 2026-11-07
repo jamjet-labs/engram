@@ -1,6 +1,6 @@
 # Engram
 
-> **Durable memory for AI agents.** Multi-tenant by default. Local-first or cloud. Benchmarked, not vapor.
+> **Durable memory for AI agents.** Scoped per user and org. Local-first or cloud. Benchmarked, not vapor.
 
 [![CI](https://github.com/jamjet-labs/engram/actions/workflows/ci.yml/badge.svg)](https://github.com/jamjet-labs/engram/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)](https://www.python.org)
@@ -29,7 +29,7 @@ There are several memory libraries for agents already ([Mem0](https://github.com
 
 **1. Mode-aware reading.** Most memory layers do one thing: retrieve facts that match your query. Engram ships two distinct read paths: `Reader(mode="recall")` for "what did the user say about X?" and `Reader(mode="synthesis")` for "recommend something based on the user's preferences." On LongMemEval-S, this lifts `single-session-preference` accuracy from 29% to 71%.
 
-**2. Multi-tenant by default.** Every API takes `user_id` + `org_id` (a `Scope`). Facts, vectors, and chat messages are partitioned at the SQL and HNSW levels — no cross-tenant leakage by construction. There is no "admin" scope that can read across tenants.
+**2. Scoped by user and org.** Every API takes `user_id` + `org_id` (a `Scope`). Facts, vectors, and chat messages are partitioned at the SQL and HNSW levels, so a query in one scope does not return another scope's rows. The scope is a partition, not an access check: the caller names it, and over HTTP or MCP anyone holding the server token can name any scope. To keep tenants apart, run one server per tenant. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 **3. Local-first OR cloud.** Pluggable providers for both LLM (Ollama / OpenAI / Anthropic) and embeddings (Ollama / OpenAI / synthetic). Run completely offline with `nomic-embed-text` + `llama3.2:3b`, or swap in cloud providers when you need throughput.
 
@@ -123,7 +123,9 @@ from engram import Engram
 from engram.server.http import build_http_app
 
 memory = await Engram.open("./engram.db")
-uvicorn.run(build_http_app(memory), host="127.0.0.1", port=19090)
+# No token: anyone who can reach the port can read and write memory, so this
+# binds to loopback. Pass auth_token="..." instead for anything else.
+uvicorn.run(build_http_app(memory, allow_unauthenticated=True), host="127.0.0.1", port=19090)
 ```
 
 ```bash
@@ -177,7 +179,7 @@ Query-time re-extraction and `extract()` drop any fact a tombstone would withhol
 
 **The re-insertion rule.** A write cannot un-revoke. Recording the same claim again stores it but it is born hidden (`record(..., reject_revoked=True)` raises `RevokedContentError` instead). Making the claim visible again takes `Engram.reinstate(fact, actor=..., reason=...)` on the revoked fact itself, which is recorded on the tombstone; reinstating a copy that was born hidden is refused, so a write is never a handle on the original. Reinstating lifts only that fact's own tombstones: anything that also quotes or derives from another fact that is still revoked stays hidden. Matching is on normalized text, not meaning: a paraphrase, a number written differently, or a lookalike letter from another script is a new claim and needs its own revocation or a `derived_from` link.
 
-**What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Revoke, supersede, reinstate and erase are Python API only in this release, because the `/v1/memory/*` HTTP routes are unauthenticated. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
+**What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Revoke, supersede, reinstate and erase are Python API only in this release, because the HTTP server has one shared token and no per-caller identity to record or check. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
 
 **Older and newer libraries.** 0.2 has no version check, so nothing stops it from opening a 0.3 database and ignoring every tombstone. Keep 0.2 processes away from a file once 0.3 has written to it. From 0.3 on, the database records its schema version (2), and a library refuses to open a file written by a newer schema, before writing anything to it.
 
@@ -199,7 +201,7 @@ What the backend can show and what it cannot:
 
 ## Use with JamJet
 
-Engram is the memory layer for agents built on **[JamJet](https://github.com/jamjet-labs/jamjet)** — JamJet Labs' durable execution runtime. The two projects share design DNA: Apache 2.0, MCP-native, multi-tenant by default. Engram handles "what does the agent remember?"; JamJet handles "what happens when the process restarts mid-execution?"
+Engram is the memory layer for agents built on **[JamJet](https://github.com/jamjet-labs/jamjet)** — JamJet Labs' durable execution runtime. The two projects share design DNA: Apache 2.0, MCP-native, scoped per user and org. Engram handles "what does the agent remember?"; JamJet handles "what happens when the process restarts mid-execution?"
 
 Three composition patterns:
 
@@ -222,7 +224,7 @@ Engram works fine standalone if you're not using JamJet. But if you're building 
 
 | Concept | What it is | Why you care |
 |---|---|---|
-| **`Scope`** | `(org_id, user_id)` pair attached to every fact | Multi-tenancy. No cross-tenant leakage at the SQL or vector index layer. |
+| **`Scope`** | `(org_id, user_id)` pair attached to every fact | Partitions every read at the SQL and vector index layer. The caller picks it, so it is not an access check; see [Tenancy](#tenancy-one-token-is-one-trust-domain). |
 | **`Fact`** | Pydantic model: text, scope, validity window, confidence, optional event_date / session_id / role / metadata | The unit of memory. Versioned via `supersede`, scored at retrieval, governed by per-tenant scope. |
 | **`Engram`** | Async facade over store + embedder + retriever + (optional) extractor + (optional) tier | The thing you actually call. `record()`, `recall()`, `context()`, `extract()`. |
 | **`Reader`** | LLM-driven answer generator with two modes: `"recall"` (verifier-gated fact recall) and `"synthesis"` (recommendation grounded in user preferences) | The mode you pick changes the whole pipeline — verifier on or off, tool loop or not, recall prompt or synthesis prompt. |
@@ -303,7 +305,7 @@ The benchmark history (visible in `CHANGELOG.md`) documents two ablation program
 
 ## Running in production
 
-**Scope isolation.** Every API call takes `user_id` + `org_id` (combined into a `Scope`). Facts, vectors, and chat-message storage are partitioned by scope at the SQL and HNSW levels — no cross-tenant leakage by construction. There is no "admin" scope that can read all data.
+**Scope isolation.** Every API call takes `user_id` + `org_id` (combined into a `Scope`). Facts, vectors, and chat-message storage are partitioned by scope at the SQL and HNSW levels, so a read in one scope does not return another scope's rows. Engram does not check who is asking for a scope. In-process, your code decides; over HTTP and MCP, the scope comes from the request, so every token holder can read and write every scope. Separate tenants with separate servers, as described under [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 **Embedding provider tradeoffs.** `OllamaEmbedding` runs entirely local (private, free, slower) — recommended for sensitive data or offline usage. `OpenAIEmbedding` is faster and more accurate but sends every recorded text to OpenAI. `SyntheticEmbedding` is for tests only.
 
@@ -336,7 +338,7 @@ docker run --rm \
   -e ENGRAM_AUTH_TOKEN="$ENGRAM_AUTH_TOKEN" \
   -v engram-data:/data \
   -p 8765:8765 \
-  ghcr.io/jamjet-labs/engram-py-server:0.2.0
+  ghcr.io/jamjet-labs/engram-py-server:0.3.0
 ```
 
 ### Connecting a client
@@ -353,12 +355,42 @@ curl -i -X POST http://localhost:8765/mcp \
 
 The server returns `MCP-Session-Id` in the response headers; subsequent requests echo it.
 
-### Auth model (v0.2)
+### Auth model
 
-- `/mcp` requires `Authorization: Bearer <token>` matching `$ENGRAM_AUTH_TOKEN`.
-- The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset (fail-closed). The only opt-out is `--no-auth`, which is rejected unless `--host` is `127.0.0.1` or `::1`.
-- `/v1/memory/*` REST routes remain unauthed (matches the Rust `engram-server` REST behavior; deploy them behind a reverse proxy if you need auth).
+- With `$ENGRAM_AUTH_TOKEN` set, every route needs `Authorization: Bearer <token>`: `/mcp`, `/v1/memory/*`, `/v1/sessions/*`, `/docs` and `/openapi.json`. Only `/healthz` is open. Requests without the token get 401.
+- `/healthz` answers GET and HEAD without the token.
+- The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset, and says why. On a host other machines can reach it also refuses a token shorter than 16 characters, one that repeats a few characters, or an obvious placeholder such as `changeme` (shorter than 32 gets a warning). To run without a token on purpose:
+  - `--no-auth --host 127.0.0.1` (or `::1`) for local use. `localhost` is rejected because `/etc/hosts` can redirect it.
+  - `--allow-unauthenticated` (or `ENGRAM_ALLOW_UNAUTHENTICATED=1`) on any host, for example behind a proxy that does its own auth. The server prints a warning at startup.
+- `build_http_app()` used as a library needs `auth_token="..."` or `allow_unauthenticated=True` (the bool itself; a string such as `"false"` is a `TypeError`). It no longer defaults to an open app.
+- The checks below stop a web page from using a visitor's browser against your server (DNS rebinding, cross-site requests), as the MCP Streamable HTTP spec asks. They are not access control: any client that is not a browser can send `Host: localhost` and no `Origin`. Without a token, only bind to loopback or put real auth in front.
+  - A request with an `Origin` header that is not on the allowlist gets 403. Requests without `Origin` (MCP clients, curl, server-side SDKs) are not affected. The list is empty by default; add entries with `--allowed-origin https://app.example.com` (repeatable) or `ENGRAM_ALLOWED_ORIGINS` (comma-separated). Write non-ASCII hostnames in punycode (`xn--`). The server sends no CORS headers, so listing an origin does not by itself let a web app on that origin call it with the token. When bound to loopback, `engram-server` also allows its own origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`), so "Try it out" on `/docs` works. Bound to another address, add the name browsers use with `--allowed-origin`.
+  - Without a token, a rebound page's same-origin GETs carry no `Origin`, so the server also checks `Host`: only `127.0.0.1`, `localhost` and `::1` (any port) are served, and other names get 421. Add names with `--allowed-host engram.internal` (repeatable) or `ENGRAM_ALLOWED_HOSTS`. With a token this check is off unless you pass `--allowed-host`, because a rebound page cannot present the token.
+  - Without a token, a request whose `Sec-Fetch-Site` header is anything but `same-origin` or `none` gets 403 unless it carries an allowed `Origin`. That covers `<img>` and `<script>` tags, which send no `Origin`. A same-site link that opens a page (a top-level GET navigation, say from `localhost:3000` to `/docs`) is let through, as in the usual Fetch Metadata policy.
+- The token must be printable ASCII with no spaces (a stray newline from a secrets file is the usual culprit). The server refuses to start rather than reject every request. `secrets.token_urlsafe(32)` always qualifies.
 - OAuth2 dynamic client registration (the Claude Desktop remote-server flavor) is on the roadmap.
+
+**Upgrading from 0.2.** REST clients of a server started with a token now need to send it too. The Java SDK's `EngramClient` reads it from `ENGRAM_TOKEN`; other clients add the `Authorization` header. A server without a token only answers requests addressed to a loopback name, so a proxy or a test client that uses another hostname (Starlette's `TestClient` sends `testserver`) needs `--allowed-host`, `build_http_app(allowed_hosts=[...])`, or a loopback base URL.
+
+### Tenancy: one token is one trust domain
+
+`user_id` and `org_id` come from the request body or tool arguments. The token proves the caller may use the server, not which user it is. So anyone with the token can read and write every user's and every org's memory in that database. Treat one server, one database and one token as one tenant.
+
+To serve several tenants that must not see each other's data, run one server per tenant, each with its own token and its own volume:
+
+```bash
+docker run -d --name engram-acme \
+  -e ENGRAM_AUTH_TOKEN="$ACME_TOKEN" \
+  -v engram-acme:/data -p 8765:8765 \
+  ghcr.io/jamjet-labs/engram-py-server:0.3.0
+
+docker run -d --name engram-globex \
+  -e ENGRAM_AUTH_TOKEN="$GLOBEX_TOKEN" \
+  -v engram-globex:/data -p 8766:8765 \
+  ghcr.io/jamjet-labs/engram-py-server:0.3.0
+```
+
+Give each tenant only its own URL and token. Within one tenant, `user_id` and `org_id` still partition reads, but they are labels your application sets, not a security boundary.
 
 ### Stdio transport
 
