@@ -64,7 +64,9 @@ async def test_http_recall_with_provenance_and_legacy_shape_unchanged() -> None:
     from engram.server.http import build_http_app
 
     async with await Engram.open(":memory:") as memory:
-        client = TestClient(build_http_app(memory), base_url="http://127.0.0.1")
+        client = TestClient(
+            build_http_app(memory, allow_unauthenticated=True), base_url="http://127.0.0.1"
+        )
         client.post(
             "/v1/memory/record",
             json={"text": "alice prefers espresso", "user_id": "alice", "actor": "crm-sync"},

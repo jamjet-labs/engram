@@ -142,7 +142,7 @@ async def test_unauthenticated_app_still_checks_origin(
     # The --no-auth loopback case is the one DNS rebinding actually reaches.
     engram = await _engram(tmp_path, monkeypatch)
     try:
-        app = build_http_app(engram)
+        app = build_http_app(engram, allow_unauthenticated=True)
         async with _client(app) as c:
             resp = await c.post(
                 "/v1/memory/record",
@@ -171,7 +171,7 @@ async def test_invalid_allowlist_entry_is_refused(
     try:
         for bad in ("*", "null", "app.example.com", "https://app.example.com/path", "ftp://x"):
             with pytest.raises(ValueError):
-                build_http_app(engram, allowed_origins=[bad])
+                build_http_app(engram, allow_unauthenticated=True, allowed_origins=[bad])
     finally:
         await engram.close()
 
@@ -226,7 +226,7 @@ async def open_app(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
     engram = await _engram(tmp_path, monkeypatch)
     try:
         await engram.record("alice card 4111", user_id="alice")
-        yield build_http_app(engram, allowed_hosts=["engram.internal"])
+        yield build_http_app(engram, allow_unauthenticated=True, allowed_hosts=["engram.internal"])
     finally:
         await engram.close()
 
@@ -300,10 +300,10 @@ async def test_two_host_headers_are_refused(open_app: FastAPI) -> None:
 async def test_host_check_is_on_by_default_without_a_token(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # build_http_app(engram) as in the README: no token, no allowed_hosts.
+    # No token, no allowed_hosts.
     engram = await _engram(tmp_path, monkeypatch)
     try:
-        app = build_http_app(engram)
+        app = build_http_app(engram, allow_unauthenticated=True)
         async with _client(app) as c:
             resp = await c.get(
                 "/v1/memory/recall",
@@ -327,9 +327,11 @@ async def test_a_bare_string_is_not_taken_as_a_list(
     engram = await _engram(tmp_path, monkeypatch)
     try:
         with pytest.raises(TypeError, match="allowed_hosts"):
-            build_http_app(engram, allowed_hosts="engram.internal")
+            build_http_app(engram, allow_unauthenticated=True, allowed_hosts="engram.internal")
         with pytest.raises(TypeError, match="allowed_origins"):
-            build_http_app(engram, allowed_origins="https://app.example.com")
+            build_http_app(
+                engram, allow_unauthenticated=True, allowed_origins="https://app.example.com"
+            )
     finally:
         await engram.close()
 

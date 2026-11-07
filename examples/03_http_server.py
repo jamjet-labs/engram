@@ -17,7 +17,9 @@ from engram.server.http import build_http_app
 
 async def _build_app() -> uvicorn.Server:
     memory = await Engram.open("./engram.db")
-    app = build_http_app(memory)
+    # No token: anyone who can reach the port can read and write memory, so
+    # bind to loopback only. Pass auth_token=... for anything else.
+    app = build_http_app(memory, allow_unauthenticated=True)
     config = uvicorn.Config(app, host="127.0.0.1", port=19090, log_level="info")
     return uvicorn.Server(config)
 

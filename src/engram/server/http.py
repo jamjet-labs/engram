@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from starlette.routing import Route
 
@@ -131,6 +131,7 @@ def build_http_app(
     *,
     mcp_server: Any | None = None,
     auth_token: str | None = None,
+    allow_unauthenticated: bool = False,
     allowed_origins: Iterable[str] = (),
     allowed_hosts: Iterable[str] | None = None,
 ) -> FastAPI:
@@ -141,10 +142,17 @@ def build_http_app(
         mcp_server: Optional MCP `Server` (e.g. from `build_mcp_server`). If
             provided, a Streamable HTTP MCP endpoint is mounted at `/mcp`.
         auth_token: Bearer token required on every route, `/v1/*` and `/mcp`
-            alike. Only `/healthz` is open. If None, nothing is gated, which is
-            only safe on loopback. One token is one trust domain: any holder can
-            read and write every `(org_id, user_id)` scope, because the scope
-            comes from the request. Run one server per tenant to separate them.
+            alike. Only `/healthz` is open. One token is one trust domain: any
+            holder can read and write every `(org_id, user_id)` scope, because
+            the scope comes from the request. Run one server per tenant to
+            separate them.
+        allow_unauthenticated: Required to build an app without
+            `auth_token`. Such an app serves anyone who can reach it. Its Host,
+            Origin and Fetch Metadata checks stop a web page from using a
+            browser to reach it (DNS rebinding, cross-site requests); they are
+            not access control, since any other client can send
+            `Host: localhost`. Only bind it to loopback or put real auth in
+            front of it.
         allowed_origins: Browser origins (`scheme://host[:port]`) allowed to
             call the app. A request carrying any other `Origin` header gets 403;
             requests with no `Origin` (non-browser clients) are not affected.
@@ -155,14 +163,25 @@ def build_http_app(
             when there is no `auth_token`, or when this is given.
 
     Raises:
-        ValueError: `auth_token` is empty or has outer whitespace, or an
-            allowed origin or host is malformed.
+        ValueError: neither `auth_token` nor `allow_unauthenticated=True` was
+            given, `auth_token` is not a usable token, or an allowed origin or
+            host is malformed.
     """
+    # A truthy string such as "false" from a config file must not open the app.
+    if not isinstance(allow_unauthenticated, bool):
+        raise TypeError("allow_unauthenticated must be True or False")
     if auth_token is not None:
         try:
             check_token(auth_token)
         except ValueError as e:
             raise ValueError(f"auth_token: {e}") from e
+    elif allow_unauthenticated is not True:
+        raise ValueError(
+            "build_http_app needs auth_token=... or allow_unauthenticated=True. Without a "
+            "token anyone who can reach the server can read and write all memory; the Host "
+            "and Origin checks only stop browsers being used against it, they are not "
+            "access control."
+        )
     # A str is iterable, so "a.example" would become the hosts "a", ".", ...
     for name, value in (("allowed_origins", allowed_origins), ("allowed_hosts", allowed_hosts)):
         if isinstance(value, str | bytes):
@@ -200,7 +219,12 @@ def build_http_app(
         app.add_middleware(
             BearerAuthMiddleware, expected_token=auth_token, exempt_paths=(HEALTHZ_PATH,)
         )
-    app.add_middleware(OriginGuardMiddleware, allowed_origins=origins, exempt_paths=(HEALTHZ_PATH,))
+    app.add_middleware(
+        OriginGuardMiddleware,
+        allowed_origins=origins,
+        exempt_paths=(HEALTHZ_PATH,),
+        refuse_cross_site=auth_token is None,
+    )
     # Without a token, nothing else stops a DNS-rebound page from reading over
     # same-origin GETs, so the Host check is on by default in that mode.
     if auth_token is None or hosts is not None:
@@ -210,8 +234,10 @@ def build_http_app(
             exempt_paths=(HEALTHZ_PATH,),
         )
 
-    @app.get(HEALTHZ_PATH)
-    async def healthz() -> dict[str, str]:
+    @app.api_route(HEALTHZ_PATH, methods=["GET", "HEAD"], response_model=None)
+    async def healthz(request: Request) -> Response | dict[str, str]:
+        if request.method == "HEAD":
+            return Response(status_code=200)
         return {"status": "ok"}
 
     @app.post("/v1/memory/record", response_model=_RecordResponse)

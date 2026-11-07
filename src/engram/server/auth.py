@@ -25,11 +25,15 @@ HEALTHZ_PATH = "/healthz"
 
 _UNAUTH_BODY = json.dumps({"error": "invalid bearer token"}).encode("utf-8")
 _FORBIDDEN_ORIGIN_BODY = json.dumps({"error": "origin not allowed"}).encode("utf-8")
+_CROSS_SITE_BODY = json.dumps({"error": "cross-site request refused"}).encode("utf-8")
 _MISDIRECTED_BODY = json.dumps({"error": "host not allowed"}).encode("utf-8")
 
 # Hostnames that always reach a server bound to loopback.
 LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+# Sec-Fetch-Site values for requests this origin (or the user) started. Any
+# other value, including ones we do not know, counts as another site.
+_OWN_SITES = frozenset({b"same-origin", b"none"})
 
 # RFC 6455 7.4.1: 1008 = policy violation.
 _WS_POLICY_VIOLATION = 1008
@@ -191,6 +195,14 @@ class OriginGuardMiddleware:
     browser do not send one. This is the DNS-rebinding check the MCP Streamable
     HTTP transport requires. The allowlist is never derived from the Host
     header, because a rebinding attacker controls both.
+
+    With `refuse_cross_site`, a request whose `Sec-Fetch-Site` says another
+    site started it is refused too unless it carries an allowed Origin. That
+    covers no-cors GETs (an `<img>` or `<script>` tag), which send no Origin.
+    A same-site top-level GET navigation (a link from localhost:3000 to /docs)
+    is let through, as in the usual Fetch Metadata resource-isolation policy:
+    it opens the page instead of handing the response to the other page.
+    Used when there is no token, since then nothing else gates the request.
     """
 
     def __init__(
@@ -199,29 +211,43 @@ class OriginGuardMiddleware:
         *,
         allowed_origins: Iterable[str] = (),
         exempt_paths: Iterable[str] = (),
+        refuse_cross_site: bool = False,
     ) -> None:
         self.app = app
         self._allowed = frozenset(normalize_origin(o) for o in allowed_origins)
         self._exempt = frozenset(exempt_paths)
+        self._refuse_cross_site = refuse_cross_site
 
-    def _allowed_request(self, scope: Scope) -> bool:
+    def _rejection(self, scope: Scope) -> bytes | None:
+        """The 403 body for this request, or None to let it through."""
+        has_origin = False
+        fetch: dict[bytes, set[bytes]] = {b"site": set(), b"mode": set(), b"dest": set()}
         for name, value in scope.get("headers", []):
-            if name != b"origin":
-                continue
-            origin = value.decode("latin-1").strip().lower()
-            if origin not in self._allowed:
-                return False
-        return True
+            if name == b"origin":
+                has_origin = True
+                if value.decode("latin-1").strip().lower() not in self._allowed:
+                    return _FORBIDDEN_ORIGIN_BODY
+            elif name.startswith(b"sec-fetch-") and name[10:] in fetch:
+                fetch[name[10:]].add(value.strip().lower())
+        if not self._refuse_cross_site or has_origin or fetch[b"site"] <= _OWN_SITES:
+            return None
+        top_level_navigation = (
+            fetch[b"site"] == {b"same-site"}
+            and fetch[b"mode"] == {b"navigate"}
+            and fetch[b"dest"] == {b"document"}
+            and scope.get("method") in ("GET", "HEAD")
+        )
+        return None if top_level_navigation else _CROSS_SITE_BODY
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (
-            scope["type"] == "lifespan"
-            or _is_exempt(scope, self._exempt)
-            or self._allowed_request(scope)
-        ):
+        if scope["type"] == "lifespan" or _is_exempt(scope, self._exempt):
             await self.app(scope, receive, send)
             return
-        await _reject(scope, send, 403, _FORBIDDEN_ORIGIN_BODY)
+        body = self._rejection(scope)
+        if body is None:
+            await self.app(scope, receive, send)
+            return
+        await _reject(scope, send, 403, body)
 
 
 class HostGuardMiddleware:

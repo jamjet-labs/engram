@@ -172,3 +172,29 @@ def test_exempt_path_skips_auth():
     wrapped = auth_asgi_wrapper(_ok_app(), expected_token="secret123", exempt_paths={"/"})
     client = TestClient(wrapped)
     assert client.get("/").status_code == 200
+
+
+def test_websocket_on_an_exempt_path_still_needs_the_token():
+    # The /healthz exemption is for plain HTTP health checks only.
+    import anyio
+
+    reached = []
+    sent = []
+
+    async def inner(scope, receive, send):
+        reached.append(scope["type"])
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    wrapped = auth_asgi_wrapper(inner, expected_token="secret123", exempt_paths={"/healthz"})
+
+    async def drive():
+        await wrapped({"type": "websocket", "path": "/healthz", "headers": []}, receive, send)
+
+    anyio.run(drive)
+    assert reached == []
+    assert sent == [{"type": "websocket.close", "code": 1008}]
