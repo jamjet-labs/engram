@@ -30,6 +30,8 @@ _MISDIRECTED_BODY = json.dumps({"error": "host not allowed"}).encode("utf-8")
 # Hostnames that always reach a server bound to loopback.
 LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+# Sec-Fetch-Site values for a request a page on another origin started.
+_FOREIGN_SITES = frozenset({b"cross-site", b"same-site"})
 
 # RFC 6455 7.4.1: 1008 = policy violation.
 _WS_POLICY_VIOLATION = 1008
@@ -191,6 +193,11 @@ class OriginGuardMiddleware:
     browser do not send one. This is the DNS-rebinding check the MCP Streamable
     HTTP transport requires. The allowlist is never derived from the Host
     header, because a rebinding attacker controls both.
+
+    With `refuse_cross_site`, a request whose `Sec-Fetch-Site` says another
+    site started it is refused too unless it carries an allowed Origin. That
+    covers no-cors GETs (an `<img>` or `<script>` tag), which send no Origin.
+    Used when there is no token, since then nothing else gates the request.
     """
 
     def __init__(
@@ -199,19 +206,24 @@ class OriginGuardMiddleware:
         *,
         allowed_origins: Iterable[str] = (),
         exempt_paths: Iterable[str] = (),
+        refuse_cross_site: bool = False,
     ) -> None:
         self.app = app
         self._allowed = frozenset(normalize_origin(o) for o in allowed_origins)
         self._exempt = frozenset(exempt_paths)
+        self._refuse_cross_site = refuse_cross_site
 
     def _allowed_request(self, scope: Scope) -> bool:
+        has_origin = False
+        foreign = False
         for name, value in scope.get("headers", []):
-            if name != b"origin":
-                continue
-            origin = value.decode("latin-1").strip().lower()
-            if origin not in self._allowed:
-                return False
-        return True
+            if name == b"origin":
+                has_origin = True
+                if value.decode("latin-1").strip().lower() not in self._allowed:
+                    return False
+            elif name == b"sec-fetch-site":
+                foreign = foreign or value.strip().lower() in _FOREIGN_SITES
+        return not (self._refuse_cross_site and foreign and not has_origin)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (

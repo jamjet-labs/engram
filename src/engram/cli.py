@@ -17,6 +17,8 @@ import typer
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 MIN_TOKEN_LEN = 32
+# Below this a token is refused outright on a host other machines can reach.
+MIN_REMOTE_TOKEN_LEN = 16
 ALLOW_UNAUTHENTICATED_ENV = "ENGRAM_ALLOW_UNAUTHENTICATED"
 ALLOWED_ORIGINS_ENV = "ENGRAM_ALLOWED_ORIGINS"
 ALLOWED_HOSTS_ENV = "ENGRAM_ALLOWED_HOSTS"
@@ -35,6 +37,11 @@ def _print_version() -> None:
 
     typer.echo(_pkg_version("jamjet-engram"))
     raise typer.Exit(0)
+
+
+def _own_origins(port: int) -> list[str]:
+    """Origins a browser uses for this server on this machine (for /docs)."""
+    return [f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"]
 
 
 def _flag_and_env(flag_values: list[str] | None, env_name: str) -> list[str]:
@@ -146,6 +153,21 @@ def main(
             _eprint(f"refusing to start: ${auth_token_env}: {e}")
             raise typer.Exit(2) from e
 
+    if (
+        auth_token is not None
+        and host not in LOOPBACK_HOSTS
+        and len(auth_token) < MIN_REMOTE_TOKEN_LEN
+    ):
+        _eprint(
+            f"refusing to start: ${auth_token_env} is shorter than {MIN_REMOTE_TOKEN_LEN} "
+            f"chars and --host {host} is reachable from other machines. "
+            f"Generate one with: {_TOKEN_HINT}"
+        )
+        raise typer.Exit(2)
+
+    # The server's own origin, so "Try it out" on /docs works from this machine.
+    origins += [o for o in _own_origins(port) if o not in origins]
+
     if auth_token is not None and len(auth_token) < MIN_TOKEN_LEN:
         # Rule 4: short-token warning (not blocking)
         _eprint(
@@ -203,6 +225,8 @@ async def serve_engram(
             engram,
             mcp_server=mcp_server,
             auth_token=auth_token,
+            # main() has already decided whether running without a token is allowed.
+            allow_unauthenticated=auth_token is None,
             allowed_origins=allowed_origins or (),
             allowed_hosts=allowed_hosts or None,
         )

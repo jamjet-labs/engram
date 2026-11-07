@@ -123,7 +123,9 @@ from engram import Engram
 from engram.server.http import build_http_app
 
 memory = await Engram.open("./engram.db")
-uvicorn.run(build_http_app(memory), host="127.0.0.1", port=19090)
+# No token: anyone who can reach the port can read and write memory, so this
+# binds to loopback. Pass auth_token="..." instead for anything else.
+uvicorn.run(build_http_app(memory, allow_unauthenticated=True), host="127.0.0.1", port=19090)
 ```
 
 ```bash
@@ -354,12 +356,15 @@ The server returns `MCP-Session-Id` in the response headers; subsequent requests
 ### Auth model
 
 - With `$ENGRAM_AUTH_TOKEN` set, every route needs `Authorization: Bearer <token>`: `/mcp`, `/v1/memory/*`, `/v1/sessions/*`, `/docs` and `/openapi.json`. Only `/healthz` is open. Requests without the token get 401.
-- The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset, and says why. To run without a token on purpose:
+- `/healthz` answers GET and HEAD without the token.
+- The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset, and says why. On a host other machines can reach it also refuses a token shorter than 16 characters (shorter than 32 gets a warning). To run without a token on purpose:
   - `--no-auth --host 127.0.0.1` (or `::1`) for local use. `localhost` is rejected because `/etc/hosts` can redirect it.
   - `--allow-unauthenticated` (or `ENGRAM_ALLOW_UNAUTHENTICATED=1`) on any host, for example behind a proxy that does its own auth. The server prints a warning at startup.
-- DNS rebinding (a web page pointing its own hostname at your server) is blocked in two ways, as the MCP Streamable HTTP spec asks:
-  - A request with an `Origin` header that is not on the allowlist gets 403. Requests without `Origin` (MCP clients, curl, server-side SDKs) are not affected. The list is empty by default; add entries with `--allowed-origin https://app.example.com` (repeatable) or `ENGRAM_ALLOWED_ORIGINS` (comma-separated). Write non-ASCII hostnames in punycode (`xn--`). The server sends no CORS headers, so listing an origin does not by itself let a web app on that origin call it with the token.
+- `build_http_app()` used as a library needs `auth_token="..."` or `allow_unauthenticated=True`; it no longer defaults to an open app.
+- The checks below stop a web page from using a visitor's browser against your server (DNS rebinding, cross-site requests), as the MCP Streamable HTTP spec asks. They are not access control: any client that is not a browser can send `Host: localhost` and no `Origin`. Without a token, only bind to loopback or put real auth in front.
+  - A request with an `Origin` header that is not on the allowlist gets 403. Requests without `Origin` (MCP clients, curl, server-side SDKs) are not affected. The list is empty by default; add entries with `--allowed-origin https://app.example.com` (repeatable) or `ENGRAM_ALLOWED_ORIGINS` (comma-separated). Write non-ASCII hostnames in punycode (`xn--`). The server sends no CORS headers, so listing an origin does not by itself let a web app on that origin call it with the token. `engram-server` always allows its own loopback origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`), so "Try it out" on `/docs` works from the same machine.
   - Without a token, a rebound page's same-origin GETs carry no `Origin`, so the server also checks `Host`: only `127.0.0.1`, `localhost` and `::1` (any port) are served, and other names get 421. Add names with `--allowed-host engram.internal` (repeatable) or `ENGRAM_ALLOWED_HOSTS`. With a token this check is off unless you pass `--allowed-host`, because a rebound page cannot present the token.
+  - Without a token, a request whose `Sec-Fetch-Site` header says another site started it (`cross-site` or `same-site`) gets 403 unless it carries an allowed `Origin`. That covers `<img>` and `<script>` tags, which send no `Origin`.
 - The token must be printable ASCII with no spaces (a stray newline from a secrets file is the usual culprit). The server refuses to start rather than reject every request. `secrets.token_urlsafe(32)` always qualifies.
 - OAuth2 dynamic client registration (the Claude Desktop remote-server flavor) is on the roadmap.
 

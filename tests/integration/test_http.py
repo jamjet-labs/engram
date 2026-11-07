@@ -14,7 +14,7 @@ from engram.server.http import build_http_app
 @pytest_asyncio.fixture
 async def client_engram() -> AsyncIterator[tuple[TestClient, Engram]]:
     memory = await Engram.open(":memory:")
-    app = build_http_app(memory)
+    app = build_http_app(memory, allow_unauthenticated=True)
     client = TestClient(app, base_url="http://127.0.0.1")
     try:
         yield client, memory

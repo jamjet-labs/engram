@@ -161,7 +161,11 @@ def test_settings_reach_the_server(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert seen["auth_token"] == "t" * 40
-    assert seen["allowed_origins"] == ["https://a.example", "https://b.example"]
+    assert seen["allowed_origins"] == [
+        "https://a.example",
+        "https://b.example",
+        *cli._own_origins(8765),
+    ]
     assert seen["host"] == "0.0.0.0"
 
 
@@ -215,3 +219,76 @@ def test_unauthenticated_warning_names_the_host_check(monkeypatch):
     result = runner.invoke(app, ["--allow-unauthenticated", "--host", "0.0.0.0", "--dry-run"])
     assert result.exit_code == 0
     assert "--allowed-host" in (result.stderr + result.output)
+
+
+def test_short_token_refused_on_non_loopback_host(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "x" * 15)
+    result = runner.invoke(app, ["--host", "0.0.0.0", "--dry-run"])
+    assert result.exit_code != 0
+    assert "16" in (result.stderr + result.output)
+    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "x" * 16)
+    result = runner.invoke(app, ["--host", "0.0.0.0", "--dry-run"])
+    assert result.exit_code == 0
+
+
+def test_short_token_only_warns_on_loopback(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "x" * 8)
+    result = runner.invoke(app, ["--host", "127.0.0.1", "--dry-run"])
+    assert result.exit_code == 0
+    assert "weak" in (result.stderr + result.output).lower()
+
+
+def test_own_origin_is_allowed_so_docs_work(monkeypatch):
+    # /docs "Try it out" posts with the page's own origin.
+    import engram.cli as cli
+
+    _clear_env(monkeypatch)
+    seen = {}
+
+    async def fake_serve(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(cli, "serve_engram", fake_serve)
+    result = runner.invoke(app, ["--no-auth", "--port", "9999", "--db-path", "x.db"])
+    assert result.exit_code == 0, result.output
+    for origin in ("http://127.0.0.1:9999", "http://localhost:9999", "http://[::1]:9999"):
+        assert origin in seen["allowed_origins"]
+
+
+async def test_serve_engram_builds_an_unauthenticated_app_on_purpose(monkeypatch):
+    # The CLI has already decided no token is allowed; the library default
+    # (refuse) must not stop it, and the app it builds must work.
+    import uvicorn
+    from httpx import ASGITransport, AsyncClient
+
+    import engram.cli as cli
+
+    monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
+    statuses = []
+
+    async def fake_serve(self, sockets=None):
+        transport = ASGITransport(app=self.config.app)
+        async with AsyncClient(transport=transport, base_url="http://127.0.0.1:9999") as c:
+            statuses.append((await c.get("/v1/memory/recall", params={"query": "q"})).status_code)
+            statuses.append(
+                (
+                    await c.post(
+                        "/v1/memory/record",
+                        headers={"Origin": "http://127.0.0.1:9999"},
+                        json={"text": "from the docs page"},
+                    )
+                ).status_code
+            )
+
+    monkeypatch.setattr(uvicorn.Server, "serve", fake_serve)
+    await cli.serve_engram(
+        host="127.0.0.1",
+        port=9999,
+        db_path=":memory:",
+        auth_token=None,
+        log_level="INFO",
+        allowed_origins=cli._own_origins(9999),
+    )
+    assert statuses == [200, 200]
