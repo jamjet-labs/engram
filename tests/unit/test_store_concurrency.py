@@ -175,13 +175,15 @@ async def test_cancelled_erase_rolls_back(monkeypatch: pytest.MonkeyPatch) -> No
 async def test_cancelled_record_does_not_leak_revoked_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Cancelled between the fact row and its match row: if the half-written
+    # Cancelled after the fact row is written: if the half-written
     # fact were committed later, it would quote revoked text and be visible.
     async with await Engram.open(":memory:") as memory:
         b = await memory.record(B, user_id="ops")
         await memory.revoke(b, reason="leaked", actor="sec")
         gate = Gate()
-        monkeypatch.setattr(memory._store, "_match_item", gate.wrap(memory._store._match_item))
+        monkeypatch.setattr(
+            memory._store, "_drop_stale_matches", gate.wrap(memory._store._drop_stale_matches)
+        )
         task = asyncio.create_task(memory.record(f"Ticket 12 says: {B}", user_id="ops"))
         await gate.reached.wait()
         task.cancel()
@@ -229,3 +231,45 @@ async def test_begin_immediate_serialises_writers_across_connections(tmp_path: P
     finally:
         await one.close()
         await two.close()
+
+
+async def test_failed_rollback_after_a_second_cancel_is_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Cancelled once mid-transaction, then again while the rollback is still
+    # running. The rollback then fails. That must show up as a logged error,
+    # not as "Task exception was never retrieved" from the event loop.
+    import gc
+
+    loop_errors: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
+    async with await Engram.open(":memory:") as memory:
+        b = await memory.record(B, user_id="ops")
+        gate = Gate()
+        monkeypatch.setattr(memory._store, "_match_scope", gate.wrap(memory._store._match_scope))
+        conn = memory._store._conn
+        real_rollback = conn.rollback
+        rolling_back = asyncio.Event()
+
+        async def failing_rollback() -> None:
+            rolling_back.set()
+            await asyncio.sleep(0.05)
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(conn, "rollback", failing_rollback)
+        task = asyncio.create_task(memory.revoke(b, reason="leaked", actor="sec"))
+        await gate.reached.wait()
+        task.cancel()
+        await rolling_back.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.2)
+        monkeypatch.setattr(conn, "rollback", real_rollback)
+        await real_rollback()
+    gc.collect()
+    await asyncio.sleep(0)
+    loop.set_exception_handler(None)
+    assert "rollback failed" in caplog.text
+    assert loop_errors == []

@@ -21,7 +21,10 @@ classifiers = [
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "pydantic>=2.7,<3",
-    "aiosqlite>=0.20",
+    # SqliteStore relies on aiosqlite running calls on one connection in the
+    # order they were made (rollback after BEGIN, see _transaction). Tested
+    # with 0.22; widen only after re-running tests/unit/test_store_concurrency.py.
+    "aiosqlite>=0.22,<0.23",
     "anyio>=4.4",
     "httpx>=0.28.1",
     "numpy>=2.4.4",

@@ -31,6 +31,7 @@ GOVERNANCE_METHODS = {
     "_erase_in_tx",  # finds what to delete
     "_match_scope",  # writes content_matches rows (hides more), returns nothing
     "_lift_candidates",  # ids a tombstone may be hiding; returns ids only
+    "_check_owner",  # which scope owns an id; raises or returns nothing
     "explain",  # returns status and provenance, never text
 }
 

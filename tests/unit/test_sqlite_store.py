@@ -176,6 +176,8 @@ async def test_record_access_increments_count(store: SqliteStore, acme_alice: Sc
     await store.upsert_fact(f)
     await store.record_access(f.id)
     await store.record_access(f.id)
+    # Access counts are queued so recall() never waits on the write lock.
+    await store.flush_access()
     got = await store.get_fact(f.id, acme_alice)
     assert got is not None
     assert got.access_count == 2

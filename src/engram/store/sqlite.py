@@ -80,6 +80,45 @@ def _schema_statements() -> tuple[list[str], list[str]]:
     return pragmas, statements
 
 
+def _is_private_memory(path: str | Path) -> bool:
+    """True for databases a second connection cannot open (in-memory, temporary)."""
+    text = str(path)
+    return text in ("", ":memory:") or "mode=memory" in text
+
+
+async def _shielded_rollback(conn: aiosqlite.Connection) -> None:
+    """Roll back, even if the caller is cancelled again while waiting.
+
+    If a second cancellation interrupts the wait, the rollback still runs in
+    aiosqlite's queue; its outcome is logged from a done-callback instead of
+    surfacing later as an unretrieved task exception.
+    """
+    future = asyncio.ensure_future(conn.rollback())
+
+    def log_failure(done: asyncio.Future[None]) -> None:
+        if not done.cancelled() and done.exception() is not None:
+            logger.error("rollback failed", exc_info=done.exception())
+
+    future.add_done_callback(log_failure)
+    try:
+        await asyncio.shield(future)
+    except Exception:
+        pass  # already logged by log_failure
+
+
+def _quote_rows(
+    items: Sequence[tuple[str, str, str]], revoked: Sequence[tuple[str, str]]
+) -> list[tuple[str, str, str]]:
+    """(kind, item_id, revocation_id) for every item whose text quotes a revoked text."""
+    rows: list[tuple[str, str, str]] = []
+    for kind, item_id, text in items:
+        norm = normalize_text(text)
+        rows.extend(
+            (kind, item_id, rev_id) for rev_id, rev_norm in revoked if quotes(norm, rev_norm)
+        )
+    return rows
+
+
 def _ids_json(ids: Collection[str]) -> str:
     """Bind a set of ids as one parameter: `x IN (SELECT value FROM json_each(?))`."""
     return json.dumps(sorted(ids))
@@ -98,13 +137,25 @@ def _parse_dt(s: str | None) -> datetime | None:
 class SqliteStore:
     """Async SQLite + FTS5 store. Open with `await SqliteStore.open(path)`."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self, conn: aiosqlite.Connection, read_conn: aiosqlite.Connection | None = None
+    ) -> None:
+        # Writes go through `_conn`, one transaction at a time (see
+        # _transaction). Reads go through `_reading()`: a second connection for
+        # file databases, which in WAL mode only ever sees committed data, or,
+        # for an in-memory database, the write connection under the same lock.
         self._conn = conn
+        self._rconn = read_conn
         self._fts_secure_delete = False
-        # One Engram shares one connection across tasks, and SQLite has one
-        # transaction per connection. Every write transaction holds this lock
-        # (see _transaction), so two tasks never interleave inside one.
+        # One Engram shares its connections across tasks, and SQLite has one
+        # transaction per connection. Every write transaction holds this lock,
+        # so two tasks never interleave inside one.
         self._write_lock = asyncio.Lock()
+        self._lock_owner: asyncio.Task[Any] | None = None
+        # Access counts are advisory, so they are queued and applied in their
+        # own short transaction instead of making recall() wait for the lock.
+        self._pending_access: dict[str, tuple[int, str | None]] = {}
+        self._access_task: asyncio.Task[None] | None = None
 
     @classmethod
     async def open(cls, path: str | Path) -> SqliteStore:
@@ -132,14 +183,24 @@ class SqliteStore:
                 )
                 await conn.commit()
             except BaseException:
-                await asyncio.shield(conn.rollback())
+                await _shielded_rollback(conn)
                 raise
         except BaseException:
             await conn.close()
             raise
-        store = cls(conn)
-        store._fts_secure_delete = await store._enable_fts_secure_delete()
-        await store._backfill_fact_meta()
+        read_conn: aiosqlite.Connection | None = None
+        if not _is_private_memory(path):
+            read_conn = await aiosqlite.connect(str(path))
+            read_conn.row_factory = aiosqlite.Row
+            # Fail closed if a write is ever routed to the read connection.
+            await read_conn.execute("PRAGMA query_only = ON")
+        store = cls(conn, read_conn)
+        try:
+            store._fts_secure_delete = await store._enable_fts_secure_delete()
+            await store._backfill_fact_meta()
+        except BaseException:
+            await store.close()
+            raise
         return store
 
     @asynccontextmanager
@@ -156,16 +217,38 @@ class SqliteStore:
         the start of the body cannot go stale under another process's write.
         """
         async with self._write_lock:
+            self._lock_owner = asyncio.current_task()
             try:
                 await self._conn.execute("BEGIN IMMEDIATE")
                 yield
                 await self._conn.commit()
             except BaseException:
-                try:
-                    await asyncio.shield(self._conn.rollback())
-                except Exception:  # keep the original error
-                    logger.exception("rollback failed")
+                await _shielded_rollback(self._conn)
                 raise
+            finally:
+                self._lock_owner = None
+
+    @asynccontextmanager
+    async def _reading(self) -> AsyncIterator[aiosqlite.Connection]:
+        """A connection that shows only committed data, for one read.
+
+        Inside this task's own write transaction (or an enclosing read on an
+        in-memory database), the write connection, so a write sees its own
+        rows. Otherwise the read connection, or, for an in-memory database,
+        the write connection once no write transaction is open.
+        """
+        task = asyncio.current_task()
+        if task is not None and self._lock_owner is task:
+            yield self._conn
+        elif self._rconn is not None:
+            yield self._rconn
+        else:
+            async with self._write_lock:
+                self._lock_owner = task
+                try:
+                    yield self._conn
+                finally:
+                    self._lock_owner = None
 
     @staticmethod
     async def _refuse_newer_schema(conn: aiosqlite.Connection, path: str | Path) -> None:
@@ -219,8 +302,11 @@ class SqliteStore:
                 )
 
     async def close(self) -> None:
+        await self.flush_access()
         # Wait for an in-flight write transaction rather than cut it off.
         async with self._write_lock:
+            if self._rconn is not None:
+                await self._rconn.close()
             await self._conn.close()
 
     async def __aenter__(self) -> SqliteStore:
@@ -267,6 +353,18 @@ class SqliteStore:
                     raise NotFoundError(
                         f"source message {fact.source_message_id} not found in scope"
                     )
+                # Side rows first: the content hash (equality tombstones), the
+                # derivation links and any new quote matches exist before the
+                # row they hide, and stale matches go only after it changes.
+                await self._check_owner("fact", str(fact.id), fact.scope)
+                await self._write_fact_meta(fact, writer=writer, source=source)
+                if sources:
+                    await self._conn.executemany(
+                        "INSERT OR IGNORE INTO fact_derivations (fact_id, source_fact_id) "
+                        "VALUES (?,?)",
+                        [(str(fact.id), str(s)) for s in sources],
+                    )
+                keep = await self._add_matches("fact", str(fact.id), fact.text, fact.scope)
                 cur = await self._conn.execute(
                     """
                     INSERT INTO facts (
@@ -327,14 +425,7 @@ class SqliteStore:
                 if cur.rowcount == 0:
                     # The id exists in another scope: the conditional update did nothing.
                     raise ScopeError(f"fact {fact.id} belongs to another scope")
-                await self._write_fact_meta(fact, writer=writer, source=source)
-                await self._match_item("fact", str(fact.id), fact.text, fact.scope)
-                if sources:
-                    await self._conn.executemany(
-                        "INSERT OR IGNORE INTO fact_derivations (fact_id, source_fact_id) "
-                        "VALUES (?,?)",
-                        [(str(fact.id), str(s)) for s in sources],
-                    )
+                await self._drop_stale_matches("fact", str(fact.id), keep)
         except aiosqlite.Error as e:
             raise StoreError(f"upsert_fact: {e}") from e
 
@@ -358,37 +449,57 @@ class SqliteStore:
         )
 
     async def _message_in_scope(self, message_id: UUID, scope: Scope) -> bool:
-        async with self._conn.execute(
-            "SELECT 1 FROM messages WHERE id = ? AND org_id = ? AND user_id = ?",
-            (str(message_id), scope.org_id, scope.user_id),
-        ) as cur:
-            return await cur.fetchone() is not None
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT 1 FROM messages WHERE id = ? AND org_id = ? AND user_id = ?",
+                (str(message_id), scope.org_id, scope.user_id),
+            ) as cur:
+                return await cur.fetchone() is not None
 
     async def _active_revoked_norms(self, scope: Scope) -> list[tuple[str, str]]:
-        async with self._conn.execute(
-            """SELECT id, content_norm FROM revocations
-                WHERE org_id = ? AND user_id = ? AND reinstated_at IS NULL
-                  AND content_norm IS NOT NULL""",
-            (scope.org_id, scope.user_id),
-        ) as cur:
-            return [(r["id"], r["content_norm"]) for r in await cur.fetchall()]
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT id, content_norm FROM revocations
+                    WHERE org_id = ? AND user_id = ? AND reinstated_at IS NULL
+                      AND content_norm IS NOT NULL""",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                return [(r["id"], r["content_norm"]) for r in await cur.fetchall()]
 
-    async def _match_item(self, kind: str, item_id: str, text: str, scope: Scope) -> None:
-        """Record which active revocations this item's text quotes. No commit."""
-        await self._conn.execute(
-            "DELETE FROM content_matches WHERE kind = ? AND item_id = ?", (kind, item_id)
-        )
+    async def _check_owner(self, kind: str, item_id: str, scope: Scope) -> None:
+        """Raise ScopeError if this id already belongs to another scope. No text."""
+        sql = {
+            "fact": "SELECT org_id, user_id FROM facts WHERE id = ?",
+            "message": "SELECT org_id, user_id FROM messages WHERE id = ?",
+            "event": "SELECT org_id, user_id FROM events WHERE id = ?",
+        }[kind]
+        async with self._conn.execute(sql, (item_id,)) as cur:
+            row = await cur.fetchone()
+        if row is not None and (row["org_id"], row["user_id"]) != (scope.org_id, scope.user_id):
+            raise ScopeError(f"{kind} {item_id} belongs to another scope")
+
+    async def _add_matches(self, kind: str, item_id: str, text: str, scope: Scope) -> set[str]:
+        """Record which active revocations this text quotes; return their ids. No commit."""
         norm = normalize_text(text)
-        rows = [
-            (kind, item_id, rev_id)
+        matched = {
+            rev_id
             for rev_id, rev_norm in await self._active_revoked_norms(scope)
             if quotes(norm, rev_norm)
-        ]
-        if rows:
+        }
+        if matched:
             await self._conn.executemany(
-                _INSERT_MATCH,
-                rows,
+                _INSERT_MATCH, [(kind, item_id, rev_id) for rev_id in matched]
             )
+        return matched
+
+    async def _drop_stale_matches(self, kind: str, item_id: str, keep: Collection[str]) -> None:
+        """Remove match rows the item's new text no longer earns. No commit."""
+        await self._conn.execute(
+            """DELETE FROM content_matches
+                WHERE kind = ? AND item_id = ?
+                  AND revocation_id NOT IN (SELECT value FROM json_each(?))""",
+            (kind, item_id, _ids_json(keep)),
+        )
 
     @staticmethod
     def _event_text(event: Event) -> str:
@@ -398,69 +509,74 @@ class SqliteStore:
 
     async def derivation_targets_in_scope(self, ids: Iterable[UUID], scope: Scope) -> set[UUID]:
         """Which of ``ids`` exist in ``scope`` (visible or not). Returns ids only."""
-        wanted = [str(i) for i in ids]
-        if not wanted:
-            return set()
-        placeholders = ",".join("?" * len(wanted))
-        async with self._conn.execute(
-            f"SELECT id FROM facts WHERE org_id=? AND user_id=? AND id IN ({placeholders})",
-            (scope.org_id, scope.user_id, *wanted),
-        ) as cur:
-            rows = await cur.fetchall()
-        return {UUID(r["id"]) for r in rows}
+        async with self._reading() as db:
+            wanted = [str(i) for i in ids]
+            if not wanted:
+                return set()
+            placeholders = ",".join("?" * len(wanted))
+            async with db.execute(
+                f"SELECT id FROM facts WHERE org_id=? AND user_id=? AND id IN ({placeholders})",
+                (scope.org_id, scope.user_id, *wanted),
+            ) as cur:
+                rows = await cur.fetchall()
+            return {UUID(r["id"]) for r in rows}
 
     async def get_fact(self, fact_id: UUID, scope: Scope) -> Fact | None:
-        async with self._conn.execute(
-            "SELECT * FROM live_facts WHERE id=? AND org_id=? AND user_id=?",
-            (str(fact_id), scope.org_id, scope.user_id),
-        ) as cur:
-            row = await cur.fetchone()
-        return self._row_to_fact(row) if row else None
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT * FROM live_facts WHERE id=? AND org_id=? AND user_id=?",
+                (str(fact_id), scope.org_id, scope.user_id),
+            ) as cur:
+                row = await cur.fetchone()
+            return self._row_to_fact(row) if row else None
 
     async def get_facts(self, fact_ids: Iterable[UUID], scope: Scope) -> list[Fact]:
         """Batch form of :meth:`get_fact`: one visibility evaluation for many ids."""
-        wanted = [str(i) for i in fact_ids]
-        if not wanted:
-            return []
-        placeholders = ",".join("?" * len(wanted))
-        async with self._conn.execute(
-            f"SELECT * FROM live_facts WHERE org_id=? AND user_id=? AND id IN ({placeholders})",
-            (scope.org_id, scope.user_id, *wanted),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [self._row_to_fact(r) for r in rows]
+        async with self._reading() as db:
+            wanted = [str(i) for i in fact_ids]
+            if not wanted:
+                return []
+            placeholders = ",".join("?" * len(wanted))
+            async with db.execute(
+                f"SELECT * FROM live_facts WHERE org_id=? AND user_id=? AND id IN ({placeholders})",
+                (scope.org_id, scope.user_id, *wanted),
+            ) as cur:
+                rows = await cur.fetchall()
+            return [self._row_to_fact(r) for r in rows]
 
     async def list_facts_by_session(
         self, session_id: str, scope: Scope, limit: int = 100
     ) -> list[Fact]:
-        async with self._conn.execute(
-            """SELECT * FROM live_facts
-               WHERE org_id=? AND user_id=? AND session_id=?
-               ORDER BY valid_from DESC LIMIT ?""",
-            (scope.org_id, scope.user_id, session_id, limit),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [self._row_to_fact(r) for r in rows]
-
-    async def keyword_search(self, query: str, scope: Scope, limit: int = 30) -> list[Fact]:
-        sanitized = self._sanitize_fts(query)
-        if not sanitized:
-            return []
-        try:
-            async with self._conn.execute(
-                """SELECT live_facts.*, bm25(facts_fts) AS rank
-                   FROM facts_fts
-                   JOIN live_facts ON live_facts.fact_rowid = facts_fts.rowid
-                   WHERE facts_fts MATCH ?
-                     AND facts_fts.org_id = ?
-                     AND facts_fts.user_id = ?
-                   ORDER BY rank LIMIT ?""",
-                (sanitized, scope.org_id, scope.user_id, limit),
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT * FROM live_facts
+                   WHERE org_id=? AND user_id=? AND session_id=?
+                   ORDER BY valid_from DESC LIMIT ?""",
+                (scope.org_id, scope.user_id, session_id, limit),
             ) as cur:
                 rows = await cur.fetchall()
             return [self._row_to_fact(r) for r in rows]
-        except aiosqlite.Error as e:
-            raise StoreError(f"keyword_search: {e}") from e
+
+    async def keyword_search(self, query: str, scope: Scope, limit: int = 30) -> list[Fact]:
+        async with self._reading() as db:
+            sanitized = self._sanitize_fts(query)
+            if not sanitized:
+                return []
+            try:
+                async with db.execute(
+                    """SELECT live_facts.*, bm25(facts_fts) AS rank
+                       FROM facts_fts
+                       JOIN live_facts ON live_facts.fact_rowid = facts_fts.rowid
+                       WHERE facts_fts MATCH ?
+                         AND facts_fts.org_id = ?
+                         AND facts_fts.user_id = ?
+                       ORDER BY rank LIMIT ?""",
+                    (sanitized, scope.org_id, scope.user_id, limit),
+                ) as cur:
+                    rows = await cur.fetchall()
+                return [self._row_to_fact(r) for r in rows]
+            except aiosqlite.Error as e:
+                raise StoreError(f"keyword_search: {e}") from e
 
     @staticmethod
     def _sanitize_fts(q: str) -> str:
@@ -476,54 +592,83 @@ class SqliteStore:
         the FTS5 virtual table — joining or CTE-wrapping breaks it. So we do
         FTS5 + scoring in one query, then aggregate in Python.
         """
-        sanitized = self._sanitize_fts(query)
-        if not sanitized:
-            return []
-        try:
-            async with self._conn.execute(
-                """SELECT rowid, -bm25(facts_fts) AS row_score
-                   FROM facts_fts
-                   WHERE facts_fts MATCH ?
-                     AND facts_fts.org_id = ?
-                     AND facts_fts.user_id = ?""",
-                (sanitized, scope.org_id, scope.user_id),
-            ) as cur:
-                rows = await cur.fetchall()
-            if not rows:
+        async with self._reading() as db:
+            sanitized = self._sanitize_fts(query)
+            if not sanitized:
                 return []
-            # Now join to facts to get session_id (fts rowid == facts rowid)
-            row_scores = {int(r["rowid"]): float(r["row_score"]) for r in rows}
-            placeholders = ",".join("?" * len(row_scores))
-            async with self._conn.execute(
-                f"SELECT fact_rowid AS rowid, session_id FROM live_facts "
-                f"WHERE fact_rowid IN ({placeholders})",
-                tuple(row_scores.keys()),
-            ) as cur:
-                fact_rows = await cur.fetchall()
-        except aiosqlite.Error as e:
-            raise StoreError(f"aggregate_sessions: {e}") from e
+            try:
+                async with db.execute(
+                    """SELECT rowid, -bm25(facts_fts) AS row_score
+                       FROM facts_fts
+                       WHERE facts_fts MATCH ?
+                         AND facts_fts.org_id = ?
+                         AND facts_fts.user_id = ?""",
+                    (sanitized, scope.org_id, scope.user_id),
+                ) as cur:
+                    rows = await cur.fetchall()
+                if not rows:
+                    return []
+                # Now join to facts to get session_id (fts rowid == facts rowid)
+                row_scores = {int(r["rowid"]): float(r["row_score"]) for r in rows}
+                placeholders = ",".join("?" * len(row_scores))
+                async with db.execute(
+                    f"SELECT fact_rowid AS rowid, session_id FROM live_facts "
+                    f"WHERE fact_rowid IN ({placeholders})",
+                    tuple(row_scores.keys()),
+                ) as cur:
+                    fact_rows = await cur.fetchall()
+            except aiosqlite.Error as e:
+                raise StoreError(f"aggregate_sessions: {e}") from e
 
-        # Aggregate by session_id, skipping null
-        agg: dict[str, float] = {}
-        for fr in fact_rows:
-            sid = fr["session_id"]
-            if sid is None:
-                continue
-            agg[sid] = agg.get(sid, 0.0) + row_scores[int(fr["rowid"])]
-        ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)
-        return ranked[:top_sessions]
+            # Aggregate by session_id, skipping null
+            agg: dict[str, float] = {}
+            for fr in fact_rows:
+                sid = fr["session_id"]
+                if sid is None:
+                    continue
+                agg[sid] = agg.get(sid, 0.0) + row_scores[int(fr["rowid"])]
+            ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)
+            return ranked[:top_sessions]
 
     async def record_access(self, fact_id: UUID) -> None:
-        async with self._transaction():
-            await self._conn.execute(
-                "UPDATE facts SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                (_dt(datetime.now().astimezone()), str(fact_id)),
-            )
+        """Count a read of this fact. Applied shortly after, in its own transaction.
+
+        Queued so a recall() never waits behind a long write; call
+        flush_access() when the counts must be on disk now.
+        """
+        key = str(fact_id)
+        count, _ = self._pending_access.get(key, (0, None))
+        self._pending_access[key] = (count + 1, _dt(datetime.now().astimezone()))
+        if self._access_task is None or self._access_task.done():
+            self._access_task = asyncio.create_task(self._apply_access())
+
+    async def _apply_access(self) -> None:
+        while self._pending_access:
+            batch, self._pending_access = self._pending_access, {}
+            try:
+                async with self._transaction():
+                    await self._conn.executemany(
+                        """UPDATE facts
+                              SET access_count = access_count + ?, last_accessed = ?
+                            WHERE id = ?""",
+                        [(n, at, fid) for fid, (n, at) in batch.items()],
+                    )
+            except aiosqlite.Error:
+                logger.exception("could not record access counts; dropped %d", len(batch))
+
+    async def flush_access(self) -> None:
+        """Wait until every queued access count is written."""
+        while self._access_task is not None and not self._access_task.done():
+            await asyncio.shield(self._access_task)
 
     # ── Messages ─────────────────────────────────────────────────────────
 
     async def upsert_message(self, message: ChatMessage) -> None:
         async with self._transaction():
+            await self._check_owner("message", str(message.id), message.scope)
+            keep = await self._add_matches(
+                "message", str(message.id), message.content, message.scope
+            )
             cur = await self._conn.execute(
                 """INSERT INTO messages (
                     id, org_id, user_id, session_id, role, content, timestamp, metadata
@@ -548,13 +693,17 @@ class SqliteStore:
             )
             if cur.rowcount == 0:
                 raise ScopeError(f"message {message.id} belongs to another scope")
-            await self._match_item("message", str(message.id), message.content, message.scope)
+            await self._drop_stale_matches("message", str(message.id), keep)
 
     # ── Events (Phase 11) ────────────────────────────────────────────────
 
     async def upsert_event(self, event: Event) -> None:
         try:
             async with self._transaction():
+                await self._check_owner("event", str(event.id), event.scope)
+                keep = await self._add_matches(
+                    "event", str(event.id), self._event_text(event), event.scope
+                )
                 cur = await self._conn.execute(
                     """INSERT INTO events (
                         id, org_id, user_id, subject_canonical, verb, object_canonical,
@@ -588,17 +737,18 @@ class SqliteStore:
                 )
                 if cur.rowcount == 0:
                     raise ScopeError(f"event {event.id} belongs to another scope")
-                await self._match_item("event", str(event.id), self._event_text(event), event.scope)
+                await self._drop_stale_matches("event", str(event.id), keep)
         except aiosqlite.Error as e:
             raise StoreError(f"upsert_event: {e}") from e
 
     async def get_event(self, event_id: UUID, scope: Scope) -> Event | None:
-        async with self._conn.execute(
-            "SELECT * FROM live_events WHERE id=? AND org_id=? AND user_id=?",
-            (str(event_id), scope.org_id, scope.user_id),
-        ) as cur:
-            row = await cur.fetchone()
-        return self._row_to_event(row) if row else None
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT * FROM live_events WHERE id=? AND org_id=? AND user_id=?",
+                (str(event_id), scope.org_id, scope.user_id),
+            ) as cur:
+                row = await cur.fetchone()
+            return self._row_to_event(row) if row else None
 
     async def search_events(
         self,
@@ -608,66 +758,67 @@ class SqliteStore:
         time_end: datetime | None = None,
         limit: int = 10,
     ) -> list[Event]:
-        sanitized = self._sanitize_fts(query) if query else ""
-        try:
-            if sanitized:
-                # Step 1: FTS5 (bm25 only valid against the FTS5 table directly)
-                async with self._conn.execute(
-                    """SELECT rowid, -bm25(events_fts) AS score
-                       FROM events_fts
-                       WHERE events_fts MATCH ?
-                         AND events_fts.org_id = ?
-                         AND events_fts.user_id = ?""",
-                    (sanitized, scope.org_id, scope.user_id),
-                ) as cur:
-                    fts_rows = await cur.fetchall()
-                if not fts_rows:
-                    return []
-                row_scores = {int(r["rowid"]): float(r["score"]) for r in fts_rows}
+        async with self._reading() as db:
+            sanitized = self._sanitize_fts(query) if query else ""
+            try:
+                if sanitized:
+                    # Step 1: FTS5 (bm25 only valid against the FTS5 table directly)
+                    async with db.execute(
+                        """SELECT rowid, -bm25(events_fts) AS score
+                           FROM events_fts
+                           WHERE events_fts MATCH ?
+                             AND events_fts.org_id = ?
+                             AND events_fts.user_id = ?""",
+                        (sanitized, scope.org_id, scope.user_id),
+                    ) as cur:
+                        fts_rows = await cur.fetchall()
+                    if not fts_rows:
+                        return []
+                    row_scores = {int(r["rowid"]): float(r["score"]) for r in fts_rows}
 
-                # Step 2: fetch events including their rowids so we can sort in Python
-                placeholders = ",".join("?" * len(row_scores))
-                params: list[object] = [scope.org_id, scope.user_id]
-                params += list(row_scores.keys())
-                clauses = ["org_id=?", "user_id=?", f"event_rowid IN ({placeholders})"]
+                    # Step 2: fetch events including their rowids so we can sort in Python
+                    placeholders = ",".join("?" * len(row_scores))
+                    params: list[object] = [scope.org_id, scope.user_id]
+                    params += list(row_scores.keys())
+                    clauses = ["org_id=?", "user_id=?", f"event_rowid IN ({placeholders})"]
+                    if time_start is not None:
+                        clauses.append("time_start >= ?")
+                        params.append(_dt(time_start))
+                    if time_end is not None:
+                        clauses.append("(time_end IS NULL OR time_end <= ?)")
+                        params.append(_dt(time_end))
+                    sql = (
+                        f"SELECT live_events.*, event_rowid AS _rowid "
+                        f"FROM live_events WHERE {' AND '.join(clauses)} LIMIT ?"
+                    )
+                    params.append(limit * 4)
+                    async with db.execute(sql, params) as cur:
+                        rows = await cur.fetchall()
+                    scored: list[tuple[float, Event]] = [
+                        (row_scores.get(int(r["_rowid"]), 0.0), self._row_to_event(r)) for r in rows
+                    ]
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    return [e for _, e in scored[:limit]]
+
+                # No query: time-window only listing
+                clauses = ["org_id=?", "user_id=?"]
+                params2: list[object] = [scope.org_id, scope.user_id]
                 if time_start is not None:
                     clauses.append("time_start >= ?")
-                    params.append(_dt(time_start))
+                    params2.append(_dt(time_start))
                 if time_end is not None:
                     clauses.append("(time_end IS NULL OR time_end <= ?)")
-                    params.append(_dt(time_end))
+                    params2.append(_dt(time_end))
                 sql = (
-                    f"SELECT live_events.*, event_rowid AS _rowid "
-                    f"FROM live_events WHERE {' AND '.join(clauses)} LIMIT ?"
+                    f"SELECT * FROM live_events WHERE {' AND '.join(clauses)} "
+                    f"ORDER BY time_start DESC LIMIT ?"
                 )
-                params.append(limit * 4)
-                async with self._conn.execute(sql, params) as cur:
+                params2.append(limit)
+                async with db.execute(sql, params2) as cur:
                     rows = await cur.fetchall()
-                scored: list[tuple[float, Event]] = [
-                    (row_scores.get(int(r["_rowid"]), 0.0), self._row_to_event(r)) for r in rows
-                ]
-                scored.sort(key=lambda x: x[0], reverse=True)
-                return [e for _, e in scored[:limit]]
-
-            # No query: time-window only listing
-            clauses = ["org_id=?", "user_id=?"]
-            params2: list[object] = [scope.org_id, scope.user_id]
-            if time_start is not None:
-                clauses.append("time_start >= ?")
-                params2.append(_dt(time_start))
-            if time_end is not None:
-                clauses.append("(time_end IS NULL OR time_end <= ?)")
-                params2.append(_dt(time_end))
-            sql = (
-                f"SELECT * FROM live_events WHERE {' AND '.join(clauses)} "
-                f"ORDER BY time_start DESC LIMIT ?"
-            )
-            params2.append(limit)
-            async with self._conn.execute(sql, params2) as cur:
-                rows = await cur.fetchall()
-            return [self._row_to_event(r) for r in rows]
-        except aiosqlite.Error as e:
-            raise StoreError(f"search_events: {e}") from e
+                return [self._row_to_event(r) for r in rows]
+            except aiosqlite.Error as e:
+                raise StoreError(f"search_events: {e}") from e
 
     @staticmethod
     def _row_to_event(row: aiosqlite.Row) -> Event:
@@ -690,14 +841,15 @@ class SqliteStore:
     async def list_messages(
         self, session_id: str, scope: Scope, limit: int = 1000
     ) -> list[ChatMessage]:
-        async with self._conn.execute(
-            """SELECT * FROM live_messages
-               WHERE org_id=? AND user_id=? AND session_id=?
-               ORDER BY timestamp ASC LIMIT ?""",
-            (scope.org_id, scope.user_id, session_id, limit),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [self._row_to_message(r) for r in rows]
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT * FROM live_messages
+                   WHERE org_id=? AND user_id=? AND session_id=?
+                   ORDER BY timestamp ASC LIMIT ?""",
+                (scope.org_id, scope.user_id, session_id, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+            return [self._row_to_message(r) for r in rows]
 
     # ── Governance: provenance, revocation, erasure ──────────────────────
     #
@@ -712,43 +864,45 @@ class SqliteStore:
         Ids that are hidden (or absent) are left out of the result, so callers
         use this as the last visibility check before returning memories.
         """
-        wanted = [str(i) for i in fact_ids]
-        if not wanted:
-            return {}
-        checked_at = _now()
-        placeholders = ",".join("?" * len(wanted))
-        async with self._conn.execute(
-            f"""SELECT lf.id, lf.session_id, lf.source_message_id, lf.source_event_id,
-                       lf.supersedes, lf.superseded_by,
-                       m.writer, m.source, m.recorded_at
-                  FROM live_facts lf
-                  LEFT JOIN fact_meta m ON m.fact_id = lf.id
-                 WHERE lf.org_id = ? AND lf.user_id = ? AND lf.id IN ({placeholders})""",
-            (scope.org_id, scope.user_id, *wanted),
-        ) as cur:
-            rows = await cur.fetchall()
-        derived = await self._derived_from([r["id"] for r in rows])
-        return {
-            UUID(r["id"]): self._row_to_provenance(
-                r, derived.get(r["id"], []), "active", None, [], checked_at
-            )
-            for r in rows
-        }
+        async with self._reading() as db:
+            wanted = [str(i) for i in fact_ids]
+            if not wanted:
+                return {}
+            checked_at = _now()
+            placeholders = ",".join("?" * len(wanted))
+            async with db.execute(
+                f"""SELECT lf.id, lf.session_id, lf.source_message_id, lf.source_event_id,
+                           lf.supersedes, lf.superseded_by,
+                           m.writer, m.source, m.recorded_at
+                      FROM live_facts lf
+                      LEFT JOIN fact_meta m ON m.fact_id = lf.id
+                     WHERE lf.org_id = ? AND lf.user_id = ? AND lf.id IN ({placeholders})""",
+                (scope.org_id, scope.user_id, *wanted),
+            ) as cur:
+                rows = await cur.fetchall()
+            derived = await self._derived_from([r["id"] for r in rows])
+            return {
+                UUID(r["id"]): self._row_to_provenance(
+                    r, derived.get(r["id"], []), "active", None, [], checked_at
+                )
+                for r in rows
+            }
 
     async def _derived_from(self, ids: list[str]) -> dict[str, list[UUID]]:
-        if not ids:
-            return {}
-        placeholders = ",".join("?" * len(ids))
-        async with self._conn.execute(
-            f"""SELECT fact_id, source_fact_id FROM fact_derivations
-                 WHERE fact_id IN ({placeholders}) ORDER BY rowid""",
-            tuple(ids),
-        ) as cur:
-            rows = await cur.fetchall()
-        out: dict[str, list[UUID]] = {}
-        for r in rows:
-            out.setdefault(r["fact_id"], []).append(UUID(r["source_fact_id"]))
-        return out
+        async with self._reading() as db:
+            if not ids:
+                return {}
+            placeholders = ",".join("?" * len(ids))
+            async with db.execute(
+                f"""SELECT fact_id, source_fact_id FROM fact_derivations
+                     WHERE fact_id IN ({placeholders}) ORDER BY rowid""",
+                tuple(ids),
+            ) as cur:
+                rows = await cur.fetchall()
+            out: dict[str, list[UUID]] = {}
+            for r in rows:
+                out.setdefault(r["fact_id"], []).append(UUID(r["source_fact_id"]))
+            return out
 
     @staticmethod
     def _row_to_provenance(
@@ -778,94 +932,100 @@ class SqliteStore:
 
     async def explain(self, fact_id: UUID, scope: Scope) -> Provenance | None:
         """Provenance and revocation status for one fact, visible or not. No text."""
-        checked_at = _now()
-        async with self._conn.execute(
-            """SELECT f.id, f.session_id, f.source_message_id, f.source_event_id,
-                      f.supersedes, f.superseded_by,
-                      m.writer, m.source, m.recorded_at,
-                      EXISTS (SELECT 1 FROM hidden_facts h WHERE h.id = f.id) AS hidden
-                 FROM facts f
-                 LEFT JOIN fact_meta m ON m.fact_id = f.id
-                WHERE f.id = ? AND f.org_id = ? AND f.user_id = ?""",
-            (str(fact_id), scope.org_id, scope.user_id),
-        ) as cur:
-            row = await cur.fetchone()
-        if row is None:
-            return None
-        derived = await self._derived_from([row["id"]])
-        if not row["hidden"]:
+        async with self._reading() as db:
+            checked_at = _now()
+            async with db.execute(
+                """SELECT f.id, f.session_id, f.source_message_id, f.source_event_id,
+                          f.supersedes, f.superseded_by,
+                          m.writer, m.source, m.recorded_at,
+                          EXISTS (SELECT 1 FROM hidden_facts h WHERE h.id = f.id) AS hidden
+                     FROM facts f
+                     LEFT JOIN fact_meta m ON m.fact_id = f.id
+                    WHERE f.id = ? AND f.org_id = ? AND f.user_id = ?""",
+                (str(fact_id), scope.org_id, scope.user_id),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                return None
+            derived = await self._derived_from([row["id"]])
+            if not row["hidden"]:
+                return self._row_to_provenance(
+                    row, derived.get(row["id"], []), "active", None, [], checked_at
+                )
+            reason, by = await self._hidden_reason(fact_id)
             return self._row_to_provenance(
-                row, derived.get(row["id"], []), "active", None, [], checked_at
+                row, derived.get(row["id"], []), "revoked", reason, by, checked_at
             )
-        reason, by = await self._hidden_reason(fact_id)
-        return self._row_to_provenance(
-            row, derived.get(row["id"], []), "revoked", reason, by, checked_at
-        )
 
     async def _hidden_reason(self, fact_id: UUID) -> tuple[HiddenReason, list[UUID]]:
-        fid = str(fact_id)
-        async with self._conn.execute(
-            """SELECT id FROM revocations
-                WHERE fact_id = ? AND reinstated_at IS NULL ORDER BY revoked_at""",
-            (fid,),
-        ) as cur:
-            direct = [UUID(r["id"]) for r in await cur.fetchall()]
-        if direct:
-            return "revoked", direct
-        async with self._conn.execute(
-            """SELECT r.id FROM revocations r
-                WHERE r.reinstated_at IS NULL
-                  AND (r.id IN (SELECT revocation_id FROM content_matches
-                                 WHERE kind = 'fact' AND item_id = ?)
-                       OR EXISTS (SELECT 1 FROM fact_meta m
-                                   WHERE m.fact_id = ? AND m.content_hash = r.content_hash
-                                     AND m.org_id = r.org_id AND m.user_id = r.user_id))
-                ORDER BY r.revoked_at""",
-            (fid, fid),
-        ) as cur:
-            by_content = [UUID(r["id"]) for r in await cur.fetchall()]
-        if by_content:
-            return "content_tombstone", by_content
-        async with self._conn.execute(
-            """WITH RECURSIVE anc(id) AS (
-                   SELECT source_fact_id FROM fact_derivations WHERE fact_id = ?
-                   UNION
-                   SELECT d.source_fact_id FROM fact_derivations d JOIN anc ON d.fact_id = anc.id
-               )
-               SELECT DISTINCT r.id, r.revoked_at FROM revocations r
-                WHERE r.reinstated_at IS NULL
-                  AND (r.fact_id IN (SELECT id FROM anc)
-                       OR r.id IN (SELECT revocation_id FROM content_matches
-                                    WHERE kind = 'fact' AND item_id IN (SELECT id FROM anc))
-                       OR EXISTS (SELECT 1 FROM fact_meta m
-                                   WHERE m.fact_id IN (SELECT id FROM anc)
-                                     AND m.content_hash = r.content_hash
-                                     AND m.org_id = r.org_id AND m.user_id = r.user_id))
-                ORDER BY r.revoked_at""",
-            (fid,),
-        ) as cur:
-            via = [UUID(r["id"]) for r in await cur.fetchall()]
-        return "derived_from_revoked", via
+        async with self._reading() as db:
+            fid = str(fact_id)
+            async with db.execute(
+                """SELECT id FROM revocations
+                    WHERE fact_id = ? AND reinstated_at IS NULL ORDER BY revoked_at""",
+                (fid,),
+            ) as cur:
+                direct = [UUID(r["id"]) for r in await cur.fetchall()]
+            if direct:
+                return "revoked", direct
+            async with db.execute(
+                """SELECT r.id FROM revocations r
+                    WHERE r.reinstated_at IS NULL
+                      AND (r.id IN (SELECT revocation_id FROM content_matches
+                                     WHERE kind = 'fact' AND item_id = ?)
+                           OR EXISTS (SELECT 1 FROM fact_meta m
+                                       WHERE m.fact_id = ? AND m.content_hash = r.content_hash
+                                         AND m.org_id = r.org_id AND m.user_id = r.user_id))
+                    ORDER BY r.revoked_at""",
+                (fid, fid),
+            ) as cur:
+                by_content = [UUID(r["id"]) for r in await cur.fetchall()]
+            if by_content:
+                return "content_tombstone", by_content
+            async with db.execute(
+                """WITH RECURSIVE anc(id) AS (
+                       SELECT source_fact_id FROM fact_derivations WHERE fact_id = ?
+                       UNION
+                       SELECT d.source_fact_id
+                         FROM fact_derivations d JOIN anc ON d.fact_id = anc.id
+                   )
+                   SELECT DISTINCT r.id, r.revoked_at FROM revocations r
+                    WHERE r.reinstated_at IS NULL
+                      AND (r.fact_id IN (SELECT id FROM anc)
+                           OR r.id IN (SELECT revocation_id FROM content_matches
+                                        WHERE kind = 'fact' AND item_id IN (SELECT id FROM anc))
+                           OR EXISTS (SELECT 1 FROM fact_meta m
+                                       WHERE m.fact_id IN (SELECT id FROM anc)
+                                         AND m.content_hash = r.content_hash
+                                         AND m.org_id = r.org_id AND m.user_id = r.user_id))
+                    ORDER BY r.revoked_at""",
+                (fid,),
+            ) as cur:
+                via = [UUID(r["id"]) for r in await cur.fetchall()]
+            return "derived_from_revoked", via
 
     async def _governance_fact(self, fact_id: UUID, scope: Scope) -> Fact | None:
         """Unfiltered lookup for governance operations inside this class only."""
-        async with self._conn.execute(
-            "SELECT * FROM facts WHERE id=? AND org_id=? AND user_id=?",
-            (str(fact_id), scope.org_id, scope.user_id),
-        ) as cur:
-            row = await cur.fetchone()
-        return self._row_to_fact(row) if row else None
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT * FROM facts WHERE id=? AND org_id=? AND user_id=?",
+                (str(fact_id), scope.org_id, scope.user_id),
+            ) as cur:
+                row = await cur.fetchone()
+            return self._row_to_fact(row) if row else None
 
     async def fact_exists(self, fact_id: UUID, scope: Scope) -> bool:
         return await self.explain(fact_id, scope) is not None
 
     async def content_hash_of(self, fact_id: UUID, scope: Scope) -> str | None:
-        async with self._conn.execute(
-            "SELECT content_hash FROM fact_meta WHERE fact_id = ? AND org_id = ? AND user_id = ?",
-            (str(fact_id), scope.org_id, scope.user_id),
-        ) as cur:
-            row = await cur.fetchone()
-        return str(row["content_hash"]) if row else None
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT content_hash FROM fact_meta
+                    WHERE fact_id = ? AND org_id = ? AND user_id = ?""",
+                (str(fact_id), scope.org_id, scope.user_id),
+            ) as cur:
+                row = await cur.fetchone()
+            return str(row["content_hash"]) if row else None
 
     async def is_content_revoked(self, text: str, scope: Scope) -> bool:
         """Would this text be withheld by an active tombstone in scope?
@@ -874,28 +1034,30 @@ class SqliteStore:
         tombstones whose text was erased but whose hash was kept), or quotes a
         revoked text long enough for containment to count.
         """
-        norm = normalize_text(text)
-        if not norm:
-            return False
-        async with self._conn.execute(
-            """SELECT 1 FROM revocations
-                WHERE org_id = ? AND user_id = ? AND content_hash = ?
-                  AND reinstated_at IS NULL LIMIT 1""",
-            (scope.org_id, scope.user_id, content_hash(text)),
-        ) as cur:
-            if await cur.fetchone() is not None:
-                return True
-        return any(quotes(norm, rev) for _, rev in await self._active_revoked_norms(scope))
+        async with self._reading() as db:
+            norm = normalize_text(text)
+            if not norm:
+                return False
+            async with db.execute(
+                """SELECT 1 FROM revocations
+                    WHERE org_id = ? AND user_id = ? AND content_hash = ?
+                      AND reinstated_at IS NULL LIMIT 1""",
+                (scope.org_id, scope.user_id, content_hash(text)),
+            ) as cur:
+                if await cur.fetchone() is not None:
+                    return True
+            return any(quotes(norm, rev) for _, rev in await self._active_revoked_norms(scope))
 
     async def hidden_fact_ids(self, scope: Scope) -> set[UUID]:
         """Ids of facts in scope that are currently withheld. Ids only."""
-        async with self._conn.execute(
-            """SELECT f.id FROM facts f
-                WHERE f.org_id = ? AND f.user_id = ?
-                  AND f.id IN (SELECT id FROM hidden_facts)""",
-            (scope.org_id, scope.user_id),
-        ) as cur:
-            return {UUID(r["id"]) for r in await cur.fetchall()}
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT f.id FROM facts f
+                    WHERE f.org_id = ? AND f.user_id = ?
+                      AND f.id IN (SELECT id FROM hidden_facts)""",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                return {UUID(r["id"]) for r in await cur.fetchall()}
 
     async def revoke(
         self,
@@ -1015,14 +1177,7 @@ class SqliteStore:
         """
         if not revoked:
             return
-        rows: list[tuple[str, str, str]] = []
-
-        def match(kind: str, item_id: str, text: str) -> None:
-            norm = normalize_text(text)
-            rows.extend(
-                (kind, item_id, rev_id) for rev_id, rev_norm in revoked if quotes(norm, rev_norm)
-            )
-
+        items: list[tuple[str, str, str]] = []
         sc = (scope.org_id, scope.user_id)
         only = " AND id IN (SELECT value FROM json_each(?))"
         scans = (
@@ -1041,9 +1196,12 @@ class SqliteStore:
             async with self._conn.execute(sql if ids is None else sql + only, params) as cur:
                 for r in await cur.fetchall():
                     if kind == "event":
-                        match(kind, r["id"], self._event_text(self._row_to_event(r)))
+                        items.append((kind, r["id"], self._event_text(self._row_to_event(r))))
                     else:
-                        match(kind, r["id"], r["body"])
+                        items.append((kind, r["id"], r["body"]))
+        # Normalizing and matching a whole scope is CPU work (about a second at
+        # 20k facts); run it in a thread so the event loop keeps serving reads.
+        rows = await asyncio.to_thread(_quote_rows, items, list(revoked))
         if rows:
             await self._conn.executemany(_INSERT_MATCH, rows)
 
@@ -1160,31 +1318,33 @@ class SqliteStore:
                 )
         except aiosqlite.Error as e:
             raise StoreError(f"reinstate: {e}") from e
-        async with self._conn.execute(
-            "SELECT * FROM revocations WHERE id IN (SELECT value FROM json_each(?))",
-            (_ids_json(lifted_ids),),
-        ) as cur:
-            lifted = [self._row_to_revocation(r) for r in await cur.fetchall()]
-        # Everything that is visible again, including facts derived from the
-        # reinstated one, so the caller can restore their vectors.
-        async with self._conn.execute(
-            """SELECT * FROM live_facts
-                WHERE org_id = ? AND user_id = ? AND id IN (SELECT value FROM json_each(?))""",
-            (scope.org_id, scope.user_id, _ids_json(facts)),
-        ) as cur:
-            visible = [self._row_to_fact(r) for r in await cur.fetchall()]
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT * FROM revocations WHERE id IN (SELECT value FROM json_each(?))",
+                (_ids_json(lifted_ids),),
+            ) as cur:
+                lifted = [self._row_to_revocation(r) for r in await cur.fetchall()]
+            # Everything that is visible again, including facts derived from the
+            # reinstated one, so the caller can restore their vectors.
+            async with db.execute(
+                """SELECT * FROM live_facts
+                    WHERE org_id = ? AND user_id = ? AND id IN (SELECT value FROM json_each(?))""",
+                (scope.org_id, scope.user_id, _ids_json(facts)),
+            ) as cur:
+                visible = [self._row_to_fact(r) for r in await cur.fetchall()]
         return lifted, visible
 
     async def list_revocations(
         self, scope: Scope, include_reinstated: bool = False
     ) -> list[Revocation]:
-        sql = "SELECT * FROM revocations WHERE org_id = ? AND user_id = ?"
-        if not include_reinstated:
-            sql += " AND reinstated_at IS NULL"
-        async with self._conn.execute(
-            sql + " ORDER BY revoked_at", (scope.org_id, scope.user_id)
-        ) as cur:
-            return [self._row_to_revocation(r) for r in await cur.fetchall()]
+        async with self._reading() as db:
+            sql = "SELECT * FROM revocations WHERE org_id = ? AND user_id = ?"
+            if not include_reinstated:
+                sql += " AND reinstated_at IS NULL"
+            async with db.execute(
+                sql + " ORDER BY revoked_at", (scope.org_id, scope.user_id)
+            ) as cur:
+                return [self._row_to_revocation(r) for r in await cur.fetchall()]
 
     @staticmethod
     def _row_to_revocation(row: aiosqlite.Row) -> Revocation:
@@ -1327,6 +1487,21 @@ class SqliteStore:
         )
         scrubbed = f"[scrubbed by erasure {record.id}]"
 
+        def ph(n: int) -> str:
+            return ",".join("?" * n)
+
+        # Base rows first. Until they are gone, the side rows below (match
+        # rows, content hashes, tombstone text) are what keeps them hidden.
+        await self._conn.execute(f"DELETE FROM facts WHERE id IN ({ph(len(ids))})", ids)
+        if message_ids:
+            await self._conn.execute(
+                f"DELETE FROM messages WHERE id IN ({ph(len(message_ids))})", tuple(message_ids)
+            )
+        if event_ids:
+            await self._conn.execute(
+                f"DELETE FROM events WHERE id IN ({ph(len(event_ids))})", tuple(event_ids)
+            )
+
         kept_hashes = 0
         async with self._conn.execute(
             "SELECT * FROM revocations WHERE org_id = ? AND user_id = ?", sc
@@ -1359,30 +1534,18 @@ class SqliteStore:
             )
         record.guarantees["reinsertion_hashes_kept"] = kept_hashes
 
-        def ph(n: int) -> str:
-            return ",".join("?" * n)
-
         for kind, items in (("fact", ids), ("message", message_ids), ("event", event_ids)):
             if items:
                 await self._conn.execute(
                     f"DELETE FROM content_matches WHERE kind = ? AND item_id IN ({ph(len(items))})",
                     (kind, *items),
                 )
-        if event_ids:
-            await self._conn.execute(
-                f"DELETE FROM events WHERE id IN ({ph(len(event_ids))})", tuple(event_ids)
-            )
         await self._conn.execute(
             f"""DELETE FROM fact_derivations
                  WHERE fact_id IN ({ph(len(ids))}) OR source_fact_id IN ({ph(len(ids))})""",
             (*ids, *ids),
         )
         await self._conn.execute(f"DELETE FROM fact_meta WHERE fact_id IN ({ph(len(ids))})", ids)
-        await self._conn.execute(f"DELETE FROM facts WHERE id IN ({ph(len(ids))})", ids)
-        if message_ids:
-            await self._conn.execute(
-                f"DELETE FROM messages WHERE id IN ({ph(len(message_ids))})", tuple(message_ids)
-            )
         await self._conn.execute(
             """INSERT INTO erasures
                (id, org_id, user_id, fact_ids, actor, reason, erased_at, artifacts, guarantees)
@@ -1437,25 +1600,26 @@ class SqliteStore:
         return row is not None and int(row[0]) == 0
 
     async def list_erasures(self, scope: Scope) -> list[ErasureRecord]:
-        async with self._conn.execute(
-            "SELECT * FROM erasures WHERE org_id = ? AND user_id = ? ORDER BY erased_at",
-            (scope.org_id, scope.user_id),
-        ) as cur:
-            rows = await cur.fetchall()
-        return [
-            ErasureRecord(
-                id=UUID(r["id"]),
-                org_id=r["org_id"],
-                user_id=r["user_id"],
-                fact_ids=[UUID(i) for i in json.loads(r["fact_ids"])],
-                actor=r["actor"],
-                reason=r["reason"],
-                erased_at=datetime.fromisoformat(r["erased_at"]),
-                artifacts=json.loads(r["artifacts"]),
-                guarantees=json.loads(r["guarantees"]),
-            )
-            for r in rows
-        ]
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT * FROM erasures WHERE org_id = ? AND user_id = ? ORDER BY erased_at",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+            return [
+                ErasureRecord(
+                    id=UUID(r["id"]),
+                    org_id=r["org_id"],
+                    user_id=r["user_id"],
+                    fact_ids=[UUID(i) for i in json.loads(r["fact_ids"])],
+                    actor=r["actor"],
+                    reason=r["reason"],
+                    erased_at=datetime.fromisoformat(r["erased_at"]),
+                    artifacts=json.loads(r["artifacts"]),
+                    guarantees=json.loads(r["guarantees"]),
+                )
+                for r in rows
+            ]
 
     # ── Row -> Pydantic ──────────────────────────────────────────────────
 
