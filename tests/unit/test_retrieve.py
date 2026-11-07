@@ -129,6 +129,7 @@ async def test_search_records_access(
 ) -> None:
     retriever, scope, _ = setup_retriever
     [hit] = await retriever.search("espresso", scope, top_k=1)
+    await retriever._facts.flush_access()  # type: ignore[attr-defined]
     fetched = await retriever._facts.get_fact(hit.fact.id, scope)
     assert fetched is not None
     assert fetched.access_count >= 1
