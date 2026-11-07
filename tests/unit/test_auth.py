@@ -87,9 +87,8 @@ def test_constant_time_compare_used(monkeypatch):
     assert calls, "compare_digest should have been called for token comparison"
 
 
-def test_websocket_scope_passes_through():
-    # Non-HTTP scopes (websocket, lifespan) should pass through unchanged so the
-    # underlying app handles them.
+def test_lifespan_scope_passes_through():
+    # Lifespan carries no request, so there is nothing to authenticate.
     seen = []
 
     async def inner(scope, receive, send):
@@ -104,3 +103,72 @@ def test_websocket_scope_passes_through():
 
     anyio.run(drive)
     assert seen == ["lifespan"]
+
+
+def _drive_websocket(headers):
+    import anyio
+
+    reached = []
+    sent = []
+
+    async def inner(scope, receive, send):
+        reached.append(scope["type"])
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    wrapped = auth_asgi_wrapper(inner, expected_token="secret123")
+
+    async def drive():
+        await wrapped({"type": "websocket", "path": "/ws", "headers": headers}, receive, send)
+
+    anyio.run(drive)
+    return reached, sent
+
+
+def test_websocket_without_token_is_closed():
+    # No websocket routes exist today; if one is added it must not skip auth.
+    reached, sent = _drive_websocket([])
+    assert reached == []
+    assert sent == [{"type": "websocket.close", "code": 1008}]
+
+
+def test_websocket_with_token_passes():
+    reached, _ = _drive_websocket([(b"authorization", b"Bearer secret123")])
+    assert reached == ["websocket"]
+
+
+def test_non_ascii_token_is_401_not_500():
+    # compare_digest on str raises TypeError for non-ASCII input, which used to
+    # surface as a 500. Compare bytes instead.
+    import anyio
+
+    sent = []
+
+    async def inner(scope, receive, send):
+        raise AssertionError("must not reach the app")
+
+    async def send(message):
+        sent.append(message)
+
+    wrapped = auth_asgi_wrapper(inner, expected_token="secret123")
+    scope = {
+        "type": "http",
+        "path": "/",
+        "headers": [(b"authorization", "Bearer s\u00e9cret123".encode("utf-8"))],
+    }
+
+    async def drive():
+        await wrapped(scope, lambda: None, send)
+
+    anyio.run(drive)
+    assert sent[0]["status"] == 401
+
+
+def test_exempt_path_skips_auth():
+    wrapped = auth_asgi_wrapper(_ok_app(), expected_token="secret123", exempt_paths={"/"})
+    client = TestClient(wrapped)
+    assert client.get("/").status_code == 200
