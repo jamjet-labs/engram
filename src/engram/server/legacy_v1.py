@@ -38,6 +38,20 @@ Facts
   entities and relationships, leaving content-free erasure records. It is 409
   or 503, never success, when the erase is refused or interrupted.
 
+Path ids (compatibility with the published Java client)
+- The client puts the user id in the delete-user path without encoding it,
+  and the conversation id in the message paths with `URLEncoder`, which is
+  form encoding (space as `+`, `/` as `%2F`, `+` as `%2B`). Both ids may
+  contain `/`.
+- The message routes read `+` in the conversation id as a space: the exact
+  inverse of `URLEncoder`, decoded from the raw path. Other clients send a
+  literal `+` as `%2B` and a space as `%20` or `+`.
+- `DELETE /v1/memory/users/{id}` with any query string is 400 and erases
+  nothing: the client would send `bob?x=1` as the user `bob` and a query.
+  A `#` cannot be caught: the client drops it and the rest of the id before
+  sending, so `bob#1` arrives as `bob`. The same goes for an id that ends in
+  `?`. Do not use `?` or `#` in user ids with that client.
+
 Messages
 - `role` must be user, assistant, system or tool (Rust took any string).
 - `metadata` is accepted and not stored, and comes back as `{}`. The
@@ -59,6 +73,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote, unquote_plus
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Path, Query, Request, Response
@@ -135,6 +150,28 @@ def _erase_audit_fields() -> tuple[str, str]:
     planted as a fact to block the erase for good, so each call makes new ones.
     """
     return f"deleteuser{uuid4().hex}", f"restv1x{uuid4().hex}"
+
+
+def _form_decoded_tail(request: Request, decoded: str) -> str:
+    """The route's last path parameter, decoded as `URLDecoder` would.
+
+    The ASGI server has already percent-decoded ``decoded`` and kept ``+``,
+    so a ``+`` there may have been sent as ``+`` (a space, from
+    `URLEncoder`) or as ``%2B`` (a plus). The raw path tells them apart: find
+    the raw tail that percent-decodes to ``decoded`` and form-decode it.
+    Without a raw path, every ``+`` is read as a space.
+    """
+    raw = request.scope.get("raw_path")
+    if isinstance(raw, bytes):
+        path = raw.decode("latin-1").split("?", 1)[0]
+        cut = len(path)
+        # Each step left adds at least one character to the decoded tail, so
+        # at most one tail can match.
+        while (cut := path.rfind("/", 0, cut)) >= 0:
+            tail = path[cut + 1 :]
+            if unquote(tail) == decoded:
+                return unquote_plus(tail)
+    return decoded.replace("+", " ")
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -276,11 +313,16 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
     async def consolidate() -> JSONResponse:
         return _error(501, "consolidation is not implemented in the Python Engram server")
 
-    @app.delete("/v1/memory/users/{user_id}", response_model=None)
+    @app.delete("/v1/memory/users/{user_id:path}", response_model=None)
     async def delete_user(
+        request: Request,
         user_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> dict[str, Any] | JSONResponse:
         """Hard-erase everything held for (default org, user_id), as Rust did.
+
+        The id is the rest of the path, `/` included, as the Java client sends
+        it (unencoded). Any query string is refused with 400 before anything
+        is erased: from that client it means the id held a `?`.
 
         Never reports success unless `erase_user` finished. 409 if it refuses
         the audit fields as quoting a fact; they are fresh random tokens on
@@ -288,6 +330,12 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         fact was written mid-way; calling again is safe and finishes. 500 for
         any other storage error, which a retry may not fix.
         """
+        if request.scope.get("query_string"):
+            return _error(
+                400,
+                "delete user takes no query string; a '?' in the user id would cut it "
+                "short. Nothing was erased.",
+            )
         reason, actor = _erase_audit_fields()
         try:
             n = await engram.erase_user(
@@ -367,13 +415,17 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
             "fact_ids": fact_ids,
         }
 
-    @app.get("/v1/memory/messages/{conversation_id}")
+    @app.get("/v1/memory/messages/{conversation_id:path}", response_model=None)
     async def get_messages(
+        request: Request,
         conversation_id: str,
         last_n: Annotated[int | None, Query(ge=1)] = None,
         user_id: _QueryId = None,
         org_id: _QueryId = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | JSONResponse:
+        conversation_id = _form_decoded_tail(request, conversation_id)
+        if not conversation_id:
+            return _error(400, "conversation_id must not be empty")
         s = _scope(user_id, org_id)
         # Read every visible turn once so `seq` is the position in the whole
         # conversation, then keep the newest `last_n`.
@@ -406,11 +458,17 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         ids = await engram.list_conversations(user_id=s.user_id, org_id=s.org_id)
         return {"conversation_ids": ids, "total": len(ids)}
 
-    @app.delete("/v1/memory/messages/{conversation_id}")
+    @app.delete("/v1/memory/messages/{conversation_id:path}", response_model=None)
     async def delete_messages(
-        conversation_id: str, user_id: _QueryId = None, org_id: _QueryId = None
-    ) -> dict[str, Any]:
+        request: Request,
+        conversation_id: str,
+        user_id: _QueryId = None,
+        org_id: _QueryId = None,
+    ) -> dict[str, Any] | JSONResponse:
         """Hard-delete one conversation's turns. Facts extracted from them stay, as in Rust."""
+        conversation_id = _form_decoded_tail(request, conversation_id)
+        if not conversation_id:
+            return _error(400, "conversation_id must not be empty")
         s = _scope(user_id, org_id)
         n = await engram.delete_conversation(conversation_id, user_id=s.user_id, org_id=s.org_id)
         return {"success": True, "deleted_count": n}

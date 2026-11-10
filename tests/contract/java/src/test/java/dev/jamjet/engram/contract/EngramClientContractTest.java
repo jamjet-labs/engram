@@ -120,6 +120,30 @@ class EngramClientContractTest {
     }
 
     @Test
+    void conversationIdsWithASpaceAndASlash() {
+        // The client puts these in the path with URLEncoder: "support+chat", "tenant%2F42".
+        String user = "ids-" + System.nanoTime();
+        try (var c = client()) {
+            for (String conv : List.of("support chat", "tenant/42")) {
+                Map<String, Object> saved = c.saveMessages(conv,
+                        List.of(Map.of("role", "user", "content", "note in " + conv)), user, null);
+                assertEquals(Boolean.TRUE, saved.get("success"), conv);
+
+                List<Map<String, Object>> msgs = c.getMessages(conv, null, user, null);
+                assertEquals(1, msgs.size(), conv);
+                assertEquals(conv, msgs.get(0).get("conversation_id"));
+                assertEquals("note in " + conv, msgs.get(0).get("content"));
+
+                Map<String, Object> deleted = c.deleteMessages(conv, user, null);
+                assertEquals(Boolean.TRUE, deleted.get("success"), conv);
+                assertEquals(1, num(deleted.get("deleted_count")), conv);
+                assertTrue(c.getMessages(conv, null, user, null).isEmpty(), conv);
+            }
+            assertTrue(c.listConversations(user, null).isEmpty());
+        }
+    }
+
+    @Test
     void wrongTokenIsRefused() {
         try (var c = new EngramClient(EngramConfig.builder()
                 .baseUrl(System.getProperty("engram.url", "http://127.0.0.1:18765"))

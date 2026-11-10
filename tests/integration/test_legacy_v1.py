@@ -7,6 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, tzinfo
 from typing import Any
+from urllib.parse import quote_plus
 from uuid import UUID
 
 import pytest
@@ -785,3 +786,92 @@ async def test_delete_user_audit_fields_are_single_tokens(
     assert all(a.startswith("restv1x") and len(a) > len("restv1x") for a in actors)
     # Fresh on every call: no fixed string is left to plant.
     assert reasons[0] != reasons[1] and actors[0] != actors[1]
+
+
+# ── Path ids as the published Java client sends them ────────────────────
+
+
+def _save_as(c: TestClient, conv: str, user: str = "ivy") -> None:
+    r = c.post(
+        "/v1/memory/messages",
+        headers=AUTH,
+        json={
+            "conversation_id": conv,
+            "user_id": user,
+            "messages": [{"role": "user", "content": f"note in {conv}"}],
+        },
+    )
+    assert r.status_code == 201, r.text
+
+
+@pytest.mark.parametrize("conv", ["support chat", "tenant/42", "a+b", "100% sure", "café/ünï"])
+def test_message_routes_take_ids_form_encoded_like_urlencoder(
+    client: TestClient, conv: str
+) -> None:
+    _save_as(client, conv)
+    seg = quote_plus(conv)  # java.net.URLEncoder.encode(id, UTF_8)
+    got = client.get(f"/v1/memory/messages/{seg}", params={"user_id": "ivy"}, headers=AUTH)
+    assert got.status_code == 200, got.text
+    assert [(m["conversation_id"], m["content"]) for m in got.json()["messages"]] == [
+        (conv, f"note in {conv}")
+    ]
+    r = client.delete(f"/v1/memory/messages/{seg}", params={"user_id": "ivy"}, headers=AUTH)
+    assert r.json() == {"success": True, "deleted_count": 1}
+    assert (
+        client.get("/v1/memory/messages", params={"user_id": "ivy"}, headers=AUTH).json()[
+            "conversation_ids"
+        ]
+        == []
+    )
+
+
+def test_message_routes_read_plus_as_a_space_and_2b_as_a_plus(client: TestClient) -> None:
+    _save_as(client, "a+b")
+    _save_as(client, "a b")
+    for path, conv in [("a+b", "a b"), ("a%2Bb", "a+b"), ("a%20b", "a b")]:
+        got = client.get(f"/v1/memory/messages/{path}", params={"user_id": "ivy"}, headers=AUTH)
+        assert [m["conversation_id"] for m in got.json()["messages"]] == [conv], path
+
+
+def test_message_routes_refuse_an_empty_conversation_id(client: TestClient) -> None:
+    for method in ("GET", "DELETE"):
+        r = client.request(method, "/v1/memory/messages/", headers=AUTH)
+        assert r.status_code == 400 and set(r.json()) == {"error"}, method
+
+
+@pytest.mark.asyncio
+async def test_delete_user_refuses_any_query_string(served: tuple[TestClient, Engram]) -> None:
+    client, memory = served
+    _record(client, "Bob's PIN hint is his cat", user="bob")
+    for path in ("/v1/memory/users/bob?x=1", "/v1/memory/users/bob?=", "/v1/memory/users/bob?x#1"):
+        r = client.delete(path, headers=AUTH)
+        assert r.status_code == 400 and set(r.json()) == {"error"}, path
+        assert "nothing was erased" in r.json()["error"].lower()
+    r = client.delete("/v1/memory/users/bob", params={"org_id": "acme"}, headers=AUTH)
+    assert r.status_code == 400
+    assert len(await memory._store.list_fact_ids(Scope(org_id="default", user_id="bob"))) == 1
+    assert await memory.erasures(user_id="bob") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent", ["bob?", "bob#1234", "bob?#1"])
+async def test_delete_user_cannot_see_an_empty_query_or_a_fragment(
+    served: tuple[TestClient, Engram], sent: str
+) -> None:
+    """Pins the limit the legacy_v1 docstring and README state: these arrive as "bob"."""
+    client, memory = served
+    _record(client, "Bob's PIN hint is his cat", user="bob")
+    r = client.delete("/v1/memory/users/" + sent, headers=AUTH)
+    assert r.json() == {"success": True, "deleted_facts": 1}
+    assert await memory._store.list_fact_ids(Scope(org_id="default", user_id="bob")) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_user_takes_a_slash_in_the_id(served: tuple[TestClient, Engram]) -> None:
+    client, memory = served
+    _record(client, "tenant fact", user="tenant")
+    _record(client, "tenant 42 fact", user="tenant/42")
+    r = client.delete("/v1/memory/users/tenant/42", headers=AUTH)
+    assert r.json() == {"success": True, "deleted_facts": 1}
+    assert await memory._store.list_fact_ids(Scope(org_id="default", user_id="tenant/42")) == []
+    assert len(await memory._store.list_fact_ids(Scope(org_id="default", user_id="tenant"))) == 1
