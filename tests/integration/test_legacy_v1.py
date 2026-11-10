@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, tzinfo
 from typing import Any
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 
 from engram import Engram
-from engram.errors import StoreError
+from engram.errors import EmbeddingError, ExtractionError, StoreError
+from engram.governance import normalize_text
 from engram.llm.base import LLMMessage, LLMResponse
 from engram.models import ChatMessage, Fact
 from engram.server.http import build_http_app
@@ -19,6 +23,16 @@ from engram.server.http import build_http_app
 TOKEN = "t" * 40
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 NO_SUCH_FACT = "00000000-0000-0000-0000-000000000000"
+LOGGER = "engram.server.legacy_v1"
+_TICK = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+
+
+class _FrozenClock(datetime):
+    """A clock that never advances, like a coarse one read twice in one tick."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:
+        return _TICK if tz is None else _TICK.astimezone(tz)
 
 
 class OneFactLLM:
@@ -186,6 +200,97 @@ def test_add_refuses_an_unknown_role(client: TestClient) -> None:
         "/v1/memory", headers=AUTH, json={"messages": [{"role": "robot", "content": "hi"}]}
     )
     assert r.status_code == 422
+
+
+def test_add_without_a_session_leaves_the_default_conversation_alone(
+    client: TestClient,
+) -> None:
+    # "default" is Spring AI's default conversation id. add stores no turns,
+    # so its facts must not share a session with stored turns: forgetting one
+    # would withhold that conversation (live_messages rule (c)).
+    _save(client, [{"role": "user", "content": "hello there"}], conv="default")
+    fid = _add(client)
+    assert client.delete(f"/v1/memory/facts/{fid}", headers=AUTH).status_code == 200
+    convs = client.get("/v1/memory/messages", params={"user_id": "alice"}, headers=AUTH)
+    assert convs.json()["conversation_ids"] == ["default"]
+    got = client.get("/v1/memory/messages/default", params={"user_id": "alice"}, headers=AUTH)
+    assert got.json()["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_add_gives_each_call_its_own_session_unless_one_is_sent(
+    served: tuple[TestClient, Engram], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, memory = served
+    sessions: list[str] = []
+    extract = memory.extract
+
+    async def spy(messages: list[ChatMessage], **kw: Any) -> list[Fact]:
+        sessions.append(messages[0].session_id)
+        return await extract(messages, **kw)
+
+    monkeypatch.setattr(memory, "extract", spy)
+    _add(client)
+    _add(client)
+    msgs = [{"role": "user", "content": "I like pizza"}]
+    r = client.post("/v1/memory", headers=AUTH, json={"messages": msgs, "session_id": "s1"})
+    assert r.status_code == 201
+    assert sessions[2] == "s1"
+    assert all(s.startswith("v1add") for s in sessions[:2]) and sessions[0] != sessions[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sent", "expected"),
+    [
+        ("2026-03-01T12:30:00+05:30", datetime(2026, 3, 1, 7, 0, tzinfo=UTC)),
+        ("2026-03-01T07:00:00Z", datetime(2026, 3, 1, 7, 0, tzinfo=UTC)),
+        ("2026-03-01T07:00:00", None),  # no offset, so not RFC 3339
+        ("2026-03-01", None),
+        ("yesterday", None),
+        (None, None),
+    ],
+)
+async def test_add_passes_an_rfc3339_timestamp_as_the_session_date(
+    served: tuple[TestClient, Engram],
+    monkeypatch: pytest.MonkeyPatch,
+    sent: str | None,
+    expected: datetime | None,
+) -> None:
+    client, memory = served
+    dates: list[datetime | None] = []
+    extract = memory.extract
+
+    async def spy(messages: list[ChatMessage], **kw: Any) -> list[Fact]:
+        dates.append(kw.get("session_date"))
+        return await extract(messages, **kw)
+
+    monkeypatch.setattr(memory, "extract", spy)
+    body: dict[str, Any] = {"messages": [{"role": "user", "content": "I like pizza"}]}
+    if sent is not None:
+        body["timestamp"] = sent
+    r = client.post("/v1/memory", headers=AUTH, json=body)
+    assert r.status_code == 201, r.text
+    assert dates == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ExtractionError, EmbeddingError])
+async def test_add_extraction_failure_is_500_with_an_error_key(
+    served: tuple[TestClient, Engram], monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    client, memory = served
+
+    async def failing(*args: Any, **kw: Any) -> list[Fact]:
+        raise error("provider said: Incorrect API key provided: sk-abc***xyz")
+
+    monkeypatch.setattr(memory, "extract", failing)
+    r = client.post(
+        "/v1/memory", headers=AUTH, json={"messages": [{"role": "user", "content": "hi"}]}
+    )
+    assert r.status_code == 500
+    assert set(r.json()) == {"error"} and error.__name__ in r.json()["error"]
+    assert "sk-" not in r.json()["error"]
 
 
 def test_missing_user_id_is_the_default_user(client: TestClient) -> None:
@@ -409,6 +514,19 @@ def test_messages_round_trip_and_delete_user(client: TestClient) -> None:
     assert bob.json()["total"] == 1
 
 
+def test_turns_of_one_save_keep_their_order_on_a_coarse_clock(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every now() returns the same instant. Turns that tie on timestamp are
+    # ordered by random id, so the route must give each turn its own time.
+    monkeypatch.setattr("engram.engram.datetime", _FrozenClock)
+    monkeypatch.setattr("engram.server.legacy_v1.datetime", _FrozenClock)
+    turns = [(role, f"turn {i}") for i, role in enumerate(["user", "assistant"] * 6)]
+    _save(client, [{"role": r, "content": c} for r, c in turns])
+    got = client.get("/v1/memory/messages/c1", params={"user_id": "alice"}, headers=AUTH)
+    assert [(m["role"], m["content"]) for m in got.json()["messages"]] == turns
+
+
 def test_seq_is_the_turn_position_in_the_conversation(client: TestClient) -> None:
     _save(
         client,
@@ -427,9 +545,14 @@ def test_seq_is_the_turn_position_in_the_conversation(client: TestClient) -> Non
     assert last["total"] == 2
 
 
-def test_forgetting_an_extracted_fact_withholds_its_conversation(client: TestClient) -> None:
+@pytest.mark.asyncio
+async def test_forgetting_an_extracted_fact_withholds_its_conversation(
+    served: tuple[TestClient, Engram],
+) -> None:
     # Extracted facts carry the conversation id but no link to one turn, so
-    # live_messages rule (c) withholds that whole conversation. Fails closed.
+    # live_messages rule (c) withholds that whole conversation, turns saved
+    # later included, until the fact is reinstated. Fails closed.
+    client, memory = served
     saved = _save(client, [{"role": "user", "content": "my dog is Rex"}], conv="c1")
     _save(client, [{"role": "user", "content": "the weather is fine"}], conv="c2")
     [fid] = saved["fact_ids"]
@@ -440,6 +563,15 @@ def test_forgetting_an_extracted_fact_withholds_its_conversation(client: TestCli
     assert c2.json()["total"] == 1
     convs = client.get("/v1/memory/messages", params={"user_id": "alice"}, headers=AUTH)
     assert convs.json()["conversation_ids"] == ["c2"]
+    _save(client, [{"role": "user", "content": "and a cat called Tom"}], conv="c1")
+    later = client.get("/v1/memory/messages/c1", params={"user_id": "alice"}, headers=AUTH)
+    assert later.json()["total"] == 0
+    await memory.reinstate(UUID(fid), reason="restored", actor="test", user_id="alice")
+    back = client.get("/v1/memory/messages/c1", params={"user_id": "alice"}, headers=AUTH)
+    assert [m["content"] for m in back.json()["messages"]] == [
+        "my dog is Rex",
+        "and a cat called Tom",
+    ]
 
 
 @pytest.mark.parametrize("last_n", [0, -1])
@@ -483,6 +615,35 @@ def test_save_messages_without_an_llm_keeps_the_turns(no_llm_client: TestClient)
     assert got["total"] == 1
 
 
+def test_save_without_an_llm_logs_at_debug_without_a_traceback(
+    no_llm_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    _save(no_llm_client, [{"role": "user", "content": "hello"}])
+    records = [r for r in caplog.records if r.name == LOGGER]
+    assert [(r.levelno, r.exc_info) for r in records] == [(logging.DEBUG, None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ExtractionError, EmbeddingError])
+async def test_save_extraction_failure_keeps_the_turns_and_warns(
+    served: tuple[TestClient, Engram],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: type[Exception],
+) -> None:
+    client, memory = served
+
+    async def failing(*args: Any, **kw: Any) -> list[Fact]:
+        raise error("provider down")
+
+    monkeypatch.setattr(memory, "extract", failing)
+    saved = _save(client, [{"role": "user", "content": "hello"}])
+    assert saved["fact_ids"] is None and len(saved["message_ids"]) == 1
+    warned = [r for r in caplog.records if r.name == LOGGER and r.levelno == logging.WARNING]
+    assert len(warned) == 1 and warned[0].exc_info is not None
+
+
 def test_save_messages_needs_messages(client: TestClient) -> None:
     r = client.post(
         "/v1/memory/messages", headers=AUTH, json={"conversation_id": "c1", "messages": []}
@@ -496,6 +657,25 @@ def test_save_messages_accepts_metadata_but_does_not_return_it(client: TestClien
     _save(client, [{"role": "user", "content": "hi", "metadata": {"k": "v"}}])
     got = client.get("/v1/memory/messages/c1", params={"user_id": "alice"}, headers=AUTH).json()
     assert got["messages"][0]["metadata"] == {}
+
+
+def test_dropped_metadata_is_logged_once_per_request(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    _save(
+        client,
+        [
+            {"role": "user", "content": "a", "metadata": {"k": "secret-value"}},
+            {"role": "assistant", "content": "b", "metadata": {"k": "other"}},
+        ],
+    )
+    _save(
+        client, [{"role": "user", "content": "c", "metadata": {}}, {"role": "user", "content": "d"}]
+    )
+    dropped = [r for r in caplog.records if r.name == LOGGER and "metadata" in r.getMessage()]
+    assert [r.levelno for r in dropped] == [logging.DEBUG]
+    assert "secret-value" not in dropped[0].getMessage()
 
 
 def test_delete_messages(client: TestClient) -> None:
@@ -513,6 +693,7 @@ def test_delete_user_refuses_when_the_audit_fields_quote_a_fact(client: TestClie
     r = client.delete("/v1/memory/users/carol", headers=AUTH)
     assert r.status_code == 409
     assert set(r.json()) == {"error"}
+    assert "calling again is safe" in r.json()["error"].lower()
     still = client.get(
         "/v1/memory/recall", params={"q": "restv1", "user_id": "carol"}, headers=AUTH
     )
@@ -552,5 +733,7 @@ async def test_delete_user_audit_fields_are_single_tokens(
         ("alice", "default", "restv1")
     ] * 2
     reasons = [c["reason"] for c in calls]
-    assert all(r.isalnum() and r.startswith("deleteuser") for r in reasons)
+    for value in [*reasons, calls[0]["actor"]]:
+        assert len(normalize_text(value).split()) == 1, value
+    assert all(r.startswith("deleteuser") for r in reasons)
     assert reasons[0] != reasons[1]

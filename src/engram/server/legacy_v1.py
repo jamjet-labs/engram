@@ -6,33 +6,58 @@ against this server unchanged. scripts/java-contract.sh runs the published jar
 against it. The native routes in http.py are separate and unchanged, except
 `GET /v1/memory/recall`, which http.py serves in both shapes.
 
-Differences from Rust, all deliberate:
+Every difference from Rust, all deliberate:
 
-- Scope. `org_id` defaults to "default" as in Rust. A missing `user_id` means
-  the Python default user "default"; Rust used an org-wide scope there, which
-  Python does not have. The message routes are scoped to the user too, where
-  Rust filtered on `org_id` alone.
-- `GET /v1/memory/search` is the same hybrid recall as the native
-  `POST /v1/memory/search`, not a keyword-only search, and its hits carry
+Scope
+- `org_id` defaults to "default", as in Rust. A missing `user_id` means the
+  Python user "default"; Rust used an org-wide scope there, which Python does
+  not have.
+- The message routes are scoped to `(org_id, user_id)`. Rust filtered on
+  `org_id` alone.
+
+Facts
+- `POST /v1/memory` without `session_id` extracts under a fresh session,
+  `v1add<hex>`, per call. Rust used no session; "default" would collide with
+  Spring AI's default conversation id, and rule (c) below would then let
+  forgetting such a fact withhold that conversation. `timestamp` becomes the
+  session date when it parses as an ISO 8601 time with a UTC offset (RFC 3339
+  times do; Python also takes a few looser forms) and is ignored otherwise, as
+  in Rust. With no LLM configured, add is 400.
+- `max_results` and `top_k` must be 1 to 200 (Rust took any usize).
+- `GET /v1/memory/search` is the hybrid recall the native
+  `POST /v1/memory/search` runs, not a keyword-only search, and its hits carry
   `confidence` too.
 - `tier` values are Python's (working, episodic, semantic, archival).
 - `POST /v1/memory/context` accepts `format` and ignores it: Python renders
   one format. `token_count` is the ~4 characters per token estimate the
   budget uses. There is no `tier_breakdown`.
+- `DELETE /v1/memory/facts/{id}` is 404 for an unknown id (Rust: 200).
+- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
+- `POST /v1/memory/consolidate` is 501: Python has no consolidation.
+- `DELETE /v1/memory/users/{id}` also erases the user's chat turns, events,
+  entities and relationships, leaving content-free erasure records. It is 409
+  or 503, never success, when the erase is refused or interrupted.
+
+Messages
+- `role` must be user, assistant, system or tool (Rust took any string).
+- `metadata` is accepted and not stored, and comes back as `{}`. The
+  revocation matcher reads turn content only, so stored metadata could carry
+  revoked text past it.
 - `seq` is a turn's 0-based position among the conversation's visible turns,
   oldest first. Rust stored the index within each save call, which restarts
   at 0; the two agree for a conversation saved in one call.
-- Message `metadata` is accepted and not stored, and comes back as `{}`. The
-  revocation matcher reads turn content only, so stored metadata could carry
-  revoked text past it.
-- `GET /v1/memory/stats` has no entity or relationship counts.
-- `POST /v1/memory/consolidate` is 501: Python has no consolidation.
+- `GET /v1/memory/messages` lists conversations by first turn (Rust: by id).
+- Rule (c) of the `live_messages` view: forgetting a fact extracted from a
+  conversation withholds every turn of it, turns saved later included, until
+  the fact is reinstated. Extraction sets no `source_message_id`, so the view
+  cannot tell which turn carried the fact, and fails closed. Rust had no
+  revocation.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -41,7 +66,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from engram.engram import Engram, context_lines
-from engram.errors import StoreError
+from engram.errors import EmbeddingError, ExtractionError, StoreError
 from engram.models import ChatMessage
 from engram.retrieve.base import ScoredFact
 from engram.scope import Scope
@@ -75,6 +100,7 @@ class _AddRequest(BaseModel):
     user_id: _BodyId
     org_id: _BodyId
     session_id: str | None = Field(default=None, max_length=256)
+    timestamp: str | None = None
 
 
 class _ContextRequest(BaseModel):
@@ -116,6 +142,24 @@ def fact_json(sf: ScoredFact) -> dict[str, Any]:
     }
 
 
+def _session_date(value: str | None) -> datetime | None:
+    """Rust's `AddRequest.timestamp`: an ISO 8601 time with an offset, else ignored."""
+    if value is None:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return None if ts.tzinfo is None else ts.astimezone(UTC)
+
+
+def _extraction_failed(e: Exception) -> JSONResponse:
+    # The cause can quote a provider's reply (a masked API key, say), so it
+    # goes to the log and the client gets the error class.
+    logger.warning("fact extraction failed", exc_info=True)
+    return _error(500, f"fact extraction failed ({type(e).__name__}); the server log has the cause")
+
+
 def _rfc3339(ts: datetime) -> str:
     """UTC, as Rust's `to_rfc3339()` wrote it. A naive time is taken as UTC."""
     if ts.tzinfo is None:
@@ -135,15 +179,20 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
 
     @app.post("/v1/memory", status_code=201, response_model=None)
     async def add(req: _AddRequest) -> dict[str, Any] | JSONResponse:
-        """Extract facts from messages. Like Rust, the messages are not stored."""
+        """Extract facts from messages. Like Rust, the messages are not stored.
+
+        Without `session_id` the facts get a session of their own, so no
+        stored conversation shares it (see rule (c) in the module docstring).
+        """
         if not req.messages:
             return _error(400, "messages must not be empty")
         scope = _scope(req.user_id, req.org_id)
+        session_id = req.session_id or f"v1add{uuid4().hex}"
         now = datetime.now().astimezone()
         chat = [
             ChatMessage(
                 scope=scope,
-                session_id=req.session_id or "default",
+                session_id=session_id,
                 role=m.role,
                 content=m.content,
                 timestamp=now,
@@ -151,9 +200,11 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
             for m in req.messages
         ]
         try:
-            facts = await engram.extract(chat)
+            facts = await engram.extract(chat, session_date=_session_date(req.timestamp))
         except RuntimeError as e:  # no LLM configured
             return _error(400, str(e))
+        except (ExtractionError, EmbeddingError) as e:
+            return _extraction_failed(e)
         ids = [str(f.id) for f in facts]
         return {"success": True, "fact_count": len(ids), "fact_ids": ids}
 
@@ -220,7 +271,10 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
     ) -> dict[str, Any] | JSONResponse:
         """Hard-erase everything held for (default org, user_id), as Rust did.
 
-        Never reports success unless `erase_user` finished.
+        Never reports success unless `erase_user` finished. 409 when the audit
+        fields quote a fact: from the check before anything is erased, or, if
+        a quoted fact was written meanwhile, part-way. 503 when a write landed
+        mid-way. Calling again is safe in every case.
         """
         try:
             n = await engram.erase_user(
@@ -230,7 +284,11 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
                 actor=_ACTOR,
             )
         except ValueError as e:
-            return _error(409, f"delete user refused: {e}")
+            return _error(
+                409,
+                f"delete user refused: {e}. Part of the user's data may already be erased. "
+                "Calling again is safe.",
+            )
         except StoreError:
             logger.warning("delete user: data changed mid-erase", exc_info=True)
             return _error(
@@ -248,13 +306,19 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         `fact_ids` is null then. An error here would make clients retry and
         store the turns twice.
 
-        The facts carry `conversation_id` as their session but no link to one
-        turn, so forgetting one withholds that whole conversation (rule (c) of
+        Turns are stamped one microsecond apart from one clock reading, so
+        they list in the order sent even when the clock is coarse.
+
+        The facts carry `conversation_id` as their session and no
+        `source_message_id`, so the view cannot tell which turn a fact came
+        from. Forgetting any of them withholds every turn of the conversation,
+        turns saved later included, until the fact is reinstated (rule (c) of
         the `live_messages` view). That fails closed.
         """
         if not req.messages:
             return _error(400, "messages must not be empty")
         s = _scope(req.user_id, req.org_id)
+        base = datetime.now().astimezone()
         stored = [
             await engram.record_message(
                 content=m.content,
@@ -262,12 +326,18 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
                 session_id=req.conversation_id,
                 user_id=s.user_id,
                 org_id=s.org_id,
+                timestamp=base + timedelta(microseconds=i),
             )
-            for m in req.messages
+            for i, m in enumerate(req.messages)
         ]
+        if any(m.metadata for m in req.messages):
+            logger.debug("save messages: message metadata is not stored, dropped it")
         fact_ids: list[str] | None
         try:
             fact_ids = [str(f.id) for f in await engram.extract(stored)]
+        except RuntimeError as e:  # no LLM configured: expected, not a fault
+            logger.debug("save messages: turns kept, no extraction: %s", e)
+            fact_ids = None
         except Exception:
             logger.warning("save messages: extraction failed, turns kept", exc_info=True)
             fact_ids = None
