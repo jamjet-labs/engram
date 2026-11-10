@@ -46,7 +46,7 @@ async def main() -> None:
     port = int(os.environ.get("ENGRAM_PORT", "18765"))
     memory = await Engram.open(":memory:", llm=CountingLLM())
     app = build_http_app(memory, auth_token=token)
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
     try:
         await server.serve()
     finally:

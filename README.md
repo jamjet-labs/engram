@@ -136,6 +136,19 @@ curl -sX POST localhost:19090/v1/memory/record \
 
 Endpoints: `record`, `extract`, `recall`, `search`, `context`, `raw_facts`, sessions, messages, healthz. The server also serves the v1 routes the Java SDK calls (see [Java and Spring Boot](#java-and-spring-boot)).
 
+### Run as an MCP server (for Claude Code, Cursor, etc.)
+
+```python
+from engram.server.mcp import build_mcp_server
+import mcp.server.stdio
+
+server = build_mcp_server(memory)
+async with mcp.server.stdio.stdio_server() as streams:
+    await server.run(streams[0], streams[1], server.create_initialization_options())
+```
+
+---
+
 ## Java and Spring Boot
 
 The Spring Boot starter (`dev.jamjet:engram-spring-boot-starter`) and the Java SDK (`dev.jamjet:jamjet-sdk`) talk to this server over the v1 REST routes. CI runs the published Java client against the server on every change.
@@ -165,18 +178,21 @@ engram:
 
 The routes, status codes and JSON keys follow the Rust v0.5.x server. These differences are deliberate:
 
-- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200).
-- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It returns 409 or 503, never success, when the erase is refused or interrupted.
-- `POST /v1/memory/consolidate` returns 501. The Python engine has no consolidation.
-- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
-- A request without `user_id` uses the user `default`. Rust used the whole org there, which this server has no equivalent for.
-- Message `metadata` is accepted and not stored, and comes back as `{}`.
-- Message `role` must be `user`, `assistant`, `system` or `tool`. Rust accepted any string.
+- `POST /v1/memory` without `session_id` extracts under a fresh session per call. `timestamp` sets the session date only when it is an ISO 8601 time with a UTC offset, and is ignored otherwise, as in Rust. With no LLM configured, the call returns 400.
 - `top_k` and `max_results` must be 1 to 200. Rust accepted any size.
-- `POST /v1/memory` without `session_id` extracts under a fresh session per call. With no LLM configured, it returns 400.
-- `POST /v1/memory/context` accepts `format` and ignores it, and has no `tier_breakdown`.
-- The message routes are scoped to `(org_id, user_id)`. Rust filtered on `org_id` alone.
+- `GET /v1/memory/search` is hybrid recall, not keyword-only, and its hits carry `confidence`.
 - `tier` values are `working`, `episodic`, `semantic` and `archival`.
+- `POST /v1/memory/context` accepts `format` and ignores it, and has no `tier_breakdown`. `token_count` is an estimate of about 4 characters per token.
+- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200).
+- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
+- `POST /v1/memory/consolidate` returns 501. The Python engine has no consolidation.
+- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It returns 409 or 503, never success, when the erase is refused or interrupted.
+- A request without `user_id` uses the user `default`. Rust used the whole org there, which this server has no equivalent for.
+- The message routes are scoped to `(org_id, user_id)`. Rust filtered on `org_id` alone.
+- Message `role` must be `user`, `assistant`, `system` or `tool`. Rust accepted any string.
+- Message `metadata` is accepted and not stored, and comes back as `{}`.
+- `seq` is a turn's 0-based position among the conversation's visible turns, oldest first. Rust stored the index within each save call.
+- `GET /v1/memory/messages` lists conversations by first turn. Rust listed them by id.
 
 The module docstring of `src/engram/server/legacy_v1.py` is the full list.
 
@@ -191,19 +207,6 @@ Deleting a user with a very large history can take long enough to time out over 
 ### One token, one trust domain
 
 Any token holder can forget a fact by id in any scope. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
-
-### Run as an MCP server (for Claude Code, Cursor, etc.)
-
-```python
-from engram.server.mcp import build_mcp_server
-import mcp.server.stdio
-
-server = build_mcp_server(memory)
-async with mcp.server.stdio.stdio_server() as streams:
-    await server.run(streams[0], streams[1], server.create_initialization_options())
-```
-
----
 
 ## Revocation, erasure and provenance
 
