@@ -151,7 +151,7 @@ async with mcp.server.stdio.stdio_server() as streams:
 
 ## Java and Spring Boot
 
-The Spring Boot starter (`dev.jamjet:engram-spring-boot-starter`) and the Java SDK (`dev.jamjet:jamjet-sdk`) talk to this server over the v1 REST routes. CI runs the published Java client against the server on every change.
+The Spring Boot starter (`dev.jamjet:engram-spring-boot-starter`) and the Java SDK (`dev.jamjet:jamjet-sdk`) talk to this server over the v1 REST routes. On every change, CI runs the published Java client against a test server that uses a scripted LLM in place of a real one.
 
 Run the server with a token, as in the [Hosted MCP server quickstart](#quickstart):
 
@@ -174,6 +174,41 @@ engram:
 
 `ENGRAM_TOKEN` must hold the same value as the server's `ENGRAM_AUTH_TOKEN`.
 
+### Fact extraction needs an LLM
+
+The image starts Engram without an LLM, so it does not extract facts, and logs a warning at startup that says so. Without an LLM:
+
+- `POST /v1/memory` (the client's `add`) returns 400.
+- `saveMessages` stores the turns and returns `fact_ids: null`.
+- recall, search and context only find facts written through `POST /v1/memory/record`.
+
+To extract facts, serve Engram from Python with an LLM client from `engram.llm`:
+
+```python
+import asyncio
+import os
+
+import uvicorn
+
+from engram import Engram
+from engram.embedding.openai import OpenAIEmbedding
+from engram.llm.openai import OpenAILLM
+from engram.server.http import build_http_app
+
+
+async def main() -> None:
+    # Both read OPENAI_API_KEY. engram.llm also has AnthropicLLM and OllamaLLM.
+    memory = await Engram.open("./engram.db", llm=OpenAILLM(), embedder=OpenAIEmbedding())
+    app = build_http_app(memory, auth_token=os.environ["ENGRAM_AUTH_TOKEN"])
+    try:
+        await uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=8765)).serve()
+    finally:
+        await memory.close()
+
+
+asyncio.run(main())
+```
+
 ### Differences from the Rust server
 
 The routes, status codes and JSON keys follow the Rust v0.5.x server. These differences are deliberate:
@@ -183,16 +218,19 @@ The routes, status codes and JSON keys follow the Rust v0.5.x server. These diff
 - `GET /v1/memory/search` is hybrid recall, not keyword-only, and its hits carry `confidence`.
 - `tier` values are `working`, `episodic`, `semantic` and `archival`.
 - `POST /v1/memory/context` accepts `format` and ignores it, and has no `tier_breakdown`. `token_count` is an estimate of about 4 characters per token.
-- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200).
+- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200), and a `reason` over 1000 characters returns 422.
 - `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
 - `POST /v1/memory/consolidate` returns 501. The Python engine has no consolidation.
-- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It returns 409 or 503, never success, when the erase is refused or interrupted.
+- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It never returns success unless the erase finished: 409 if the erase is refused, 503 if a fact was written while it ran (calling again finishes it), and 500 for a storage error.
 - A request without `user_id` uses the user `default`. Rust used the whole org there, which this server has no equivalent for.
 - The message routes are scoped to `(org_id, user_id)`. Rust filtered on `org_id` alone.
 - Message `role` must be `user`, `assistant`, `system` or `tool`. Rust accepted any string.
 - Message `metadata` is accepted and not stored, and comes back as `{}`.
 - `seq` is a turn's 0-based position among the conversation's visible turns, oldest first. Rust stored the index within each save call.
 - `GET /v1/memory/messages` lists conversations by first turn. Rust listed them by id.
+- `GET /v1/memory/messages/{id}` for an unknown conversation returns 200 with an empty list.
+- `DELETE /v1/memory/messages/{id}` with an empty `user_id` or `org_id` returns 400 instead of using the `default` scope.
+- A request that fails validation (a missing field, a wrong type, a value out of range) returns 422 with FastAPI's `{"detail": ...}` body. Rust returned 400 with `{"error": ...}`.
 
 The module docstring of `src/engram/server/legacy_v1.py` is the full list.
 
@@ -244,13 +282,15 @@ Query-time re-extraction and `extract()` drop any fact a tombstone would withhol
 
 **The re-insertion rule.** A write cannot un-revoke. Recording the same claim again stores it but it is born hidden (`record(..., reject_revoked=True)` raises `RevokedContentError` instead). Making the claim visible again takes `Engram.reinstate(fact, actor=..., reason=...)` on the revoked fact itself, which is recorded on the tombstone; reinstating a copy that was born hidden is refused, so a write is never a handle on the original. Reinstating lifts only that fact's own tombstones: anything that also quotes or derives from another fact that is still revoked stays hidden. Matching is on normalized text, not meaning: a paraphrase, a number written differently, or a lookalike letter from another script is a new claim and needs its own revocation or a `derived_from` link.
 
-**What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Revoke, supersede, reinstate and erase are Python API only in this release, because the HTTP server has one shared token and no per-caller identity to record or check. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
+**What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Over HTTP, `DELETE /v1/memory/facts/{id}` revokes a fact and `DELETE /v1/memory/users/{id}` erases everything held for a user. Supersede, reinstate and erasing one fact by id are Python API only in this release. The HTTP server has one shared token and no per-caller identity, so the HTTP routes record a fixed actor, not who called. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
 
 **Older and newer libraries.** 0.2 has no version check, so nothing stops it from opening a 0.3 database and ignoring every tombstone. Keep 0.2 processes away from a file once 0.3 has written to it. From 0.3 on, the database records its schema version (2), and a library refuses to open a file written by a newer schema, before writing anything to it.
 
 **Erasure.** `Engram.erase(fact, actor=..., reason=...)` deletes, in one write transaction held from discovery to commit, the fact; every fact in its scope that equals or quotes it (same matching rule as above), and facts derived from any of them, repeated until nothing new is found; events listing them or quoting an erased text; the transcript turns they cite or that quote an erased text; and the free text of any tombstone or reinstatement note that quotes it. A short text such as a single word only matches on equality, so erasing "Paris" does not delete every turn that mentions Paris. FTS rows go with their base rows. The vector index for the scope is rebuilt without the erased vectors. It returns an `ErasureRecord` with ids, counts, actor and reason, and no content. A reason or actor containing any three-token run of an erased text is rejected; a single distinctive word can still get through, so keep audit fields to ticket numbers and roles.
 
 If the erased fact was revoked, its tombstone keeps the SHA-256 of the normalized text so the claim stays blocked. For a short text that hash can be confirmed by guessing; pass `block_reinsertion=False` to drop it as well, after which the same text can be recorded again.
+
+Erasing a revoked fact by id with `Engram.erase` can make turns of its conversation visible again. The turns that quote it are deleted, but turns that only paraphrase it were withheld by its tombstone and come back. This is a known issue, tracked for a fix.
 
 What the backend can show and what it cannot:
 

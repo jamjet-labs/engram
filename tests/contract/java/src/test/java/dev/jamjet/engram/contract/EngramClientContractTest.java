@@ -110,6 +110,12 @@ class EngramClientContractTest {
             assertEquals(2, num(deleted.get("deleted_count")));
             assertTrue(c.getMessages("conv-1", null, user, null).isEmpty());
 
+            // A conversation that is still there when deleteUser runs, so the
+            // empty listConversations below shows the erase removed it.
+            c.saveMessages("conv-2", List.of(Map.of("role", "user", "content", "My cat is Tom")),
+                    user, null);
+            assertEquals(List.of("conv-2"), c.listConversations(user, null));
+
             c.add(List.of(Map.of("role", "user", "content", "I like tea")), user, null, null);
             Map<String, Object> gone = c.deleteUser(user);
             assertEquals(Boolean.TRUE, gone.get("success"));

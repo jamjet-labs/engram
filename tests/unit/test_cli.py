@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from typer.testing import CliRunner
 
@@ -344,3 +346,54 @@ async def test_serve_engram_applies_the_cli_rules(monkeypatch):
         await cli.serve_engram(host="0.0.0.0", auth_token="a" * 40, **base)
     with pytest.raises(ValueError, match="printable ASCII"):
         await cli.serve_engram(host="127.0.0.1", auth_token="bad token", **base)
+
+
+async def _serve_once(monkeypatch) -> None:
+    import uvicorn
+
+    import engram.cli as cli
+
+    async def no_serve(self, sockets=None):
+        return None
+
+    monkeypatch.setattr(uvicorn.Server, "serve", no_serve)
+    await cli.serve_engram(
+        host="127.0.0.1",
+        port=9999,
+        db_path=":memory:",
+        auth_token=None,
+        allow_unauthenticated=True,
+        log_level="INFO",
+    )
+
+
+def _no_llm_warnings(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "engram.cli" and "no LLM" in r.getMessage()]
+
+
+async def test_serve_engram_warns_that_extraction_is_off(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="engram.cli")
+    await _serve_once(monkeypatch)
+    [rec] = _no_llm_warnings(caplog)
+    assert rec.levelno == logging.WARNING
+    for named in ("POST /v1/memory", "fact_ids null", "/v1/memory/record"):
+        assert named in rec.getMessage()
+
+
+async def test_serve_engram_does_not_warn_when_an_llm_is_set(monkeypatch, caplog):
+    from engram.engram import Engram
+    from engram.llm.base import LLMResponse
+
+    class AnyLLM:
+        async def generate(self, messages, temperature=0.0, max_tokens=None, json_mode=False):
+            return LLMResponse(content='{"facts": []}', finish_reason="stop")
+
+    opened = Engram.open
+
+    async def open_with_llm(*args, **kwargs):
+        return await opened(*args, llm=AnyLLM(), **kwargs)
+
+    monkeypatch.setattr(Engram, "open", open_with_llm)
+    caplog.set_level(logging.WARNING, logger="engram.cli")
+    await _serve_once(monkeypatch)
+    assert _no_llm_warnings(caplog) == []

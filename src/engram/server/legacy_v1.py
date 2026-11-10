@@ -8,6 +8,11 @@ against it. The native routes in http.py are separate and unchanged, except
 
 Every difference from Rust, all deliberate:
 
+Errors
+- A request that fails validation (a missing field, a wrong type, a value
+  out of range) is 422 with FastAPI's `{"detail": ...}`, not Rust's 400
+  `{"error": ...}`. Errors the handlers raise themselves keep `{"error"}`.
+
 Scope
 - `org_id` defaults to "default", as in Rust. A missing `user_id` means the
   Python user "default"; Rust used an org-wide scope there, which Python does
@@ -31,12 +36,15 @@ Facts
 - `POST /v1/memory/context` accepts `format` and ignores it: Python renders
   one format. `token_count` is the ~4 characters per token estimate the
   budget uses. There is no `tier_breakdown`.
-- `DELETE /v1/memory/facts/{id}` is 404 for an unknown id (Rust: 200).
+- `DELETE /v1/memory/facts/{id}` is 404 for an unknown id (Rust: 200), and
+  422 for a `reason` over 1000 characters.
 - `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
 - `POST /v1/memory/consolidate` is 501: Python has no consolidation.
 - `DELETE /v1/memory/users/{id}` also erases the user's chat turns, events,
-  entities and relationships, leaving content-free erasure records. It is 409
-  or 503, never success, when the erase is refused or interrupted.
+  entities and relationships, leaving content-free erasure records. It never
+  reports success unless the erase finished: 409 if it is refused, 503 if a
+  fact was written while it ran (calling again finishes it), 500 for any
+  other storage error.
 
 Path ids (compatibility with the published Java client)
 - The client puts the user id in the delete-user path without encoding it,
@@ -61,6 +69,10 @@ Messages
   oldest first. Rust stored the index within each save call, which restarts
   at 0; the two agree for a conversation saved in one call.
 - `GET /v1/memory/messages` lists conversations by first turn (Rust: by id).
+- `GET /v1/memory/messages/{id}` for a conversation with no visible turns,
+  unknown ids included, is 200 with an empty list.
+- `DELETE /v1/memory/messages/{id}` with an empty `user_id` or `org_id` is
+  400, not the "default" scope.
 - Rule (c) of the `live_messages` view: forgetting a fact extracted from a
   conversation withholds every turn of it, turns saved later included, until
   the fact is reinstated. Extraction sets no `source_message_id`, so the view
@@ -89,8 +101,8 @@ from engram.scope import Scope
 logger = logging.getLogger(__name__)
 
 LEGACY_HEALTH_PATH = "/health"
-# Forget only revokes, and nothing checks a tombstone's actor or reason
-# against fact text, so these can be fixed. Delete user cannot use a fixed
+# Forget only revokes, and no check refuses a tombstone's actor or reason for
+# matching fact text, so these can be fixed. Delete user cannot use a fixed
 # string: see _erase_audit_fields.
 _FORGET_ACTOR = "restv1"
 _FORGET_REASON = "forgotten through the v1 REST API"
@@ -128,7 +140,8 @@ class _ContextRequest(BaseModel):
 
 
 class _ForgetRequest(BaseModel):
-    reason: str | None = None
+    # Every later erase in the scope re-reads tombstone reasons, so keep them short.
+    reason: str | None = Field(default=None, max_length=1000)
 
 
 class _SaveMessagesRequest(BaseModel):
@@ -316,7 +329,7 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
     @app.delete("/v1/memory/users/{user_id:path}", response_model=None)
     async def delete_user(
         request: Request,
-        user_id: Annotated[str, Path(min_length=1, max_length=128)],
+        user_id: Annotated[str, Path(max_length=128)],
     ) -> dict[str, Any] | JSONResponse:
         """Hard-erase everything held for (default org, user_id), as Rust did.
 
@@ -336,6 +349,8 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
                 "delete user takes no query string; a '?' in the user id would cut it "
                 "short. Nothing was erased.",
             )
+        if not user_id:
+            return _error(400, "user_id must not be empty. Nothing was erased.")
         reason, actor = _erase_audit_fields()
         try:
             n = await engram.erase_user(
@@ -465,10 +480,16 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         user_id: _QueryId = None,
         org_id: _QueryId = None,
     ) -> dict[str, Any] | JSONResponse:
-        """Hard-delete one conversation's turns. Facts extracted from them stay, as in Rust."""
+        """Hard-delete one conversation's turns. Facts extracted from them stay, as in Rust.
+
+        An empty `user_id` or `org_id` is refused rather than read as "default",
+        so a client bug cannot delete the default user's conversation.
+        """
         conversation_id = _form_decoded_tail(request, conversation_id)
         if not conversation_id:
             return _error(400, "conversation_id must not be empty")
+        if user_id == "" or org_id == "":
+            return _error(400, "user_id and org_id must not be empty when given")
         s = _scope(user_id, org_id)
         n = await engram.delete_conversation(conversation_id, user_id=s.user_id, org_id=s.org_id)
         return {"success": True, "deleted_count": n}

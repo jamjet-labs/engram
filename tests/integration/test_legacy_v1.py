@@ -875,3 +875,41 @@ async def test_delete_user_takes_a_slash_in_the_id(served: tuple[TestClient, Eng
     assert r.json() == {"success": True, "deleted_facts": 1}
     assert await memory._store.list_fact_ids(Scope(org_id="default", user_id="tenant/42")) == []
     assert len(await memory._store.list_fact_ids(Scope(org_id="default", user_id="tenant"))) == 1
+
+
+# ── Low-risk input limits ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_forget_refuses_a_reason_over_1000_characters(
+    served: tuple[TestClient, Engram],
+) -> None:
+    client, memory = served
+    path = f"/v1/memory/facts/{_add(client)}"
+    r = client.request("DELETE", path, headers=AUTH, json={"reason": "a" * 1001})
+    assert r.status_code == 422
+    assert await memory.revocations(user_id="alice") == []
+    r = client.request("DELETE", path, headers=AUTH, json={"reason": "a" * 1000})
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params", [{"user_id": ""}, {"org_id": ""}, {"user_id": "", "org_id": ""}])
+async def test_delete_messages_refuses_an_empty_scope_id(
+    served: tuple[TestClient, Engram], params: dict[str, str]
+) -> None:
+    client, memory = served
+    r = client.post(
+        "/v1/memory/messages",
+        headers=AUTH,
+        json={"conversation_id": "default", "messages": [{"role": "user", "content": "mine"}]},
+    )
+    assert r.status_code == 201
+    r = client.delete("/v1/memory/messages/default", params=params, headers=AUTH)
+    assert r.status_code == 400 and set(r.json()) == {"error"}
+    assert [m.content for m in await memory.list_messages("default")] == ["mine"]
+
+
+def test_delete_user_refuses_an_empty_id(client: TestClient) -> None:
+    r = client.delete("/v1/memory/users/", headers=AUTH)
+    assert r.status_code == 400 and set(r.json()) == {"error"}
