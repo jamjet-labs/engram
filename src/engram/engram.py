@@ -663,22 +663,32 @@ class Engram:
         if token_budget is None:
             qt = await classifier.classify(query) if classifier is not None else None
             token_budget = budget_for(qt)
-        char_budget = token_budget * chars_per_token
-
         candidates = await self.context_entries(
             query, user_id=user_id, org_id=org_id, decompose=decompose, role_filter=role_filter
         )
+        return "\n".join(context_lines(candidates, token_budget, chars_per_token))
 
-        lines: list[str] = []
-        running = 0
-        for sf in candidates:
-            line = (
-                f"[{sf.fact.event_date.date().isoformat()}] {sf.fact.text}"
-                if sf.fact.event_date
-                else f"- {sf.fact.text}"
-            )
-            if running + len(line) + 1 > char_budget:
-                break
-            lines.append(line)
-            running += len(line) + 1
-        return "\n".join(lines)
+
+def context_lines(
+    entries: list[ScoredFact], token_budget: int, chars_per_token: int = 4
+) -> list[str]:
+    """The lines :meth:`Engram.context` joins: one per entry, in order, while they fit.
+
+    Stops at the first entry that does not fit the budget. One item per fact,
+    even when the fact's text holds newlines, so ``len(result)`` is the number
+    of facts included.
+    """
+    char_budget = token_budget * chars_per_token
+    lines: list[str] = []
+    running = 0
+    for sf in entries:
+        line = (
+            f"[{sf.fact.event_date.date().isoformat()}] {sf.fact.text}"
+            if sf.fact.event_date
+            else f"- {sf.fact.text}"
+        )
+        if running + len(line) + 1 > char_budget:
+            break
+        lines.append(line)
+        running += len(line) + 1
+    return lines

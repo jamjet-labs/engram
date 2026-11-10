@@ -1,7 +1,9 @@
 """FastAPI HTTP server.
 
-Wire-protocol commitment: paths and JSON shapes match Rust v0.5.x exactly so
-existing clients (Spring Boot starter, langchain4j, Java SDK) keep working.
+Native routes live here. The Rust v0.5.x routes that the Java SDK and Spring
+Boot starter call are in legacy_v1.py, and scripts/java-contract.sh runs the
+published jar against them. `GET /v1/memory/recall` is shared: it answers in
+both shapes.
 """
 
 from __future__ import annotations
@@ -9,10 +11,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from starlette.routing import Route
 
@@ -20,6 +22,7 @@ from engram.engram import Engram
 from engram.errors import NotFoundError
 from engram.governance import Provenance
 from engram.models import ChatMessage, MemoryTier, Polarity
+from engram.retrieve.base import ScoredFact
 from engram.scope import Scope
 from engram.server.auth import (
     HEALTHZ_PATH,
@@ -31,6 +34,7 @@ from engram.server.auth import (
     normalize_host,
     normalize_origin,
 )
+from engram.server.legacy_v1 import LEGACY_HEALTH_PATH, fact_json, register_legacy_routes
 from engram.server.transport import build_streamable_http_mount
 
 
@@ -75,6 +79,20 @@ class _SearchHit(BaseModel):
 
 class _SearchResponse(BaseModel):
     hits: list[_SearchHit]
+
+
+def _hit(sf: ScoredFact) -> _SearchHit:
+    return _SearchHit(
+        fact_id=sf.fact.id,
+        text=sf.fact.text,
+        score=sf.score,
+        vector_score=sf.vector_score,
+        keyword_score=sf.keyword_score,
+        rerank_score=sf.rerank_score,
+        category=sf.fact.category,
+        polarity=sf.fact.polarity,
+        event_date=sf.fact.event_date,
+    )
 
 
 class _ProvenanceHit(_SearchHit):
@@ -126,6 +144,10 @@ class _ExtractResponse(BaseModel):
     facts: list[_ExtractedFactSummary]
 
 
+# Health checks are open: no token, Origin or Host check. They reveal nothing.
+_OPEN_PATHS = (HEALTHZ_PATH, LEGACY_HEALTH_PATH)
+
+
 def build_http_app(
     engram: Engram,
     *,
@@ -142,10 +164,10 @@ def build_http_app(
         mcp_server: Optional MCP `Server` (e.g. from `build_mcp_server`). If
             provided, a Streamable HTTP MCP endpoint is mounted at `/mcp`.
         auth_token: Bearer token required on every route, `/v1/*` and `/mcp`
-            alike. Only `/healthz` is open. One token is one trust domain: any
-            holder can read and write every `(org_id, user_id)` scope, because
-            the scope comes from the request. Run one server per tenant to
-            separate them.
+            alike. Only the health checks, `/healthz` and Rust's `/health`,
+            are open. One token is one trust domain: any holder can read and
+            write every `(org_id, user_id)` scope, because the scope comes from
+            the request. Run one server per tenant to separate them.
         allow_unauthenticated: Required to build an app without
             `auth_token`. Such an app serves anyone who can reach it. Its Host,
             Origin and Fetch Metadata checks stop a web page from using a
@@ -217,12 +239,12 @@ def build_http_app(
     # Middleware added last runs first: Host, Origin, auth, then routing.
     if auth_token is not None:
         app.add_middleware(
-            BearerAuthMiddleware, expected_token=auth_token, exempt_paths=(HEALTHZ_PATH,)
+            BearerAuthMiddleware, expected_token=auth_token, exempt_paths=_OPEN_PATHS
         )
     app.add_middleware(
         OriginGuardMiddleware,
         allowed_origins=origins,
-        exempt_paths=(HEALTHZ_PATH,),
+        exempt_paths=_OPEN_PATHS,
         refuse_cross_site=auth_token is None,
     )
     # Without a token, nothing else stops a DNS-rebound page from reading over
@@ -231,8 +253,11 @@ def build_http_app(
         app.add_middleware(
             HostGuardMiddleware,
             allowed_hosts=LOOPBACK_HOSTNAMES | (hosts or set()),
-            exempt_paths=(HEALTHZ_PATH,),
+            exempt_paths=_OPEN_PATHS,
         )
+
+    # First, so a native route added later cannot shadow a path the Java SDK calls.
+    register_legacy_routes(app, engram)
 
     @app.api_route(HEALTHZ_PATH, methods=["GET", "HEAD"], response_model=None)
     async def healthz(request: Request) -> Response | dict[str, str]:
@@ -265,21 +290,7 @@ def build_http_app(
         results = await engram.recall(
             query=req.query, user_id=req.user_id, org_id=req.org_id, top_k=req.top_k
         )
-        hits = [
-            _SearchHit(
-                fact_id=sf.fact.id,
-                text=sf.fact.text,
-                score=sf.score,
-                vector_score=sf.vector_score,
-                keyword_score=sf.keyword_score,
-                rerank_score=sf.rerank_score,
-                category=sf.fact.category,
-                polarity=sf.fact.polarity,
-                event_date=sf.fact.event_date,
-            )
-            for sf in results
-        ]
-        return _SearchResponse(hits=hits)
+        return _SearchResponse(hits=[_hit(sf) for sf in results])
 
     @app.post("/v1/memory/recall_with_provenance", response_model=_ProvenanceSearchResponse)
     async def recall_with_provenance(req: _SearchRequest) -> _ProvenanceSearchResponse:
@@ -293,31 +304,35 @@ def build_http_app(
         )
         return _ProvenanceSearchResponse(
             hits=[
-                _ProvenanceHit(
-                    fact_id=sf.fact.id,
-                    text=sf.fact.text,
-                    score=sf.score,
-                    vector_score=sf.vector_score,
-                    keyword_score=sf.keyword_score,
-                    rerank_score=sf.rerank_score,
-                    category=sf.fact.category,
-                    polarity=sf.fact.polarity,
-                    event_date=sf.fact.event_date,
-                    provenance=sf.provenance,
-                )
+                _ProvenanceHit(**_hit(sf).model_dump(), provenance=sf.provenance)
                 for sf in results
                 if sf.provenance is not None
             ]
         )
 
-    # Alias for parity with Rust v0.5.x; Rust uses /recall as a GET.
-    @app.get("/v1/memory/recall", response_model=_SearchResponse)
+    # Rust v0.5.x clients send q/max_results and read results/total; native
+    # clients send query/top_k and read hits. One route serves both.
+    @app.get("/v1/memory/recall")
     async def recall_get(
-        query: str, user_id: str = "default", org_id: str = "default", top_k: int = 10
-    ) -> _SearchResponse:
-        return await search(
-            _SearchRequest(query=query, user_id=user_id, org_id=org_id, top_k=top_k)
+        query: str | None = None,
+        q: str | None = None,
+        user_id: str = "default",
+        org_id: str = "default",
+        top_k: Annotated[int | None, Query(ge=1, le=200)] = None,
+        max_results: Annotated[int | None, Query(ge=1, le=200)] = None,
+    ) -> dict[str, Any]:
+        text = query if query is not None else q
+        if text is None:
+            raise HTTPException(status_code=422, detail="query (or q) is required")
+        found = await engram.recall(
+            query=text, user_id=user_id, org_id=org_id, top_k=top_k or max_results or 10
         )
+        results = [fact_json(sf) for sf in found]
+        return {
+            "hits": [_hit(sf).model_dump(mode="json") for sf in found],
+            "results": results,
+            "total": len(results),
+        }
 
     @app.get("/v1/memory/raw_facts", response_model=_SearchResponse)
     async def raw_facts(
