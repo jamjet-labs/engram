@@ -863,6 +863,32 @@ class SqliteStore:
                 rows = await cur.fetchall()
         return [r[0] for r in rows]
 
+    async def list_session_messages(
+        self, session_id: str, scope: Scope, *, last_n: int | None = None
+    ) -> list[ChatMessage]:
+        """A session's visible turns, oldest first. For the v1 REST contract.
+
+        ``last_n=None`` returns every visible turn, with no cap. ``last_n=N``
+        returns the newest N, still oldest first. ``last_n`` below 1 is
+        refused. Ties on timestamp are broken by id.
+        """
+        if last_n is not None and not last_n >= 1:
+            raise ValueError("last_n must be at least 1")
+        where = "org_id=? AND user_id=? AND session_id=?"
+        args: tuple[Any, ...] = (scope.org_id, scope.user_id, session_id)
+        if last_n is None:
+            sql = f"SELECT * FROM live_messages WHERE {where} ORDER BY timestamp ASC, id ASC"
+        else:
+            sql = f"""SELECT * FROM (
+                          SELECT * FROM live_messages WHERE {where}
+                           ORDER BY timestamp DESC, id DESC LIMIT ?
+                      ) ORDER BY timestamp ASC, id ASC"""
+            args = (*args, last_n)
+        async with self._reading() as db:
+            async with db.execute(sql, args) as cur:
+                rows = await cur.fetchall()
+        return [self._row_to_message(r) for r in rows]
+
     # ── Governance: provenance, revocation, erasure ──────────────────────
     #
     # Visibility is decided by the `hidden_facts` view (schema.sql). The read
@@ -1663,6 +1689,23 @@ class SqliteStore:
                 rows = await cur.fetchall()
         return [UUID(r[0]) for r in rows]
 
+    async def fact_text_quoted_by(self, value: str, scope: Scope) -> bool:
+        """Does ``value`` quote any fact text in scope, hidden facts included?
+
+        The rule :meth:`erase` applies to its reason and actor: any three-token
+        run of a text, or all of a text of three tokens or fewer. Lets
+        `Engram.erase_user` refuse before it deletes anything. Returns a bool,
+        never text.
+        """
+        value_norm = normalize_text(value)
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT text FROM facts WHERE org_id=? AND user_id=?",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return any(quotes_any_run(value_norm, normalize_text(r[0])) for r in rows)
+
     async def fact_counts(self) -> tuple[int, int]:
         """(all facts, visible and not invalidated facts) across every scope."""
         async with self._reading() as db:
@@ -1706,14 +1749,22 @@ class SqliteStore:
             raise StoreError(f"delete_session_messages: {e}") from e
         return len(ids)
 
-    async def erase_scope_residue(self, scope: Scope) -> dict[str, int]:
+    async def erase_scope_residue(self, scope: Scope, *, reason: str, actor: str) -> ErasureRecord:
         """Hard-delete what per-fact erasure leaves behind in a scope.
 
         Called by `Engram.erase_user` after every fact in the scope has been
         erased: transcript turns, events, entities, relationships and fact_meta
         rows. Refuses while any fact remains, so it can never stand in for
-        `erase`. Revocation and erasure records stay: they are the content-free
-        audit trail. Returns rows removed per table.
+        `erase`. Every tombstone in the scope loses its content hash and
+        normalized text, including a hash an earlier
+        ``erase(block_reinsertion=True)`` kept, so the erased texts are no
+        longer blocked from re-insertion. Revocation and erasure rows stay:
+        they are the content-free audit trail.
+
+        In the same transaction, writes one erasure record with no fact ids,
+        ``reason`` and ``actor`` as given, and the per-table counts in
+        ``artifacts`` (``revocations_scrubbed`` counts tombstones cleared).
+        Returns it; the caller passes it to :meth:`finalize_erasure`.
 
         `fact_entity_refs` rows go through ON DELETE CASCADE (foreign_keys is ON,
         set from schema.sql in `open`).
@@ -1740,9 +1791,42 @@ class SqliteStore:
                 for table in ("messages", "events", "relationships", "entities", "fact_meta"):
                     cur2 = await self._conn.execute(f"DELETE FROM {table} WHERE {where}", args)
                     removed[table] = cur2.rowcount
+                cur2 = await self._conn.execute(
+                    f"""UPDATE revocations SET content_hash = NULL, content_norm = NULL
+                         WHERE {where}
+                           AND (content_hash IS NOT NULL OR content_norm IS NOT NULL)""",
+                    args,
+                )
+                removed["revocations_scrubbed"] = cur2.rowcount
+                record = ErasureRecord(
+                    org_id=scope.org_id,
+                    user_id=scope.user_id,
+                    fact_ids=[],
+                    actor=actor,
+                    reason=reason,
+                    erased_at=_now(),
+                    artifacts=removed,
+                )
+                await self._conn.execute(
+                    """INSERT INTO erasures
+                       (id, org_id, user_id, fact_ids, actor, reason, erased_at, artifacts,
+                        guarantees)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (
+                        str(record.id),
+                        record.org_id,
+                        record.user_id,
+                        json.dumps([]),
+                        actor,
+                        reason,
+                        _dt(record.erased_at),
+                        json.dumps(record.artifacts),
+                        json.dumps(record.guarantees),
+                    ),
+                )
         except aiosqlite.Error as e:
             raise StoreError(f"erase_scope_residue: {e}") from e
-        return removed
+        return record
 
     # ── Row -> Pydantic ──────────────────────────────────────────────────
 

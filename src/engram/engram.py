@@ -302,16 +302,24 @@ class Engram:
         """Revoke a fact named by id alone, for the v1 REST contract.
 
         Soft and reversible, like the Rust server's invalidate. Returns False
-        if no fact has this id. Use `erase` to hard-delete.
+        if no fact has this id, or if it was erased before the revoke landed.
+        Use `erase` to hard-delete.
+
+        Not an authorization check: it resolves the owner of any fact id across
+        every scope and revokes it there. Use it only where the caller is
+        trusted for every scope, as on a one-token server.
         """
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
         scope = await self._store.find_fact_scope(fact_id)
         if scope is None:
             return False
-        await self.revoke(
-            fact_id, reason=reason, actor=actor, user_id=scope.user_id, org_id=scope.org_id
-        )
+        try:
+            await self.revoke(
+                fact_id, reason=reason, actor=actor, user_id=scope.user_id, org_id=scope.org_id
+            )
+        except NotFoundError:
+            return False  # erased between the lookup and the revoke
         return True
 
     async def erase_user(
@@ -319,38 +327,51 @@ class Engram:
     ) -> int:
         """Hard-delete everything held for one (org_id, user_id) scope.
 
-        Every fact goes through `erase`, so its copies, quotes, derived facts,
-        events, cited transcript turns and vectors go with it, and each leaves
-        a content-free erasure record. Tombstones on those facts lose their
-        content hash too (`block_reinsertion=False`): this is the
-        right-to-erasure path, and a short text's hash can be confirmed by
-        guessing. A hash kept by an earlier `erase(block_reinsertion=True)`
-        stays, because its fact is already gone. Then the scope's remaining
-        turns, events, entities and relationships are deleted; that step
-        writes no erasure record of its own. Revocation and erasure records
-        stay as the audit trail.
+        Every fact goes through `erase` with `block_reinsertion=False`, so its
+        copies, quotes, derived facts, events, cited transcript turns and
+        vectors go with it, and each leaves a content-free erasure record.
+        Then `erase_scope_residue` deletes the scope's remaining turns, events,
+        entities and relationships, clears the content hash and normalized
+        text from every tombstone in the scope (a hash kept by an earlier
+        `erase(block_reinsertion=True)` included), and writes one more erasure
+        record with the counts and no fact ids. This is the right-to-erasure
+        path, and a short text's hash can be confirmed by guessing.
+        Tombstones and erasure records stay as the content-free audit trail.
 
-        Not one transaction. If a fact is written to the scope mid-way, the
-        last step refuses with StoreError; facts erased so far stay erased,
-        and calling again finishes the job. Returns the number of facts erased.
+        ``reason`` and ``actor`` are refused with ValueError, before anything
+        is deleted, when blank or when they quote any fact text in the scope,
+        hidden facts included (the rule `erase` applies). Only a fact written
+        after that check can make a later `erase` refuse part-way.
+
+        Not one transaction. A StoreError from the last step means a fact was
+        written to the scope while this ran; the facts erased so far stay
+        erased, and calling again is safe and finishes. Cost grows faster than
+        linearly with the number of facts in the scope, so one call on a large
+        scope may run long; each call erases more, so repeating it finishes the
+        job. Returns the number of facts erased.
         """
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
         scope = Scope(org_id=org_id, user_id=user_id)
+        for label, value in (("reason", reason), ("actor", actor)):
+            if await self._store.fact_text_quoted_by(value, scope):
+                raise ValueError(f"erasure {label} must not quote the content being erased")
         erased = 0
         for fact_id in await self._store.list_fact_ids(scope):
-            if not await self._store.fact_exists(fact_id, scope):
+            try:
+                record = await self.erase(
+                    fact_id,
+                    reason=reason,
+                    actor=actor,
+                    user_id=user_id,
+                    org_id=org_id,
+                    block_reinsertion=False,
+                )
+            except NotFoundError:
                 continue  # already removed as a copy or derivation of an earlier one
-            record = await self.erase(
-                fact_id,
-                reason=reason,
-                actor=actor,
-                user_id=user_id,
-                org_id=org_id,
-                block_reinsertion=False,
-            )
             erased += len(record.fact_ids)
-        await self._store.erase_scope_residue(scope)
+        residue = await self._store.erase_scope_residue(scope, reason=reason, actor=actor)
+        await self._store.finalize_erasure(residue, {}, {})
         return erased
 
     async def list_conversations(
@@ -374,7 +395,11 @@ class Engram:
         )
 
     async def fact_counts(self) -> tuple[int, int]:
-        """(all facts, visible and not invalidated facts) across every scope."""
+        """(all facts, visible and not invalidated facts) across every tenant.
+
+        Not scoped to a caller: like `forget`, it assumes the caller is trusted
+        for every scope, as on a one-token server.
+        """
         return await self._store.fact_counts()
 
     async def list_messages(
@@ -383,11 +408,16 @@ class Engram:
         *,
         user_id: str = "default",
         org_id: str = "default",
-        limit: int = 1000,
+        last_n: int | None = None,
     ) -> list[ChatMessage]:
-        """A session's visible transcript turns, oldest first."""
-        return await self._store.list_messages(
-            session_id, Scope(org_id=org_id, user_id=user_id), limit=limit
+        """A session's visible transcript turns, oldest first.
+
+        ``last_n=None`` returns every visible turn, with no cap. ``last_n=N``
+        returns the newest N, oldest first. ``last_n`` below 1 raises
+        ValueError.
+        """
+        return await self._store.list_session_messages(
+            session_id, Scope(org_id=org_id, user_id=user_id), last_n=last_n
         )
 
     async def explain(

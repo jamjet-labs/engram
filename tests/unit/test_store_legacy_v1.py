@@ -56,7 +56,7 @@ async def test_fact_counts(memory: Engram) -> None:
 async def test_erase_scope_residue_refuses_while_facts_remain(memory: Engram) -> None:
     await memory.record("alice likes tea", user_id="alice")
     with pytest.raises(Exception, match="facts remain"):
-        await memory._store.erase_scope_residue(ALICE)
+        await memory._store.erase_scope_residue(ALICE, reason="test", actor="t")
 
 
 async def test_erase_scope_residue_refuses_while_only_a_revoked_fact_remains(
@@ -67,11 +67,12 @@ async def test_erase_scope_residue_refuses_while_only_a_revoked_fact_remains(
     await memory.record_message("hi", session_id="s1", user_id="alice", timestamp=t)
     await memory.revoke(fact.id, reason="test", actor="t", user_id="alice")
     with pytest.raises(Exception, match="facts remain"):
-        await memory._store.erase_scope_residue(ALICE)
+        await memory._store.erase_scope_residue(ALICE, reason="test", actor="t")
     conn = memory._store._conn
     async with conn.execute("SELECT COUNT(*) FROM messages WHERE user_id='alice'") as cur:
         row = await cur.fetchone()
     assert row is not None and row[0] == 1  # nothing deleted by the refusal
+    assert await memory._store.list_erasures(ALICE) == []  # and nothing recorded
 
 
 async def test_delete_session_then_reuse_id_is_withheld_after_revoked_fact(
@@ -132,18 +133,20 @@ async def test_erase_scope_residue_clears_scope_only(memory: Engram) -> None:
     revocations_before = await _count(memory, "revocations", "alice")
     assert erasures_before and revocations_before >= 1
 
-    removed = await memory._store.erase_scope_residue(ALICE)
+    residue = await memory._store.erase_scope_residue(ALICE, reason="test", actor="t")
 
+    removed = residue.artifacts
     assert removed["messages"] == 1
     assert removed["entities"] == 1
     assert removed["events"] == 1
     assert removed["relationships"] == 1
     for table in ("events", "relationships", "fact_meta", "messages", "entities"):
         assert await _count(memory, table, "alice") == 0, table
-    # content-free audit trail stays
-    assert [e.id for e in await memory._store.list_erasures(ALICE)] == [
-        e.id for e in erasures_before
-    ]
+    # content-free audit trail stays, plus one record for the residue
+    after = await memory._store.list_erasures(ALICE)
+    assert [e.id for e in after] == [e.id for e in erasures_before] + [residue.id]
+    assert after[-1].fact_ids == [] and after[-1].artifacts == removed
+    assert (after[-1].reason, after[-1].actor) == ("test", "t")
     assert await _count(memory, "revocations", "alice") == revocations_before
     # other scope untouched
     assert await memory._store.list_session_ids(BOB) == ["s1"]
@@ -152,3 +155,34 @@ async def test_erase_scope_residue_clears_scope_only(memory: Engram) -> None:
     async with conn.execute("SELECT COUNT(*) FROM fact_entity_refs") as cur:
         row = await cur.fetchone()
     assert row is not None and row[0] == 0
+
+
+async def test_erase_scope_residue_scrubs_every_tombstone_in_scope(memory: Engram) -> None:
+    conn = memory._store._conn
+    # A tombstone whose fact is already gone, still carrying its hash and text.
+    for user, rid in (("alice", "rev-a"), ("bob", "rev-b")):
+        await conn.execute(
+            "INSERT INTO revocations (id, org_id, user_id, fact_id, content_hash, content_norm,"
+            " reason, actor, revoked_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                rid,
+                "default",
+                user,
+                str(uuid4()),
+                "h",
+                "n",
+                "test",
+                "t",
+                "2026-11-10T00:00:00+00:00",
+            ),
+        )
+    await conn.commit()
+
+    residue = await memory._store.erase_scope_residue(ALICE, reason="test", actor="t")
+
+    assert residue.artifacts["revocations_scrubbed"] == 1
+    async with conn.execute(
+        "SELECT user_id, content_hash, content_norm FROM revocations ORDER BY user_id"
+    ) as cur:
+        rows = [tuple(r) for r in await cur.fetchall()]
+    assert rows == [("alice", None, None), ("bob", "h", "n")]  # row kept, content gone

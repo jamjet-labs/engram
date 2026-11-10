@@ -35,9 +35,10 @@ GOVERNANCE_METHODS = {
     "explain",  # returns status and provenance, never text
     "find_fact_scope",  # which scope owns a fact id; returns a Scope
     "list_fact_ids",  # every id in scope, hidden included, for erasure; ids only
+    "fact_text_quoted_by",  # erase_user reason/actor pre-check; returns a bool
     "fact_counts",  # two integers
     "delete_session_messages",  # finds ids to hard-delete; returns a count
-    "erase_scope_residue",  # counts facts, hard-deletes residue; returns counts
+    "erase_scope_residue",  # counts facts, hard-deletes residue; returns ids and counts
 }
 
 
