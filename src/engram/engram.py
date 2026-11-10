@@ -10,6 +10,7 @@ For HTTP / MCP service exposure, see `engram.server`.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -19,7 +20,7 @@ from uuid import UUID, uuid4
 from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
-from engram.errors import NotFoundError
+from engram.errors import NotFoundError, ScopeErasedError
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.governance import (
@@ -39,6 +40,8 @@ from engram.retrieve.rrf import reciprocal_rank_fusion
 from engram.scope import Scope
 from engram.store.sqlite import SqliteStore
 from engram.vector.hnsw import HnswVectorStore
+
+logger = logging.getLogger(__name__)
 
 
 class Engram:
@@ -298,6 +301,130 @@ class Engram:
             record, {"vectors": removed}, {"vector_index_rebuilt": True}
         )
 
+    async def forget(self, fact_id: UUID, *, reason: str, actor: str) -> bool:
+        """Revoke a fact named by id alone, for the v1 REST contract.
+
+        Soft and reversible, like the Rust server's invalidate. Returns False
+        if no fact has this id, or if it was erased before the revoke landed.
+        Use `erase` to hard-delete.
+
+        Not an authorization check: it resolves the owner of any fact id across
+        every scope and revokes it there. Use it only where the caller is
+        trusted for every scope, as on a one-token server.
+        """
+        reason = require_text("reason", reason)
+        actor = require_text("actor", actor)
+        scope = await self._store.find_fact_scope(fact_id)
+        if scope is None:
+            return False
+        try:
+            await self.revoke(
+                fact_id, reason=reason, actor=actor, user_id=scope.user_id, org_id=scope.org_id
+            )
+        except NotFoundError:
+            return False  # erased between the lookup and the revoke
+        return True
+
+    async def erase_user(
+        self, *, user_id: str, org_id: str = "default", reason: str, actor: str
+    ) -> int:
+        """Hard-delete everything held for one (org_id, user_id) scope.
+
+        Every fact goes through `erase` with `block_reinsertion=False`, so its
+        copies, quotes, derived facts, events, cited transcript turns and
+        vectors go with it, and each leaves a content-free erasure record.
+        Then `erase_scope_residue` deletes the scope's remaining turns, events,
+        entities and relationships, clears the content hash and normalized
+        text from every tombstone in the scope (a hash kept by an earlier
+        `erase(block_reinsertion=True)` included), and writes one more erasure
+        record with the counts and no fact ids. This is the right-to-erasure
+        path, and a short text's hash can be confirmed by guessing.
+        Tombstones and erasure records stay as the content-free audit trail.
+
+        ``reason`` and ``actor`` are refused with ValueError, before anything
+        is deleted, when blank or when they quote any fact text in the scope,
+        hidden facts included (the rule `erase` applies). Only a fact written
+        after that check can make a later `erase` refuse part-way.
+
+        Not one transaction. ScopeResidueRefusedError (a StoreError) from the
+        last step means a fact was written to the scope while this ran; the
+        facts erased so far stay erased, and calling again is safe and
+        finishes. Any other StoreError is a storage fault: what was erased
+        stays erased, but calling again may fail the same way. Cost grows
+        faster than linearly with the number of facts in the scope, so one call
+        on a large scope may run long; each call erases more, so repeating it
+        finishes the job. Returns the number of facts erased.
+        """
+        reason = require_text("reason", reason)
+        actor = require_text("actor", actor)
+        scope = Scope(org_id=org_id, user_id=user_id)
+        for label, value in (("reason", reason), ("actor", actor)):
+            if await self._store.fact_text_quoted_by(value, scope):
+                raise ValueError(f"erasure {label} must not quote the content being erased")
+        erased = 0
+        for fact_id in await self._store.list_fact_ids(scope):
+            try:
+                record = await self.erase(
+                    fact_id,
+                    reason=reason,
+                    actor=actor,
+                    user_id=user_id,
+                    org_id=org_id,
+                    block_reinsertion=False,
+                )
+            except NotFoundError:
+                continue  # already removed as a copy or derivation of an earlier one
+            erased += len(record.fact_ids)
+        residue = await self._store.erase_scope_residue(scope, reason=reason, actor=actor)
+        await self._store.finalize_erasure(residue, {}, {})
+        return erased
+
+    async def list_conversations(
+        self, *, user_id: str = "default", org_id: str = "default"
+    ) -> list[str]:
+        """Session ids with a visible transcript turn, by first turn."""
+        return await self._store.list_session_ids(Scope(org_id=org_id, user_id=user_id))
+
+    async def delete_conversation(
+        self, session_id: str, *, user_id: str = "default", org_id: str = "default"
+    ) -> int:
+        """Hard-delete one session's transcript. Facts extracted from it stay.
+
+        Returns the number of turns removed. The facts lose their
+        `source_message_id` link. If one of those facts was revoked, rule (c)
+        of `live_messages` withholds every later turn in a session reusing
+        that id. This is accepted fail-closed behavior.
+        """
+        return await self._store.delete_session_messages(
+            session_id, Scope(org_id=org_id, user_id=user_id)
+        )
+
+    async def fact_counts(self) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) across every tenant.
+
+        Not scoped to a caller: like `forget`, it assumes the caller is trusted
+        for every scope, as on a one-token server.
+        """
+        return await self._store.fact_counts()
+
+    async def list_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: str = "default",
+        org_id: str = "default",
+        last_n: int | None = None,
+    ) -> list[ChatMessage]:
+        """A session's visible transcript turns, oldest first.
+
+        ``last_n=None`` returns every visible turn, with no cap. ``last_n=N``
+        returns the newest N, oldest first. ``last_n`` below 1 raises
+        ValueError.
+        """
+        return await self._store.list_session_messages(
+            session_id, Scope(org_id=org_id, user_id=user_id), last_n=last_n
+        )
+
     async def explain(
         self, fact_id: UUID, user_id: str = "default", org_id: str = "default"
     ) -> Provenance | None:
@@ -351,7 +478,12 @@ class Engram:
         - ``source_message_id`` links the transcript turn the fact came from.
         - Text that matches revoked content is stored but withheld (a write
           cannot un-revoke). ``reject_revoked=True`` raises instead.
+        - If :meth:`erase_user` erases this scope while the call runs, the
+          fact is not stored and ScopeErasedError is raised; if the erase
+          lands after the fact is stored, it erases the fact and its vector.
         """
+        # Before any await: an erase_user that finishes after this refuses the write.
+        started = datetime.now().astimezone()
         scope = Scope(org_id=org_id, user_id=user_id)
         if reject_revoked and await self._store.is_content_revoked(text, scope):
             raise RevokedContentError("text matches revoked content in this scope")
@@ -371,13 +503,35 @@ class Engram:
             metadata=md,
             source_message_id=source_message_id,
         )
-        await self._store.upsert_fact(
-            fact, writer=actor, source="record", derived_from=derived_from
-        )
+        try:
+            await self._store.upsert_fact(
+                fact,
+                writer=actor,
+                source="record",
+                derived_from=derived_from,
+                not_erased_since=started,
+            )
+        except ScopeErasedError:
+            logger.info("record: the scope was erased while the write ran; nothing stored")
+            raise
         if await self._store.provenance([fact.id], scope):
             [vec] = await self._embed.embed([text])
-            await self._vec.add(fact.id, vec, scope)
+            await self._add_vector(fact.id, vec, scope)
         return fact
+
+    async def _add_vector(self, fact_id: UUID, vec: list[float], scope: Scope) -> bool:
+        """Index a stored fact's vector. False if an erase removed the fact meanwhile.
+
+        An erase that runs between the upsert and the add purges a vector that
+        is not there yet, so the add would leave one for a fact that is gone.
+        Checking after the add catches that order; an erase that commits after
+        the check purges the vector itself.
+        """
+        await self._vec.add(fact_id, vec, scope)
+        if await self._store.fact_row_committed(fact_id, scope):
+            return True
+        await self._vec.purge([fact_id], scope)
+        return False
 
     async def record_message(
         self,
@@ -387,8 +541,13 @@ class Engram:
         user_id: str = "default",
         org_id: str = "default",
         timestamp: datetime | None = None,
+        not_erased_since: datetime | None = None,
     ) -> ChatMessage:
-        """Record a raw chat turn (no extraction)."""
+        """Record a raw chat turn (no extraction).
+
+        With ``not_erased_since`` (timezone-aware), raises ScopeErasedError and
+        stores nothing if :meth:`erase_user` erased the scope at or after it.
+        """
         msg = ChatMessage(
             scope=Scope(org_id=org_id, user_id=user_id),
             session_id=session_id,
@@ -396,7 +555,7 @@ class Engram:
             content=content,
             timestamp=timestamp or datetime.now().astimezone(),
         )
-        await self._store.upsert_message(msg)
+        await self._store.upsert_message(msg, not_erased_since=not_erased_since)
         return msg
 
     async def extract(
@@ -405,11 +564,22 @@ class Engram:
         session_date: datetime | None = None,
         persist: bool = True,
         actor: str | None = None,
+        not_erased_since: datetime | None = None,
     ) -> list[Fact]:
         """Extract durable facts from a conversation. Optionally persist them.
 
         Requires an LLM to have been passed at `Engram.open(llm=...)`.
+
+        If :meth:`erase_user` erases the scope while this runs, the facts not
+        yet stored are dropped, and the result lists only those stored before
+        the erase. ``not_erased_since`` is when the write started; it defaults
+        to the start of this call. Pass an earlier time when the messages were
+        stored before this call, so an erase that removed them in between also
+        refuses the facts drawn from them. It must be timezone-aware (ValueError).
         """
+        if not_erased_since is not None and not_erased_since.tzinfo is None:
+            raise ValueError("not_erased_since must be timezone-aware")
+        started = datetime.now().astimezone() if not_erased_since is None else not_erased_since
         if self._extract is None:
             raise RuntimeError("extraction requires an LLM; pass `llm=...` to Engram.open()")
         if not messages:
@@ -435,11 +605,23 @@ class Engram:
                     event_date=ef.event_date,
                     mention_date=ef.mention_date,
                 )
-                await self._store.upsert_fact(fact, writer=actor, source="extract")
+                try:
+                    await self._store.upsert_fact(
+                        fact, writer=actor, source="extract", not_erased_since=started
+                    )
+                except ScopeErasedError:
+                    logger.info(
+                        "extract: the scope was erased while extraction ran; "
+                        "returning %d of %d facts",
+                        len(out),
+                        len(extracted),
+                    )
+                    break
                 if not await self._store.provenance([fact.id], scope):
                     continue  # stored, but born withheld: matches revoked content
                 [vec] = await self._embed.embed([ef.text])
-                await self._vec.add(fact.id, vec, scope)
+                if not await self._add_vector(fact.id, vec, scope):
+                    continue  # erased between the upsert and the vector add
                 out.append(fact)
         else:
             # Non-persisting branch: synthesize Facts in-memory only, minus
@@ -541,22 +723,32 @@ class Engram:
         if token_budget is None:
             qt = await classifier.classify(query) if classifier is not None else None
             token_budget = budget_for(qt)
-        char_budget = token_budget * chars_per_token
-
         candidates = await self.context_entries(
             query, user_id=user_id, org_id=org_id, decompose=decompose, role_filter=role_filter
         )
+        return "\n".join(context_lines(candidates, token_budget, chars_per_token))
 
-        lines: list[str] = []
-        running = 0
-        for sf in candidates:
-            line = (
-                f"[{sf.fact.event_date.date().isoformat()}] {sf.fact.text}"
-                if sf.fact.event_date
-                else f"- {sf.fact.text}"
-            )
-            if running + len(line) + 1 > char_budget:
-                break
-            lines.append(line)
-            running += len(line) + 1
-        return "\n".join(lines)
+
+def context_lines(
+    entries: list[ScoredFact], token_budget: int, chars_per_token: int = 4
+) -> list[str]:
+    """The lines :meth:`Engram.context` joins: one per entry, in order, while they fit.
+
+    Stops at the first entry that does not fit the budget. One item per fact,
+    even when the fact's text holds newlines, so ``len(result)`` is the number
+    of facts included.
+    """
+    char_budget = token_budget * chars_per_token
+    lines: list[str] = []
+    running = 0
+    for sf in entries:
+        line = (
+            f"[{sf.fact.event_date.date().isoformat()}] {sf.fact.text}"
+            if sf.fact.event_date
+            else f"- {sf.fact.text}"
+        )
+        if running + len(line) + 1 > char_budget:
+            break
+        lines.append(line)
+        running += len(line) + 1
+    return lines
