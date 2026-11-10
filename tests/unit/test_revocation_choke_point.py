@@ -33,6 +33,11 @@ GOVERNANCE_METHODS = {
     "_lift_candidates",  # ids a tombstone may be hiding; returns ids only
     "_check_owner",  # which scope owns an id; raises or returns nothing
     "explain",  # returns status and provenance, never text
+    "find_fact_scope",  # which scope owns a fact id; returns a Scope
+    "list_fact_ids",  # every id in scope, hidden included, for erasure; ids only
+    "fact_counts",  # two integers
+    "delete_session_messages",  # finds ids to hard-delete; returns a count
+    "erase_scope_residue",  # counts facts, hard-deletes residue; returns counts
 }
 
 

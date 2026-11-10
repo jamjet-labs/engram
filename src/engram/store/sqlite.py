@@ -851,6 +851,18 @@ class SqliteStore:
                 rows = await cur.fetchall()
             return [self._row_to_message(r) for r in rows]
 
+    async def list_session_ids(self, scope: Scope) -> list[str]:
+        """Sessions with a visible transcript turn in scope, by first turn."""
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT session_id FROM live_messages
+                   WHERE org_id=? AND user_id=?
+                   GROUP BY session_id ORDER BY MIN(timestamp) ASC, session_id ASC""",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
     # ── Governance: provenance, revocation, erasure ──────────────────────
     #
     # Visibility is decided by the `hidden_facts` view (schema.sql). The read
@@ -1620,6 +1632,109 @@ class SqliteStore:
                 )
                 for r in rows
             ]
+
+    # ── v1 REST support (ids and counts only, no text) ───────────────────
+
+    async def find_fact_scope(self, fact_id: UUID) -> Scope | None:
+        """The scope a fact id belongs to, for the v1 forget route.
+
+        The v1 contract names a fact by id alone. One server token is one trust
+        domain, so resolving the scope from the id grants nothing the token did
+        not already allow.
+        """
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT org_id, user_id FROM facts WHERE id=?", (str(fact_id),)
+            ) as cur:
+                row = await cur.fetchone()
+        return None if row is None else Scope(org_id=row[0], user_id=row[1])
+
+    async def list_fact_ids(self, scope: Scope) -> list[UUID]:
+        """Every fact id in scope, hidden ones included. For erasure only."""
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT id FROM facts WHERE org_id=? AND user_id=? ORDER BY rowid",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [UUID(r[0]) for r in rows]
+
+    async def fact_counts(self) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) across every scope."""
+        async with self._reading() as db:
+            async with db.execute("SELECT COUNT(*) FROM facts") as cur:
+                total_row = await cur.fetchone()
+            async with db.execute(
+                "SELECT COUNT(*) FROM live_facts WHERE invalid_at IS NULL"
+            ) as cur:
+                valid_row = await cur.fetchone()
+        if total_row is None or valid_row is None:
+            raise StoreError("fact_counts: COUNT returned no row")
+        return int(total_row[0]), int(valid_row[0])
+
+    async def delete_session_messages(self, session_id: str, scope: Scope) -> int:
+        """Hard-delete one session's transcript in scope. Returns turns removed.
+
+        Facts extracted from these turns stay, as on the Rust server. Their
+        `source_message_id` then names a turn that is gone. Revocation matches
+        on the removed turns go too, since they point at nothing.
+        """
+        try:
+            async with self._transaction():
+                async with self._conn.execute(
+                    "SELECT id FROM messages WHERE org_id=? AND user_id=? AND session_id=?",
+                    (scope.org_id, scope.user_id, session_id),
+                ) as cur:
+                    ids = [r[0] for r in await cur.fetchall()]
+                if not ids:
+                    return 0
+                marks = ",".join("?" * len(ids))
+                await self._conn.execute(
+                    f"DELETE FROM content_matches WHERE kind='message' AND item_id IN ({marks})",
+                    tuple(ids),
+                )
+                await self._conn.execute(f"DELETE FROM messages WHERE id IN ({marks})", tuple(ids))
+        except aiosqlite.Error as e:
+            raise StoreError(f"delete_session_messages: {e}") from e
+        return len(ids)
+
+    async def erase_scope_residue(self, scope: Scope) -> dict[str, int]:
+        """Hard-delete what per-fact erasure leaves behind in a scope.
+
+        Called by `Engram.erase_user` after every fact in the scope has been
+        erased: transcript turns, events, entities, relationships and fact_meta
+        rows. Refuses while any fact remains, so it can never stand in for
+        `erase`. Revocation and erasure records stay: they are the content-free
+        audit trail. Returns rows removed per table.
+
+        `fact_entity_refs` rows go through ON DELETE CASCADE (foreign_keys is ON,
+        set from schema.sql in `open`).
+        """
+        where = "org_id=? AND user_id=?"
+        args = (scope.org_id, scope.user_id)
+        removed: dict[str, int] = {}
+        try:
+            async with self._transaction():
+                async with self._conn.execute(
+                    f"SELECT COUNT(*) FROM facts WHERE {where}", args
+                ) as cur:
+                    row = await cur.fetchone()
+                if row is None:
+                    raise StoreError("erase_scope_residue: COUNT returned no row")
+                if row[0]:
+                    raise StoreError(f"erase_scope_residue: {row[0]} facts remain in scope")
+                for kind, table in (("message", "messages"), ("event", "events")):
+                    await self._conn.execute(
+                        f"DELETE FROM content_matches WHERE kind=? AND item_id IN "
+                        f"(SELECT id FROM {table} WHERE {where})",
+                        (kind, *args),
+                    )
+                for table in ("messages", "events", "relationships", "entities", "fact_meta"):
+                    cur2 = await self._conn.execute(f"DELETE FROM {table} WHERE {where}", args)
+                    removed[table] = cur2.rowcount
+        except aiosqlite.Error as e:
+            raise StoreError(f"erase_scope_residue: {e}") from e
+        return removed
 
     # ── Row -> Pydantic ──────────────────────────────────────────────────
 
