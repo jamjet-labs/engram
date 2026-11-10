@@ -134,7 +134,63 @@ curl -sX POST localhost:19090/v1/memory/record \
   -d '{"text": "alice prefers espresso", "user_id": "alice"}'
 ```
 
-Endpoints: `record`, `extract`, `recall`, `search`, `context`, `raw_facts`, sessions, messages, healthz.
+Endpoints: `record`, `extract`, `recall`, `search`, `context`, `raw_facts`, sessions, messages, healthz. The server also serves the v1 routes the Java SDK calls (see [Java and Spring Boot](#java-and-spring-boot)).
+
+## Java and Spring Boot
+
+The Spring Boot starter (`dev.jamjet:engram-spring-boot-starter`) and the Java SDK (`dev.jamjet:jamjet-sdk`) talk to this server over the v1 REST routes. CI runs the published Java client against the server on every change.
+
+Run the server with a token, as in the [Hosted MCP server quickstart](#quickstart):
+
+```bash
+export ENGRAM_AUTH_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+docker run --rm \
+  -e ENGRAM_AUTH_TOKEN="$ENGRAM_AUTH_TOKEN" \
+  -v engram-data:/data \
+  -p 8765:8765 \
+  ghcr.io/jamjet-labs/engram-py-server:0.3.0
+```
+
+Then point the starter at it. The starter defaults to port 9090, which is where the Rust server listened, so set the base URL:
+
+```yaml
+engram:
+  base-url: http://localhost:8765
+  api-token: ${ENGRAM_TOKEN}
+```
+
+`ENGRAM_TOKEN` must hold the same value as the server's `ENGRAM_AUTH_TOKEN`.
+
+### Differences from the Rust server
+
+The routes, status codes and JSON keys follow the Rust v0.5.x server. These differences are deliberate:
+
+- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200).
+- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It returns 409 or 503, never success, when the erase is refused or interrupted.
+- `POST /v1/memory/consolidate` returns 501. The Python engine has no consolidation.
+- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
+- A request without `user_id` uses the user `default`. Rust used the whole org there, which this server has no equivalent for.
+- Message `metadata` is accepted and not stored, and comes back as `{}`.
+- Message `role` must be `user`, `assistant`, `system` or `tool`. Rust accepted any string.
+- `top_k` and `max_results` must be 1 to 200. Rust accepted any size.
+- `POST /v1/memory` without `session_id` extracts under a fresh session per call. With no LLM configured, it returns 400.
+- `POST /v1/memory/context` accepts `format` and ignores it, and has no `tier_breakdown`.
+- The message routes are scoped to `(org_id, user_id)`. Rust filtered on `org_id` alone.
+- `tier` values are `working`, `episodic`, `semantic` and `archival`.
+
+The module docstring of `src/engram/server/legacy_v1.py` is the full list.
+
+### Forgetting and conversations
+
+The facts the server extracts from a conversation do not record which turn they came from. So forgetting any one of them withholds every turn of that conversation, including turns saved later, until the fact is reinstated. This fails closed. Deleting a conversation and reusing its id after a fact from it was forgotten behaves the same way.
+
+### Large users
+
+Deleting a user with a very large history can take long enough to time out over HTTP. Each call erases more, so repeating the call finishes the job.
+
+### One token, one trust domain
+
+Any token holder can forget a fact by id in any scope. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 ### Run as an MCP server (for Claude Code, Cursor, etc.)
 
@@ -357,8 +413,8 @@ The server returns `MCP-Session-Id` in the response headers; subsequent requests
 
 ### Auth model
 
-- With `$ENGRAM_AUTH_TOKEN` set, every route needs `Authorization: Bearer <token>`: `/mcp`, `/v1/memory/*`, `/v1/sessions/*`, `/docs` and `/openapi.json`. Only `/healthz` is open. Requests without the token get 401.
-- `/healthz` answers GET and HEAD without the token.
+- With `$ENGRAM_AUTH_TOKEN` set, every route needs `Authorization: Bearer <token>`: `/mcp`, `/v1/memory/*`, `/v1/sessions/*`, `/docs` and `/openapi.json`. Only `/healthz` and `/health` are open. Requests without the token get 401.
+- `/healthz` and `/health` answer GET and HEAD without the token.
 - The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset, and says why. On a host other machines can reach it also refuses a token shorter than 16 characters, one that repeats a few characters, or an obvious placeholder such as `changeme` (shorter than 32 gets a warning). To run without a token on purpose:
   - `--no-auth --host 127.0.0.1` (or `::1`) for local use. `localhost` is rejected because `/etc/hosts` can redirect it.
   - `--allow-unauthenticated` (or `ENGRAM_ALLOW_UNAUTHENTICATED=1`) on any host, for example behind a proxy that does its own auth. The server prints a warning at startup.

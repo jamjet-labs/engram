@@ -32,7 +32,9 @@ class EngramClientContractTest {
     @Test
     void health() {
         try (var c = client()) {
-            assertEquals("ok", c.health().get("status"));
+            Map<String, Object> health = c.health();
+            assertEquals("ok", health.get("status"));
+            assertTrue("engram".equals(health.get("service")), "health service: " + health.get("service"));
         }
     }
 
@@ -93,6 +95,12 @@ class EngramClientContractTest {
             assertEquals(2, msgs.size());
             assertEquals("user", msgs.get(0).get("role"));
             assertEquals("My dog is called Rex", msgs.get(0).get("content"));
+            for (Map<String, Object> m : msgs) {
+                for (String key : List.of("id", "conversation_id", "role", "content", "seq",
+                        "created_at", "metadata")) {
+                    assertTrue(m.containsKey(key), "message has " + key);
+                }
+            }
             assertEquals(1, c.getMessages("conv-1", 1, user, null).size());
 
             assertEquals(List.of("conv-1"), c.listConversations(user, null));
