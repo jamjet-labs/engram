@@ -728,18 +728,38 @@ async def test_delete_user_refused_audit_fields_is_409(
 
 
 @pytest.mark.asyncio
-async def test_delete_user_store_error_is_503(
+async def test_delete_user_residue_refusal_is_503(
+    served: tuple[TestClient, Engram], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, memory = served
+    listed = memory._store.list_fact_ids
+
+    async def list_then_write(scope: Scope) -> list[UUID]:
+        ids = await listed(scope)
+        await memory.record("alice likes jazz", user_id="alice")
+        return ids
+
+    monkeypatch.setattr(memory._store, "list_fact_ids", list_then_write)
+    r = client.delete("/v1/memory/users/alice", headers=AUTH)
+    assert r.status_code == 503
+    assert set(r.json()) == {"error"} and "retrying is safe" in r.json()["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_delete_user_other_store_error_is_500_without_a_retry_promise(
     served: tuple[TestClient, Engram], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, memory = served
 
-    async def racing(**kw: Any) -> int:
-        raise StoreError("a fact was written while the scope was erased")
+    async def broken(**kw: Any) -> int:
+        raise StoreError("erase: disk I/O error")
 
-    monkeypatch.setattr(memory, "erase_user", racing)
+    monkeypatch.setattr(memory, "erase_user", broken)
     r = client.delete("/v1/memory/users/alice", headers=AUTH)
-    assert r.status_code == 503
-    assert set(r.json()) == {"error"} and "retrying is safe" in r.json()["error"].lower()
+    assert r.status_code == 500
+    assert set(r.json()) == {"error"}
+    assert "retry" not in r.json()["error"].lower()
+    assert "disk" not in r.json()["error"].lower()  # the cause goes to the log
 
 
 @pytest.mark.asyncio

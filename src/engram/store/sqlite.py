@@ -18,7 +18,13 @@ from uuid import UUID
 
 import aiosqlite
 
-from engram.errors import NotFoundError, ScopeErasedError, ScopeError, StoreError
+from engram.errors import (
+    NotFoundError,
+    ScopeErasedError,
+    ScopeError,
+    ScopeResidueRefusedError,
+    StoreError,
+)
 from engram.governance import (
     ErasureRecord,
     HiddenReason,
@@ -1556,20 +1562,21 @@ class SqliteStore:
             },
         )
         scrubbed = f"[scrubbed by erasure {record.id}]"
-
-        def ph(n: int) -> str:
-            return ",".join("?" * n)
+        # Each id set is bound as one JSON parameter, not one "?" per id:
+        # SQLite refuses more than 32,766 variables in one statement.
+        in_ids = "IN (SELECT value FROM json_each(?))"
+        ids_json = _ids_json(ids)
 
         # Base rows first. Until they are gone, the side rows below (match
         # rows, content hashes, tombstone text) are what keeps them hidden.
-        await self._conn.execute(f"DELETE FROM facts WHERE id IN ({ph(len(ids))})", ids)
+        await self._conn.execute(f"DELETE FROM facts WHERE id {in_ids}", (ids_json,))
         if message_ids:
             await self._conn.execute(
-                f"DELETE FROM messages WHERE id IN ({ph(len(message_ids))})", tuple(message_ids)
+                f"DELETE FROM messages WHERE id {in_ids}", (_ids_json(message_ids),)
             )
         if event_ids:
             await self._conn.execute(
-                f"DELETE FROM events WHERE id IN ({ph(len(event_ids))})", tuple(event_ids)
+                f"DELETE FROM events WHERE id {in_ids}", (_ids_json(event_ids),)
             )
 
         kept_hashes = 0
@@ -1607,15 +1614,14 @@ class SqliteStore:
         for kind, items in (("fact", ids), ("message", message_ids), ("event", event_ids)):
             if items:
                 await self._conn.execute(
-                    f"DELETE FROM content_matches WHERE kind = ? AND item_id IN ({ph(len(items))})",
-                    (kind, *items),
+                    f"DELETE FROM content_matches WHERE kind = ? AND item_id {in_ids}",
+                    (kind, _ids_json(items)),
                 )
         await self._conn.execute(
-            f"""DELETE FROM fact_derivations
-                 WHERE fact_id IN ({ph(len(ids))}) OR source_fact_id IN ({ph(len(ids))})""",
-            (*ids, *ids),
+            f"DELETE FROM fact_derivations WHERE fact_id {in_ids} OR source_fact_id {in_ids}",
+            (ids_json, ids_json),
         )
-        await self._conn.execute(f"DELETE FROM fact_meta WHERE fact_id IN ({ph(len(ids))})", ids)
+        await self._conn.execute(f"DELETE FROM fact_meta WHERE fact_id {in_ids}", (ids_json,))
         await self._conn.execute(
             """INSERT INTO erasures
                (id, org_id, user_id, fact_ids, actor, reason, erased_at, artifacts, guarantees)
@@ -1762,33 +1768,31 @@ class SqliteStore:
         every turn later recorded under the same session id. That is
         fail-closed and accepted; reusing the id shows an empty session.
         """
+        # By predicate, not by a list of ids: a list binds one variable per
+        # turn, and SQLite refuses more than 32,766 in one statement.
+        session = "org_id=? AND user_id=? AND session_id=?"
+        args = (scope.org_id, scope.user_id, session_id)
         try:
             async with self._transaction():
-                async with self._conn.execute(
-                    "SELECT id FROM messages WHERE org_id=? AND user_id=? AND session_id=?",
-                    (scope.org_id, scope.user_id, session_id),
-                ) as cur:
-                    ids = [r[0] for r in await cur.fetchall()]
-                if not ids:
-                    return 0
-                marks = ",".join("?" * len(ids))
                 await self._conn.execute(
-                    f"DELETE FROM content_matches WHERE kind='message' AND item_id IN ({marks})",
-                    tuple(ids),
+                    f"DELETE FROM content_matches WHERE kind='message' AND item_id IN "
+                    f"(SELECT id FROM messages WHERE {session})",
+                    args,
                 )
-                await self._conn.execute(f"DELETE FROM messages WHERE id IN ({marks})", tuple(ids))
+                cur = await self._conn.execute(f"DELETE FROM messages WHERE {session}", args)
+                removed = cur.rowcount
         except aiosqlite.Error as e:
             raise StoreError(f"delete_session_messages: {e}") from e
-        return len(ids)
+        return removed
 
     async def erase_scope_residue(self, scope: Scope, *, reason: str, actor: str) -> ErasureRecord:
         """Hard-delete what per-fact erasure leaves behind in a scope.
 
         Called by `Engram.erase_user` after every fact in the scope has been
         erased: transcript turns, events, entities, relationships and fact_meta
-        rows. Refuses while any fact remains, so it can never stand in for
-        `erase`. Every tombstone in the scope loses its content hash and
-        normalized text, including a hash an earlier
+        rows. Refuses while any fact remains, raising ScopeResidueRefusedError,
+        so it can never stand in for `erase`. Every tombstone in the scope
+        loses its content hash and normalized text, including a hash an earlier
         ``erase(block_reinsertion=True)`` kept, so the erased texts are no
         longer blocked from re-insertion. Revocation and erasure rows stay:
         they are the content-free audit trail.
@@ -1816,7 +1820,9 @@ class SqliteStore:
                 if row is None:
                     raise StoreError("erase_scope_residue: COUNT returned no row")
                 if row[0]:
-                    raise StoreError(f"erase_scope_residue: {row[0]} facts remain in scope")
+                    raise ScopeResidueRefusedError(
+                        f"erase_scope_residue: {row[0]} facts remain in scope"
+                    )
                 for kind, table in (("message", "messages"), ("event", "events")):
                     await self._conn.execute(
                         f"DELETE FROM content_matches WHERE kind=? AND item_id IN "

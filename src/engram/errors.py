@@ -40,3 +40,12 @@ class ScopeErasedError(EngramError):
     StoreError: the store is fine, and retrying would store the data the
     erase was asked to remove.
     """
+
+
+class ScopeResidueRefusedError(StoreError):
+    """``erase_scope_residue`` found facts in the scope, so it deleted nothing.
+
+    A fact was written to the scope while ``Engram.erase_user`` ran. Calling
+    ``erase_user`` again erases it and finishes. Other StoreErrors from
+    ``erase_user`` are storage faults that a retry may not fix.
+    """

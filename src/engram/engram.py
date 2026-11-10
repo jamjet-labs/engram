@@ -346,12 +346,14 @@ class Engram:
         hidden facts included (the rule `erase` applies). Only a fact written
         after that check can make a later `erase` refuse part-way.
 
-        Not one transaction. A StoreError from the last step means a fact was
-        written to the scope while this ran; the facts erased so far stay
-        erased, and calling again is safe and finishes. Cost grows faster than
-        linearly with the number of facts in the scope, so one call on a large
-        scope may run long; each call erases more, so repeating it finishes the
-        job. Returns the number of facts erased.
+        Not one transaction. ScopeResidueRefusedError (a StoreError) from the
+        last step means a fact was written to the scope while this ran; the
+        facts erased so far stay erased, and calling again is safe and
+        finishes. Any other StoreError is a storage fault: what was erased
+        stays erased, but calling again may fail the same way. Cost grows
+        faster than linearly with the number of facts in the scope, so one call
+        on a large scope may run long; each call erases more, so repeating it
+        finishes the job. Returns the number of facts erased.
         """
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)

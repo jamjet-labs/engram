@@ -10,7 +10,7 @@ import aiosqlite
 import pytest
 
 from engram import Engram
-from engram.errors import StoreError
+from engram.errors import ScopeResidueRefusedError, StoreError
 from engram.models import Event
 from engram.scope import Scope
 
@@ -414,3 +414,20 @@ async def test_fact_counts(memory: Engram) -> None:
     two = await memory.record("two", user_id="bob", org_id="acme")
     await memory.revoke(two.id, reason="test", actor="t", user_id="bob", org_id="acme")
     assert await memory.fact_counts() == (2, 1)
+
+
+async def test_only_the_residue_refusal_is_a_scope_residue_refused_error(
+    memory: Engram, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert issubclass(ScopeResidueRefusedError, StoreError)
+    await memory.record("alice likes tea", user_id="alice")
+    listed = memory._store.list_fact_ids
+
+    async def list_then_write(scope: Scope) -> list[UUID]:
+        ids = await listed(scope)
+        await memory.record("alice likes jazz", user_id="alice")
+        return ids
+
+    monkeypatch.setattr(memory._store, "list_fact_ids", list_then_write)
+    with pytest.raises(ScopeResidueRefusedError, match="facts remain"):
+        await memory.erase_user(user_id="alice", reason="gdpr request", actor="rest:v1")

@@ -66,7 +66,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from engram.engram import Engram, context_lines
-from engram.errors import EmbeddingError, ExtractionError, StoreError
+from engram.errors import EmbeddingError, ExtractionError, ScopeResidueRefusedError, StoreError
 from engram.models import ChatMessage
 from engram.retrieve.base import ScoredFact
 from engram.scope import Scope
@@ -285,7 +285,8 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         Never reports success unless `erase_user` finished. 409 if it refuses
         the audit fields as quoting a fact; they are fresh random tokens on
         every call, so a stored fact cannot be made to match them. 503 when a
-        write landed mid-way. Calling again is safe in every case.
+        fact was written mid-way; calling again is safe and finishes. 500 for
+        any other storage error, which a retry may not fix.
         """
         reason, actor = _erase_audit_fields()
         try:
@@ -298,12 +299,19 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
                 f"delete user refused: {e}. Part of the user's data may already be erased. "
                 "Calling again is safe.",
             )
-        except StoreError:
-            logger.warning("delete user: data changed mid-erase", exc_info=True)
+        except ScopeResidueRefusedError:
+            logger.warning("delete user: a fact was written mid-erase", exc_info=True)
             return _error(
                 503,
                 "the user's data changed while it was being erased, so the erase did not "
                 "finish; some of it may already be gone. Retrying is safe and finishes it.",
+            )
+        except StoreError:
+            logger.error("delete user: storage error", exc_info=True)
+            return _error(
+                500,
+                "delete user failed with a storage error and did not finish; some of the "
+                "user's data may already be gone. The server log has the cause.",
             )
         return {"success": True, "deleted_facts": n}
 
