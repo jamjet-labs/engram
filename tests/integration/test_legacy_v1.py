@@ -18,6 +18,7 @@ from engram.errors import EmbeddingError, ExtractionError, StoreError
 from engram.governance import normalize_text
 from engram.llm.base import LLMMessage, LLMResponse
 from engram.models import ChatMessage, Fact
+from engram.scope import Scope
 from engram.server.http import build_http_app
 
 TOKEN = "t" * 40
@@ -686,18 +687,44 @@ def test_delete_messages(client: TestClient) -> None:
     assert got == {"messages": [], "total": 0}
 
 
-def test_delete_user_refuses_when_the_audit_fields_quote_a_fact(client: TestClient) -> None:
-    # The actor is the one token "restv1"; a fact whose whole text is that
-    # token is quoted by it, so erase_user refuses before deleting anything.
-    fid = _record(client, "restv1", user="carol")
+# The old fixed actor, its spelling variants, and the reason's fixed prefix.
+_PLANTS = ["restv1", "RESTv1.", "deleteuser", "restv1x", "deleteuser restv1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forget_plant", [False, True])
+async def test_delete_user_cannot_be_blocked_by_a_planted_fact(
+    served: tuple[TestClient, Engram], forget_plant: bool
+) -> None:
+    client, memory = served
+    _record(client, "Carol lives at 12 Main Street", user="carol")
+    plants = [_record(client, text, user="carol") for text in _PLANTS]
+    if forget_plant:  # withheld from every read path, still in the scope
+        for fid in plants:
+            assert client.delete(f"/v1/memory/facts/{fid}", headers=AUTH).status_code == 200
+    r = client.delete("/v1/memory/users/carol", headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"success": True, "deleted_facts": len(_PLANTS) + 1}
+    assert await memory._store.list_fact_ids(Scope(org_id="default", user_id="carol")) == []
+    for q in ["restv1 deleteuser", "Main Street"]:
+        got = client.get("/v1/memory/recall", params={"q": q, "user_id": "carol"}, headers=AUTH)
+        assert got.json()["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_user_refused_audit_fields_is_409(
+    served: tuple[TestClient, Engram], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, memory = served
+
+    async def refused(**kw: Any) -> int:
+        raise ValueError("erasure actor must not quote the content being erased")
+
+    monkeypatch.setattr(memory, "erase_user", refused)
     r = client.delete("/v1/memory/users/carol", headers=AUTH)
     assert r.status_code == 409
     assert set(r.json()) == {"error"}
     assert "calling again is safe" in r.json()["error"].lower()
-    still = client.get(
-        "/v1/memory/recall", params={"q": "restv1", "user_id": "carol"}, headers=AUTH
-    )
-    assert [h["fact_id"] for h in still.json()["results"]] == [fid]
 
 
 @pytest.mark.asyncio
@@ -729,11 +756,12 @@ async def test_delete_user_audit_fields_are_single_tokens(
     monkeypatch.setattr(memory, "erase_user", capture)
     for _ in range(2):
         assert client.delete("/v1/memory/users/alice", headers=AUTH).status_code == 200
-    assert [(c["user_id"], c["org_id"], c["actor"]) for c in calls] == [
-        ("alice", "default", "restv1")
-    ] * 2
+    assert [(c["user_id"], c["org_id"]) for c in calls] == [("alice", "default")] * 2
     reasons = [c["reason"] for c in calls]
-    for value in [*reasons, calls[0]["actor"]]:
+    actors = [c["actor"] for c in calls]
+    for value in [*reasons, *actors]:
         assert len(normalize_text(value).split()) == 1, value
     assert all(r.startswith("deleteuser") for r in reasons)
-    assert reasons[0] != reasons[1]
+    assert all(a.startswith("restv1x") and len(a) > len("restv1x") for a in actors)
+    # Fresh on every call: no fixed string is left to plant.
+    assert reasons[0] != reasons[1] and actors[0] != actors[1]

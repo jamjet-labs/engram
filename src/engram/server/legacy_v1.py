@@ -74,9 +74,10 @@ from engram.scope import Scope
 logger = logging.getLogger(__name__)
 
 LEGACY_HEALTH_PATH = "/health"
-# One alphanumeric token each, so neither can quote a user's fact text (the
-# erasure rule refuses audit fields that do).
-_ACTOR = "restv1"
+# Forget only revokes, and nothing checks a tombstone's actor or reason
+# against fact text, so these can be fixed. Delete user cannot use a fixed
+# string: see _erase_audit_fields.
+_FORGET_ACTOR = "restv1"
 _FORGET_REASON = "forgotten through the v1 REST API"
 _DEFAULT_BUDGET = 2000
 
@@ -124,6 +125,16 @@ class _SaveMessagesRequest(BaseModel):
 
 def _scope(user_id: str | None, org_id: str | None) -> Scope:
     return Scope(org_id=org_id or "default", user_id=user_id or "default")
+
+
+def _erase_audit_fields() -> tuple[str, str]:
+    """A fresh (reason, actor) for one erase_user call, one random token each.
+
+    erase_user refuses a reason or actor that quotes any fact text in the
+    scope, and any token holder can record a fact. A fixed string could be
+    planted as a fact to block the erase for good, so each call makes new ones.
+    """
+    return f"deleteuser{uuid4().hex}", f"restv1x{uuid4().hex}"
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -251,7 +262,7 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         except ValueError as e:
             return _error(400, f"invalid fact_id: {e}")
         reason = ((req.reason if req else None) or "").strip() or _FORGET_REASON
-        if not await engram.forget(parsed, reason=reason, actor=_ACTOR):
+        if not await engram.forget(parsed, reason=reason, actor=_FORGET_ACTOR):
             return _error(404, f"fact {parsed} not found")
         return {"success": True, "deleted_fact_id": fact_id}
 
@@ -271,17 +282,15 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
     ) -> dict[str, Any] | JSONResponse:
         """Hard-erase everything held for (default org, user_id), as Rust did.
 
-        Never reports success unless `erase_user` finished. 409 when the audit
-        fields quote a fact: from the check before anything is erased, or, if
-        a quoted fact was written meanwhile, part-way. 503 when a write landed
-        mid-way. Calling again is safe in every case.
+        Never reports success unless `erase_user` finished. 409 if it refuses
+        the audit fields as quoting a fact; they are fresh random tokens on
+        every call, so a stored fact cannot be made to match them. 503 when a
+        write landed mid-way. Calling again is safe in every case.
         """
+        reason, actor = _erase_audit_fields()
         try:
             n = await engram.erase_user(
-                user_id=user_id,
-                org_id="default",
-                reason=f"deleteuser{uuid4().hex}",
-                actor=_ACTOR,
+                user_id=user_id, org_id="default", reason=reason, actor=actor
             )
         except ValueError as e:
             return _error(
