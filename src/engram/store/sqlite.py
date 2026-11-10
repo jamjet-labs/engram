@@ -1641,6 +1641,10 @@ class SqliteStore:
         The v1 contract names a fact by id alone. One server token is one trust
         domain, so resolving the scope from the id grants nothing the token did
         not already allow.
+
+        Not an authorization check: it returns the owner of any fact id in any
+        scope, hidden facts included. Use it only where the caller is already
+        trusted for every scope, as on a one-token server.
         """
         async with self._reading() as db:
             async with db.execute(
@@ -1675,9 +1679,13 @@ class SqliteStore:
     async def delete_session_messages(self, session_id: str, scope: Scope) -> int:
         """Hard-delete one session's transcript in scope. Returns turns removed.
 
-        Facts extracted from these turns stay, as on the Rust server. Their
-        `source_message_id` then names a turn that is gone. Revocation matches
-        on the removed turns go too, since they point at nothing.
+        Facts extracted from these turns stay, as on the Rust server. With
+        foreign keys on, `facts.source_message_id` is ON DELETE SET NULL, so
+        those facts lose their message link. Revocation matches on the removed
+        turns go too. Consequence: a revoked fact from this session no longer
+        links to a message, so rule (c) of the `live_messages` view withholds
+        every turn later recorded under the same session id. That is
+        fail-closed and accepted; reusing the id shows an empty session.
         """
         try:
             async with self._transaction():
