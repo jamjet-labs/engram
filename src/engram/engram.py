@@ -528,7 +528,7 @@ class Engram:
         the check purges the vector itself.
         """
         await self._vec.add(fact_id, vec, scope)
-        if await self._store.fact_exists(fact_id, scope):
+        if await self._store.fact_row_committed(fact_id, scope):
             return True
         await self._vec.purge([fact_id], scope)
         return False
@@ -541,8 +541,13 @@ class Engram:
         user_id: str = "default",
         org_id: str = "default",
         timestamp: datetime | None = None,
+        not_erased_since: datetime | None = None,
     ) -> ChatMessage:
-        """Record a raw chat turn (no extraction)."""
+        """Record a raw chat turn (no extraction).
+
+        With ``not_erased_since`` (timezone-aware), raises ScopeErasedError and
+        stores nothing if :meth:`erase_user` erased the scope at or after it.
+        """
         msg = ChatMessage(
             scope=Scope(org_id=org_id, user_id=user_id),
             session_id=session_id,
@@ -550,7 +555,7 @@ class Engram:
             content=content,
             timestamp=timestamp or datetime.now().astimezone(),
         )
-        await self._store.upsert_message(msg)
+        await self._store.upsert_message(msg, not_erased_since=not_erased_since)
         return msg
 
     async def extract(
@@ -570,8 +575,10 @@ class Engram:
         the erase. ``not_erased_since`` is when the write started; it defaults
         to the start of this call. Pass an earlier time when the messages were
         stored before this call, so an erase that removed them in between also
-        refuses the facts drawn from them.
+        refuses the facts drawn from them. It must be timezone-aware (ValueError).
         """
+        if not_erased_since is not None and not_erased_since.tzinfo is None:
+            raise ValueError("not_erased_since must be timezone-aware")
         started = datetime.now().astimezone() if not_erased_since is None else not_erased_since
         if self._extract is None:
             raise RuntimeError("extraction requires an LLM; pass `llm=...` to Engram.open()")

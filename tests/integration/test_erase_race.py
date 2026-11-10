@@ -55,6 +55,7 @@ class GatedLLM:
 
     def __init__(self, gate: Gate | None = None) -> None:
         self.gate = gate
+        self.calls = 0
 
     async def generate(
         self,
@@ -63,6 +64,7 @@ class GatedLLM:
         max_tokens: int | None = None,
         json_mode: bool = False,
     ) -> LLMResponse:
+        self.calls += 1
         if self.gate is not None:
             await self.gate.hold()
         fact = {
@@ -209,15 +211,16 @@ async def test_extract_logs_that_the_scope_was_erased(
         await memory.close()
 
 
-async def test_save_messages_turns_erased_before_extraction_starts(
-    tmp_path: Path, gate: Gate, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("with_llm", [False, True])
+async def test_save_messages_stops_when_the_user_is_deleted_between_turns(
+    tmp_path: Path, gate: Gate, monkeypatch: pytest.MonkeyPatch, with_llm: bool
 ) -> None:
-    """The erase lands between two stored turns, before extraction starts."""
-    memory = await _open(tmp_path, llm=GatedLLM())
+    """The erase lands after the first turn is stored and before the second."""
+    memory = await _open(tmp_path, llm=GatedLLM() if with_llm else None)
     stored = memory._store.upsert_message
 
-    async def store_then_wait(message: ChatMessage) -> None:
-        await stored(message)
+    async def store_then_wait(message: ChatMessage, **kw: Any) -> None:
+        await stored(message, **kw)
         await gate.hold()
 
     monkeypatch.setattr(memory._store, "upsert_message", store_then_wait)
@@ -231,18 +234,48 @@ async def test_save_messages_turns_erased_before_extraction_starts(
                         "user_id": "frank",
                         "messages": [
                             {"role": "user", "content": "I have type 2 diabetes"},
-                            {"role": "assistant", "content": "Noted"},
+                            {"role": "assistant", "content": "Noted, you take metformin"},
                         ],
                     },
                 )
             )
             await gate.wait_entered()
-            assert (await c.request("DELETE", "/v1/memory/users/frank")).status_code == 200
+            r = await c.request("DELETE", "/v1/memory/users/frank")
+            assert r.status_code == 200 and r.json()["success"] is True
             gate.release.set()
             r = await save
-            assert r.status_code == 201, r.text
-            assert r.json()["fact_ids"] == []
+            assert r.status_code == 409 and set(r.json()) == {"error"}, r.text
             await _assert_nothing_left(memory, c)
+            got = await c.get("/v1/memory/messages/clinic", params={"user_id": "frank"})
+            assert got.json()["total"] == 0
+            listed = await c.get("/v1/memory/messages", params={"user_id": "frank"})
+            assert listed.json()["conversation_ids"] == []
+    finally:
+        await memory.close()
+
+
+async def test_concurrent_save_and_delete_user_leave_no_turns(tmp_path: Path) -> None:
+    """No gates and no LLM, as the shipped image runs: whichever order, no turn survives."""
+    memory = await _open(tmp_path)
+    turns = [{"role": "user", "content": f"private turn {i} about my case"} for i in range(200)]
+    try:
+        async with _client(memory) as c:
+            save = asyncio.create_task(
+                c.post(
+                    "/v1/memory/messages",
+                    json={"conversation_id": "case", "user_id": "gina", "messages": turns},
+                )
+            )
+            for _ in range(10_000):  # until the save has stored a turn
+                if await memory.list_messages("case", user_id="gina"):
+                    break
+                await asyncio.sleep(0)
+            r = await c.request("DELETE", "/v1/memory/users/gina")
+            assert r.status_code == 200 and r.json()["success"] is True
+            r = await save
+            assert r.status_code in (201, 409), r.text
+            got = await c.get("/v1/memory/messages/case", params={"user_id": "gina"})
+            assert got.json()["total"] == 0
     finally:
         await memory.close()
 
@@ -408,5 +441,54 @@ async def test_only_a_scope_wide_erasure_in_the_same_scope_refuses(tmp_path: Pat
         late = Fact(text="Frank likes coffee", scope=FRANK, valid_from=since)
         await memory._store.upsert_fact(late, not_erased_since=since)
         assert await memory._store.list_fact_ids(FRANK) == [late.id]
+    finally:
+        await memory.close()
+
+
+async def test_post_add_check_sees_the_erase_past_an_open_read_snapshot(
+    tmp_path: Path, gate: Gate
+) -> None:
+    """An open statement on the read connection pins its snapshot; the check must not use it."""
+    memory = await _open(tmp_path, embedder=GatedEmbedder(gate))
+    try:
+        gate.armed = False
+        await memory.record("Frank likes tea", user_id="frank")
+        gate.armed = True
+        task = asyncio.create_task(memory.record(SECRET, user_id="frank"))
+        await gate.wait_entered()
+        rconn = memory._store._rconn
+        assert rconn is not None
+        # The held snapshot blocks erase's WAL checkpoints; do not wait them out.
+        await memory._store._conn.execute("PRAGMA busy_timeout = 0")
+        # An in-flight reader: two rows, one fetched, so the statement stays open.
+        held = await rconn.execute("SELECT id FROM facts")
+        assert await held.fetchone() is not None
+        try:
+            assert await _erase(memory) == 2
+            gate.release.set()
+            await task
+            assert await memory._vec.count(FRANK) == 0
+        finally:
+            await held.close()
+        await _assert_nothing_left(memory)
+    finally:
+        await memory.close()
+
+
+async def test_not_erased_since_must_be_timezone_aware(tmp_path: Path) -> None:
+    llm = GatedLLM()
+    memory = await _open(tmp_path, llm=llm)
+    naive = datetime.now()
+    fact = Fact(text="Frank likes tea", scope=FRANK, valid_from=datetime.now().astimezone())
+    try:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await memory._store.upsert_fact(fact, not_erased_since=naive)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await memory.record_message("hi", user_id="frank", not_erased_since=naive)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await memory.extract([_turn()], not_erased_since=naive)
+        assert llm.calls == 0  # refused before the LLM call, not at the first upsert
+        assert await memory._store.list_fact_ids(FRANK) == []
+        assert await memory.list_messages("default", user_id="frank") == []
     finally:
         await memory.close()

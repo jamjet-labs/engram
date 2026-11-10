@@ -134,6 +134,12 @@ def _dt(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
+def _require_aware(since: datetime | None) -> None:
+    """A naive time would be read as local time, which is wrong for a naive UTC value."""
+    if since is not None and since.tzinfo is None:
+        raise ValueError("not_erased_since must be timezone-aware")
+
+
 def _parse_dt(s: str | None) -> datetime | None:
     if s is None:
         return None
@@ -347,8 +353,9 @@ class SqliteStore:
         ``not_erased_since`` is when the caller's write started. If the
         scope's data was erased (`Engram.erase_user`) at or after that time,
         this raises ScopeErasedError and writes nothing: the fact was derived
-        from data that erase removed.
+        from data that erase removed. It must be timezone-aware (ValueError).
         """
+        _require_aware(not_erased_since)
         sources = list(derived_from or [])
         try:
             async with self._transaction():
@@ -701,8 +708,22 @@ class SqliteStore:
 
     # ── Messages ─────────────────────────────────────────────────────────
 
-    async def upsert_message(self, message: ChatMessage) -> None:
+    async def upsert_message(
+        self, message: ChatMessage, *, not_erased_since: datetime | None = None
+    ) -> None:
+        """Insert or update a transcript turn.
+
+        ``not_erased_since`` works as in :meth:`upsert_fact`: if the scope was
+        erased at or after it, raises ScopeErasedError and writes nothing.
+        """
+        _require_aware(not_erased_since)
         async with self._transaction():
+            if not_erased_since is not None and await self._scope_erased_since(
+                message.scope, not_erased_since
+            ):
+                raise ScopeErasedError(
+                    "the scope was erased while this write ran; the turn was not stored"
+                )
             await self._check_owner("message", str(message.id), message.scope)
             keep = await self._add_matches(
                 "message", str(message.id), message.content, message.scope
@@ -1092,6 +1113,20 @@ class SqliteStore:
 
     async def fact_exists(self, fact_id: UUID, scope: Scope) -> bool:
         return await self.explain(fact_id, scope) is not None
+
+    async def fact_row_committed(self, fact_id: UUID, scope: Scope) -> bool:
+        """Is the fact's row there as of the latest commit? Returns a bool.
+
+        Reads on the write connection under the write lock. The read
+        connection can hold an older snapshot while another task has a
+        statement open on it, and then still show a fact an erase removed.
+        """
+        async with self._write_lock:
+            async with self._conn.execute(
+                "SELECT 1 FROM facts WHERE id = ? AND org_id = ? AND user_id = ?",
+                (str(fact_id), scope.org_id, scope.user_id),
+            ) as cur:
+                return await cur.fetchone() is not None
 
     async def content_hash_of(self, fact_id: UUID, scope: Scope) -> str | None:
         async with self._reading() as db:

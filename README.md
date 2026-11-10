@@ -238,7 +238,7 @@ The module docstring of `src/engram/server/legacy_v1.py` is the full list.
 
 The published Java client puts the conversation id in the message paths with `URLEncoder`, which writes a space as `+` and a `/` as `%2F`. To match it, the message routes read `+` as a space and `%2B` as a plus. Other clients should send a space as `%20` and a plus as `%2B`. Conversation ids may contain `/`.
 
-The client puts the user id in `DELETE /v1/memory/users/{id}` without encoding it. That route refuses any query string with 400, so `deleteUser("bob?x=1")` erases nothing rather than erasing `bob`. The server cannot catch a `#`: the client drops it and the rest of the id before sending, so `deleteUser("bob#1234")` erases `bob`. An id that ends in `?` arrives cut short in the same way. Keep `?` and `#` out of user ids when you use this client.
+The client puts the user id in `DELETE /v1/memory/users/{id}` without encoding it. That route refuses any query string with 400, so `deleteUser("bob?x=1")` erases nothing rather than erasing `bob`. The server cannot catch a `#`: the client drops it and the rest of the id before sending, so `deleteUser("bob#1234")` erases `bob`. An id that ends in `?` arrives cut short in the same way. The server also decodes percent escapes in the path, and the client sends `%` as is, so `deleteUser("a%2Fb")` erases the user `a/b`. Keep `?`, `#` and `%` out of user ids when you use this client.
 
 ### Forgetting and conversations
 

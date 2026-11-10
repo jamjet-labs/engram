@@ -58,7 +58,9 @@ Path ids (compatibility with the published Java client)
   nothing: the client would send `bob?x=1` as the user `bob` and a query.
   A `#` cannot be caught: the client drops it and the rest of the id before
   sending, so `bob#1` arrives as `bob`. The same goes for an id that ends in
-  `?`. Do not use `?` or `#` in user ids with that client.
+  `?`. The server decodes percent escapes in the path and the client sends
+  `%` unencoded, so `a%2Fb` erases the user `a/b`. Do not use `?`, `#` or `%`
+  in user ids with that client.
 
 Messages
 - `role` must be user, assistant, system or tool (Rust took any string).
@@ -93,7 +95,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from engram.engram import Engram, context_lines
-from engram.errors import EmbeddingError, ExtractionError, ScopeResidueRefusedError, StoreError
+from engram.errors import (
+    EmbeddingError,
+    ExtractionError,
+    ScopeErasedError,
+    ScopeResidueRefusedError,
+    StoreError,
+)
 from engram.models import ChatMessage
 from engram.retrieve.base import ScoredFact
 from engram.scope import Scope
@@ -399,17 +407,28 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
             return _error(400, "messages must not be empty")
         s = _scope(req.user_id, req.org_id)
         base = datetime.now().astimezone()
-        stored = [
-            await engram.record_message(
-                content=m.content,
-                role=m.role,
-                session_id=req.conversation_id,
-                user_id=s.user_id,
-                org_id=s.org_id,
-                timestamp=base + timedelta(microseconds=i),
+        stored: list[ChatMessage] = []
+        try:
+            for i, m in enumerate(req.messages):
+                stored.append(
+                    await engram.record_message(
+                        content=m.content,
+                        role=m.role,
+                        session_id=req.conversation_id,
+                        user_id=s.user_id,
+                        org_id=s.org_id,
+                        timestamp=base + timedelta(microseconds=i),
+                        not_erased_since=base,
+                    )
+                )
+        except ScopeErasedError:
+            # The erase removed the turns stored before it; store no more.
+            logger.info("save messages: the user was deleted while the save ran; stopped")
+            return _error(
+                409,
+                "the user was deleted while this save ran, so the save stopped. Nothing "
+                "from it is kept.",
             )
-            for i, m in enumerate(req.messages)
-        ]
         if any(m.metadata for m in req.messages):
             logger.debug("save messages: message metadata is not stored, dropped it")
         fact_ids: list[str] | None
