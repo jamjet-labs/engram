@@ -298,6 +298,98 @@ class Engram:
             record, {"vectors": removed}, {"vector_index_rebuilt": True}
         )
 
+    async def forget(self, fact_id: UUID, *, reason: str, actor: str) -> bool:
+        """Revoke a fact named by id alone, for the v1 REST contract.
+
+        Soft and reversible, like the Rust server's invalidate. Returns False
+        if no fact has this id. Use `erase` to hard-delete.
+        """
+        reason = require_text("reason", reason)
+        actor = require_text("actor", actor)
+        scope = await self._store.find_fact_scope(fact_id)
+        if scope is None:
+            return False
+        await self.revoke(
+            fact_id, reason=reason, actor=actor, user_id=scope.user_id, org_id=scope.org_id
+        )
+        return True
+
+    async def erase_user(
+        self, *, user_id: str, org_id: str = "default", reason: str, actor: str
+    ) -> int:
+        """Hard-delete everything held for one (org_id, user_id) scope.
+
+        Every fact goes through `erase`, so its copies, quotes, derived facts,
+        events, cited transcript turns and vectors go with it, and each leaves
+        a content-free erasure record. Tombstones on those facts lose their
+        content hash too (`block_reinsertion=False`): this is the
+        right-to-erasure path, and a short text's hash can be confirmed by
+        guessing. A hash kept by an earlier `erase(block_reinsertion=True)`
+        stays, because its fact is already gone. Then the scope's remaining
+        turns, events, entities and relationships are deleted; that step
+        writes no erasure record of its own. Revocation and erasure records
+        stay as the audit trail.
+
+        Not one transaction. If a fact is written to the scope mid-way, the
+        last step refuses with StoreError; facts erased so far stay erased,
+        and calling again finishes the job. Returns the number of facts erased.
+        """
+        reason = require_text("reason", reason)
+        actor = require_text("actor", actor)
+        scope = Scope(org_id=org_id, user_id=user_id)
+        erased = 0
+        for fact_id in await self._store.list_fact_ids(scope):
+            if not await self._store.fact_exists(fact_id, scope):
+                continue  # already removed as a copy or derivation of an earlier one
+            record = await self.erase(
+                fact_id,
+                reason=reason,
+                actor=actor,
+                user_id=user_id,
+                org_id=org_id,
+                block_reinsertion=False,
+            )
+            erased += len(record.fact_ids)
+        await self._store.erase_scope_residue(scope)
+        return erased
+
+    async def list_conversations(
+        self, *, user_id: str = "default", org_id: str = "default"
+    ) -> list[str]:
+        """Session ids with a visible transcript turn, by first turn."""
+        return await self._store.list_session_ids(Scope(org_id=org_id, user_id=user_id))
+
+    async def delete_conversation(
+        self, session_id: str, *, user_id: str = "default", org_id: str = "default"
+    ) -> int:
+        """Hard-delete one session's transcript. Facts extracted from it stay.
+
+        Returns the number of turns removed. The facts lose their
+        `source_message_id` link. If one of those facts was revoked, rule (c)
+        of `live_messages` withholds every later turn in a session reusing
+        that id. This is accepted fail-closed behavior.
+        """
+        return await self._store.delete_session_messages(
+            session_id, Scope(org_id=org_id, user_id=user_id)
+        )
+
+    async def fact_counts(self) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) across every scope."""
+        return await self._store.fact_counts()
+
+    async def list_messages(
+        self,
+        session_id: str,
+        *,
+        user_id: str = "default",
+        org_id: str = "default",
+        limit: int = 1000,
+    ) -> list[ChatMessage]:
+        """A session's visible transcript turns, oldest first."""
+        return await self._store.list_messages(
+            session_id, Scope(org_id=org_id, user_id=user_id), limit=limit
+        )
+
     async def explain(
         self, fact_id: UUID, user_id: str = "default", org_id: str = "default"
     ) -> Provenance | None:
