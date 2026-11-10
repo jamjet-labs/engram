@@ -334,7 +334,10 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
             logger.debug("save messages: message metadata is not stored, dropped it")
         fact_ids: list[str] | None
         try:
-            fact_ids = [str(f.id) for f in await engram.extract(stored)]
+            # From before the first turn was stored: an erase that removes the
+            # turns before extraction starts must also refuse what it extracts.
+            extracted = await engram.extract(stored, not_erased_since=base)
+            fact_ids = [str(f.id) for f in extracted]
         except RuntimeError as e:  # no LLM configured: expected, not a fault
             logger.debug("save messages: turns kept, no extraction: %s", e)
             fact_ids = None

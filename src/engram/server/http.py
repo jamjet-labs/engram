@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from starlette.routing import Route
 
 from engram.engram import Engram
-from engram.errors import NotFoundError
+from engram.errors import NotFoundError, ScopeErasedError
 from engram.governance import Provenance
 from engram.models import ChatMessage, MemoryTier, Polarity
 from engram.retrieve.base import ScoredFact
@@ -283,6 +283,8 @@ def build_http_app(
             )
         except NotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+        except ScopeErasedError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
         return _RecordResponse(fact_id=fact.id, text=fact.text)
 
     @app.post("/v1/memory/search", response_model=_SearchResponse)

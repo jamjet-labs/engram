@@ -10,6 +10,7 @@ For HTTP / MCP service exposure, see `engram.server`.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -19,7 +20,7 @@ from uuid import UUID, uuid4
 from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
-from engram.errors import NotFoundError
+from engram.errors import NotFoundError, ScopeErasedError
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.governance import (
@@ -39,6 +40,8 @@ from engram.retrieve.rrf import reciprocal_rank_fusion
 from engram.scope import Scope
 from engram.store.sqlite import SqliteStore
 from engram.vector.hnsw import HnswVectorStore
+
+logger = logging.getLogger(__name__)
 
 
 class Engram:
@@ -473,7 +476,12 @@ class Engram:
         - ``source_message_id`` links the transcript turn the fact came from.
         - Text that matches revoked content is stored but withheld (a write
           cannot un-revoke). ``reject_revoked=True`` raises instead.
+        - If :meth:`erase_user` erases this scope while the call runs, the
+          fact is not stored and ScopeErasedError is raised; if the erase
+          lands after the fact is stored, it erases the fact and its vector.
         """
+        # Before any await: an erase_user that finishes after this refuses the write.
+        started = datetime.now().astimezone()
         scope = Scope(org_id=org_id, user_id=user_id)
         if reject_revoked and await self._store.is_content_revoked(text, scope):
             raise RevokedContentError("text matches revoked content in this scope")
@@ -493,13 +501,35 @@ class Engram:
             metadata=md,
             source_message_id=source_message_id,
         )
-        await self._store.upsert_fact(
-            fact, writer=actor, source="record", derived_from=derived_from
-        )
+        try:
+            await self._store.upsert_fact(
+                fact,
+                writer=actor,
+                source="record",
+                derived_from=derived_from,
+                not_erased_since=started,
+            )
+        except ScopeErasedError:
+            logger.info("record: the scope was erased while the write ran; nothing stored")
+            raise
         if await self._store.provenance([fact.id], scope):
             [vec] = await self._embed.embed([text])
-            await self._vec.add(fact.id, vec, scope)
+            await self._add_vector(fact.id, vec, scope)
         return fact
+
+    async def _add_vector(self, fact_id: UUID, vec: list[float], scope: Scope) -> bool:
+        """Index a stored fact's vector. False if an erase removed the fact meanwhile.
+
+        An erase that runs between the upsert and the add purges a vector that
+        is not there yet, so the add would leave one for a fact that is gone.
+        Checking after the add catches that order; an erase that commits after
+        the check purges the vector itself.
+        """
+        await self._vec.add(fact_id, vec, scope)
+        if await self._store.fact_exists(fact_id, scope):
+            return True
+        await self._vec.purge([fact_id], scope)
+        return False
 
     async def record_message(
         self,
@@ -527,11 +557,20 @@ class Engram:
         session_date: datetime | None = None,
         persist: bool = True,
         actor: str | None = None,
+        not_erased_since: datetime | None = None,
     ) -> list[Fact]:
         """Extract durable facts from a conversation. Optionally persist them.
 
         Requires an LLM to have been passed at `Engram.open(llm=...)`.
+
+        If :meth:`erase_user` erases the scope while this runs, the facts not
+        yet stored are dropped, and the result lists only those stored before
+        the erase. ``not_erased_since`` is when the write started; it defaults
+        to the start of this call. Pass an earlier time when the messages were
+        stored before this call, so an erase that removed them in between also
+        refuses the facts drawn from them.
         """
+        started = datetime.now().astimezone() if not_erased_since is None else not_erased_since
         if self._extract is None:
             raise RuntimeError("extraction requires an LLM; pass `llm=...` to Engram.open()")
         if not messages:
@@ -557,11 +596,23 @@ class Engram:
                     event_date=ef.event_date,
                     mention_date=ef.mention_date,
                 )
-                await self._store.upsert_fact(fact, writer=actor, source="extract")
+                try:
+                    await self._store.upsert_fact(
+                        fact, writer=actor, source="extract", not_erased_since=started
+                    )
+                except ScopeErasedError:
+                    logger.info(
+                        "extract: the scope was erased while extraction ran; "
+                        "returning %d of %d facts",
+                        len(out),
+                        len(extracted),
+                    )
+                    break
                 if not await self._store.provenance([fact.id], scope):
                     continue  # stored, but born withheld: matches revoked content
                 [vec] = await self._embed.embed([ef.text])
-                await self._vec.add(fact.id, vec, scope)
+                if not await self._add_vector(fact.id, vec, scope):
+                    continue  # erased between the upsert and the vector add
                 out.append(fact)
         else:
             # Non-persisting branch: synthesize Facts in-memory only, minus

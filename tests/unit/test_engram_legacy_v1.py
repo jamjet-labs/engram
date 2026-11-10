@@ -231,6 +231,7 @@ async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
         "entities": 1,
         "fact_meta": 0,
         "revocations_scrubbed": 0,
+        "scope_erasure": 1,
     }
 
     assert [sf.fact.id for sf in await memory.recall("chess", user_id="bob")] == [keep.id]
@@ -274,6 +275,7 @@ async def test_erase_user_records_the_residue_it_removes(memory: Engram) -> None
         "entities": 0,
         "fact_meta": 0,
         "revocations_scrubbed": 0,
+        "scope_erasure": 1,
     }
     assert "sqlite_secure_delete" in record.guarantees  # finalized like a per-fact erasure
     assert await memory.list_conversations(user_id="alice") == []

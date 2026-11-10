@@ -18,7 +18,7 @@ from uuid import UUID
 
 import aiosqlite
 
-from engram.errors import NotFoundError, ScopeError, StoreError
+from engram.errors import NotFoundError, ScopeErasedError, ScopeError, StoreError
 from engram.governance import (
     ErasureRecord,
     HiddenReason,
@@ -329,6 +329,7 @@ class SqliteStore:
         writer: str | None = None,
         source: str = "upsert",
         derived_from: Iterable[UUID] | None = None,
+        not_erased_since: datetime | None = None,
     ) -> None:
         """Insert or update a fact, its provenance row and its derivation links.
 
@@ -336,10 +337,23 @@ class SqliteStore:
         The content hash follows the text, so rewriting an active fact into
         revoked text hides it. Nothing here touches the revocations table: a
         write cannot lift a tombstone.
+
+        ``not_erased_since`` is when the caller's write started. If the
+        scope's data was erased (`Engram.erase_user`) at or after that time,
+        this raises ScopeErasedError and writes nothing: the fact was derived
+        from data that erase removed.
         """
         sources = list(derived_from or [])
         try:
             async with self._transaction():
+                # Checked inside the transaction, which holds the write lock,
+                # so no erasure can commit between this check and the insert.
+                if not_erased_since is not None and await self._scope_erased_since(
+                    fact.scope, not_erased_since
+                ):
+                    raise ScopeErasedError(
+                        "the scope was erased while this write ran; the fact was not stored"
+                    )
                 # Checked inside the transaction, so a concurrent erase cannot
                 # remove a source between the check and the insert.
                 if sources:
@@ -447,6 +461,24 @@ class SqliteStore:
                 _dt(_now()),
             ),
         )
+
+    async def _scope_erased_since(self, scope: Scope, since: datetime) -> bool:
+        """Has a scope-wide erasure record been written in scope at or after ``since``?
+
+        Compares parsed times, not the stored strings: a local UTC offset can
+        change between two writes (daylight saving), and then the ISO 8601
+        strings no longer sort in time order.
+        """
+        start = since.astimezone()
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT erased_at FROM erasures
+                    WHERE org_id = ? AND user_id = ?
+                      AND json_extract(artifacts, '$.scope_erasure') = 1""",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return any(datetime.fromisoformat(r[0]).astimezone() >= start for r in rows)
 
     async def _message_in_scope(self, message_id: UUID, scope: Scope) -> bool:
         async with self._reading() as db:
@@ -1764,7 +1796,10 @@ class SqliteStore:
         In the same transaction, writes one erasure record with no fact ids,
         ``reason`` and ``actor`` as given, and the per-table counts in
         ``artifacts`` (``revocations_scrubbed`` counts tombstones cleared).
-        Returns it; the caller passes it to :meth:`finalize_erasure`.
+        ``artifacts["scope_erasure"] = 1`` marks it as the scope-wide record:
+        ``upsert_fact(not_erased_since=...)`` refuses a write that started
+        before it. Returns it; the caller passes it to :meth:`finalize_erasure`,
+        which keeps the marker.
 
         `fact_entity_refs` rows go through ON DELETE CASCADE (foreign_keys is ON,
         set from schema.sql in `open`).
@@ -1798,6 +1833,7 @@ class SqliteStore:
                     args,
                 )
                 removed["revocations_scrubbed"] = cur2.rowcount
+                removed["scope_erasure"] = 1
                 record = ErasureRecord(
                     org_id=scope.org_id,
                     user_id=scope.user_id,
