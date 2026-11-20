@@ -11,8 +11,8 @@ from engram.models import Fact
 from engram.retrieve.hybrid import HybridRetriever
 from engram.retrieve.temporal import TemporalIntent, detect_temporal_intent
 from engram.scope import Scope
-from engram.store.sqlite import SqliteStore
 from engram.vector.hnsw import HnswVectorStore
+from tests.conformance.backends import OpenStore
 
 
 def _now() -> datetime:
@@ -49,9 +49,9 @@ def test_temporal_intent_none_on_atemporal() -> None:
 
 
 @pytest_asyncio.fixture
-async def setup_retriever() -> tuple[HybridRetriever, Scope, list[Fact]]:
+async def setup_retriever(open_store: OpenStore) -> tuple[HybridRetriever, Scope, list[Fact]]:
     """Set up an in-memory retriever with 5 hand-curated facts."""
-    fact_store = await SqliteStore.open(":memory:")
+    fact_store = await open_store()
     embedder = SyntheticEmbedding(dim=64)
     vec_store = HnswVectorStore(dim=64)
     scope = Scope(org_id="acme", user_id="alice")
@@ -157,11 +157,11 @@ async def test_temporal_score_zero_on_atemporal_query(
     assert all(r.temporal_score == 0.0 for r in results)
 
 
-async def test_temporal_score_nonzero_on_temporal_query() -> None:
+async def test_temporal_score_nonzero_on_temporal_query(open_store: OpenStore) -> None:
     """Facts with event_date close to the temporal anchor get higher temporal_score."""
     from datetime import timedelta
 
-    fact_store = await SqliteStore.open(":memory:")
+    fact_store = await open_store()
     embedder = SyntheticEmbedding(dim=64)
     vec_store = HnswVectorStore(dim=64)
     scope = Scope(org_id="acme", user_id="alice")

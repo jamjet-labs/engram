@@ -12,6 +12,11 @@ Errors
 - A request that fails validation (a missing field, a wrong type, a value
   out of range) is 422 with FastAPI's `{"detail": ...}`, not Rust's 400
   `{"error": ...}`. Errors the handlers raise themselves keep `{"error"}`.
+- Text Engram refuses to store is 400 `{"error": ...}`: a NUL character or
+  a lone surrogate in a turn, a forget reason or an extracted fact, a turn
+  over 1 MiB, an extracted fact over 64 KiB, a blank conversation id. The
+  error names the field and the rule, never the value. A save with such a
+  turn stores none of its turns.
 
 Scope
 - `org_id` defaults to "default", as in Rust. A missing `user_id` means the
@@ -92,7 +97,7 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from engram.engram import Engram, context_lines
 from engram.errors import (
@@ -105,6 +110,7 @@ from engram.errors import (
 from engram.models import ChatMessage
 from engram.retrieve.base import ScoredFact
 from engram.scope import Scope
+from engram.validate import MAX_FACT_TEXT_BYTES, MAX_MESSAGE_BYTES, check_text
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +205,17 @@ def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message})
 
 
+def refused_detail(e: ValueError) -> str:
+    """Why Engram refused the input: the field and the rule, never the value."""
+    if isinstance(e, ValidationError):
+        # Pydantic's own message quotes the input, so build one without it.
+        return "; ".join(
+            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+            for err in e.errors(include_url=False, include_input=False)
+        )
+    return str(e)
+
+
 def fact_json(sf: ScoredFact) -> dict[str, Any]:
     """One fact in the Rust v0.5.x recall/search shape."""
     f = sf.fact
@@ -274,6 +291,8 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
             return _error(400, str(e))
         except (ExtractionError, EmbeddingError) as e:
             return _extraction_failed(e)
+        except ValueError as e:  # a fact text Engram refuses to store
+            return _error(400, refused_detail(e))
         ids = [str(f.id) for f in facts]
         return {"success": True, "fact_count": len(ids), "fact_ids": ids}
 
@@ -320,7 +339,11 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         except ValueError as e:
             return _error(400, f"invalid fact_id: {e}")
         reason = ((req.reason if req else None) or "").strip() or _FORGET_REASON
-        if not await engram.forget(parsed, reason=reason, actor=_FORGET_ACTOR):
+        try:
+            found = await engram.forget(parsed, reason=reason, actor=_FORGET_ACTOR)
+        except ValueError as e:  # a reason Engram refuses to store
+            return _error(400, refused_detail(e))
+        if not found:
             return _error(404, f"fact {parsed} not found")
         return {"success": True, "deleted_fact_id": fact_id}
 
@@ -405,6 +428,14 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         """
         if not req.messages:
             return _error(400, "messages must not be empty")
+        # Every turn is checked before the first is stored, so a refused one
+        # stores none of them. record_message checks each again.
+        try:
+            check_text("conversation_id", req.conversation_id, max_bytes=MAX_FACT_TEXT_BYTES)
+            for m in req.messages:
+                check_text("content", m.content, max_bytes=MAX_MESSAGE_BYTES, allow_blank=True)
+        except ValueError as e:
+            return _error(400, refused_detail(e))
         s = _scope(req.user_id, req.org_id)
         base = datetime.now().astimezone()
         stored: list[ChatMessage] = []

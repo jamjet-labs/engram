@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
-from engram.errors import NotFoundError, ScopeErasedError
+from engram.errors import NotFoundError, ReadOnlyStoreError, ScopeErasedError
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.governance import (
@@ -38,7 +38,14 @@ from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.hybrid import HybridRetriever
 from engram.retrieve.rrf import reciprocal_rank_fusion
 from engram.scope import Scope
-from engram.store.sqlite import SqliteStore
+from engram.store.base import EngramStore
+from engram.store.open import open_store
+from engram.validate import (
+    MAX_FACT_TEXT_BYTES,
+    MAX_MESSAGE_BYTES,
+    check_json,
+    check_text,
+)
 from engram.vector.hnsw import HnswVectorStore
 
 logger = logging.getLogger(__name__)
@@ -52,11 +59,14 @@ class Engram:
         async with await Engram.open("./engram.db") as memory:
             await memory.record(user_id="alice", text="I prefer espresso.")
             facts = await memory.recall(user_id="alice", query="coffee preference")
+
+    It works with any store that meets `engram.store.EngramStore`; pass one
+    with `Engram.open(store=...)`.
     """
 
     def __init__(
         self,
-        store: SqliteStore,
+        store: EngramStore,
         vector_store: HnswVectorStore,
         embedder: EmbeddingProvider,
         retriever: HybridRetriever,
@@ -86,8 +96,20 @@ class Engram:
         reranker: Reranker | None = None,
         retrieval_config: RetrievalConfig | None = None,
         tier: ModelTier | None = None,
+        *,
+        store: EngramStore | None = None,
+        read_only: bool = False,
     ) -> Engram:
-        """Open an Engram instance backed by SQLite + in-memory HNSW.
+        """Open an Engram instance on a store, with an in-memory HNSW index.
+
+        Storage:
+        - path: a SQLite file, or ":memory:" (the default).
+        - store: an open store to use instead of ``path``: any object that
+          meets `engram.store.EngramStore`. The Engram owns it from then on,
+          and `close()` closes it. Passing a ``path`` as well is a ValueError.
+        - read_only: open the store for reads only. Every write method then
+          raises `ReadOnlyStoreError` before any embedder or LLM call. A
+          ``store`` passed with ``read_only=True`` must itself be read-only.
 
         Defaults:
         - embedder: SyntheticEmbedding(dim=384) — deterministic, offline-safe.
@@ -98,7 +120,16 @@ class Engram:
           from utility (verifier, decomposer, ReAct brain). When ``tier`` is set
           and ``llm`` is not, ``tier.utility`` is used for extraction/event work.
         """
-        store = await SqliteStore.open(path)
+        if store is not None:
+            if str(path) != ":memory:":
+                raise ValueError("pass a path or a store, not both")
+            if read_only and not store.read_only:
+                raise ValueError(
+                    "read_only=True needs a store opened read-only; open the store "
+                    "with read_only=True, or leave read_only out"
+                )
+        else:
+            store = await open_store(path, read_only=read_only)
         embedder = embedder or SyntheticEmbedding(dim=384)
         vec = HnswVectorStore(dim=embedder.dim)
         retriever = HybridRetriever(
@@ -113,7 +144,19 @@ class Engram:
         events = EventExtractor(effective_llm) if effective_llm is not None else None
         return cls(store, vec, embedder, retriever, extraction, events, tier=tier)
 
+    @property
+    def read_only(self) -> bool:
+        """True when the store is read-only: every write method raises ReadOnlyStoreError."""
+        return self._store.read_only
+
+    def _require_writable(self) -> None:
+        # First thing in every write method: before validation, any store
+        # call, and any embedder or LLM call.
+        if self._store.read_only:
+            raise ReadOnlyStoreError("this Engram was opened read-only; writes are refused")
+
     async def close(self) -> None:
+        """Close the vector index and the store, a store passed to `open` included."""
         await self._vec.close()
         await self._store.close()
 
@@ -139,8 +182,11 @@ class Engram:
         """Phase 11: extract SVO events from a chat segment via LLM.
 
         Persists the events into the event calendar by default. Requires an
-        LLM to have been passed at `Engram.open(llm=...)`.
+        LLM to have been passed at `Engram.open(llm=...)`. With
+        ``persist=False`` nothing is stored, so it also works read-only.
         """
+        if persist:
+            self._require_writable()
         if self._events is None:
             raise RuntimeError("event extraction requires an LLM; pass `llm=...` to Engram.open()")
         if not messages:
@@ -188,6 +234,7 @@ class Engram:
         existing tombstone; a different replacement than the recorded one is
         refused.
         """
+        self._require_writable()
         scope = Scope(org_id=org_id, user_id=user_id)
         try:
             rev = await self._store.revoke(
@@ -236,6 +283,7 @@ class Engram:
         audit; use :meth:`erase` to delete it. Idempotent. Pass a ``Fact`` to
         use its scope, or an id with ``user_id``/``org_id``.
         """
+        self._require_writable()
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
         scope = self._governed_scope(fact, user_id, org_id)
@@ -260,6 +308,7 @@ class Engram:
         them and why. The fact can stay hidden if another tombstone also
         covers it; check :meth:`explain`.
         """
+        self._require_writable()
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
         scope = self._governed_scope(fact, user_id, org_id)
@@ -289,6 +338,7 @@ class Engram:
         ``block_reinsertion=False`` to drop it too. See the README section on
         erasure for what the backend can and cannot vouch for.
         """
+        self._require_writable()
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
         scope = self._governed_scope(fact, user_id, org_id)
@@ -312,6 +362,7 @@ class Engram:
         every scope and revokes it there. Use it only where the caller is
         trusted for every scope, as on a one-token server.
         """
+        self._require_writable()
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
         scope = await self._store.find_fact_scope(fact_id)
@@ -355,6 +406,7 @@ class Engram:
         on a large scope may run long; each call erases more, so repeating it
         finishes the job. Returns the number of facts erased.
         """
+        self._require_writable()
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
         scope = Scope(org_id=org_id, user_id=user_id)
@@ -395,6 +447,7 @@ class Engram:
         of `live_messages` withholds every later turn in a session reusing
         that id. This is accepted fail-closed behavior.
         """
+        self._require_writable()
         return await self._store.delete_session_messages(
             session_id, Scope(org_id=org_id, user_id=user_id)
         )
@@ -482,14 +535,19 @@ class Engram:
           fact is not stored and ScopeErasedError is raised; if the erase
           lands after the fact is stored, it erases the fact and its vector.
         """
+        self._require_writable()
         # Before any await: an erase_user that finishes after this refuses the write.
         started = datetime.now().astimezone()
-        scope = Scope(org_id=org_id, user_id=user_id)
-        if reject_revoked and await self._store.is_content_revoked(text, scope):
-            raise RevokedContentError("text matches revoked content in this scope")
+        check_text("text", text, max_bytes=MAX_FACT_TEXT_BYTES)
+        if session_id is not None:
+            check_text("session_id", session_id, max_bytes=MAX_FACT_TEXT_BYTES)
         md = dict(metadata or {})
         if role is not None:
             md["role"] = role
+        check_json("metadata", md)
+        scope = Scope(org_id=org_id, user_id=user_id)
+        if reject_revoked and await self._store.is_content_revoked(text, scope):
+            raise RevokedContentError("text matches revoked content in this scope")
         fact = Fact(
             text=text,
             scope=scope,
@@ -548,6 +606,9 @@ class Engram:
         With ``not_erased_since`` (timezone-aware), raises ScopeErasedError and
         stores nothing if :meth:`erase_user` erased the scope at or after it.
         """
+        self._require_writable()
+        check_text("content", content, max_bytes=MAX_MESSAGE_BYTES, allow_blank=True)
+        check_text("session_id", session_id, max_bytes=MAX_FACT_TEXT_BYTES)
         msg = ChatMessage(
             scope=Scope(org_id=org_id, user_id=user_id),
             session_id=session_id,
@@ -568,7 +629,8 @@ class Engram:
     ) -> list[Fact]:
         """Extract durable facts from a conversation. Optionally persist them.
 
-        Requires an LLM to have been passed at `Engram.open(llm=...)`.
+        Requires an LLM to have been passed at `Engram.open(llm=...)`. With
+        ``persist=False`` nothing is stored, so it also works read-only.
 
         If :meth:`erase_user` erases the scope while this runs, the facts not
         yet stored are dropped, and the result lists only those stored before
@@ -577,6 +639,8 @@ class Engram:
         stored before this call, so an erase that removed them in between also
         refuses the facts drawn from them. It must be timezone-aware (ValueError).
         """
+        if persist:
+            self._require_writable()
         if not_erased_since is not None and not_erased_since.tzinfo is None:
             raise ValueError("not_erased_since must be timezone-aware")
         started = datetime.now().astimezone() if not_erased_since is None else not_erased_since

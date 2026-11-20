@@ -7,9 +7,10 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from collections.abc import AsyncIterator, Collection, Iterable, Sequence
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from types import TracebackType
@@ -20,6 +21,8 @@ import aiosqlite
 
 from engram.errors import (
     NotFoundError,
+    ReadOnlyStoreError,
+    SchemaVersionError,
     ScopeErasedError,
     ScopeError,
     ScopeResidueRefusedError,
@@ -37,15 +40,32 @@ from engram.governance import (
 )
 from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
 from engram.scope import Scope
+from engram.store import _rules, sqlite_migrations
+from engram.store.sqlite_migrations import BASELINE_VERSION, Migration
+
+# Re-exported for callers that read the version from here. The store itself
+# calls sqlite_migrations.target_version() at open time.
+from engram.store.sqlite_migrations import SCHEMA_VERSION as SCHEMA_VERSION
+from engram.validate import (
+    MAX_FACT_TEXT_BYTES,
+    MAX_MESSAGE_BYTES,
+    MAX_STORE_LIMIT,
+    check_json,
+    check_limit,
+    check_text,
+)
 
 logger = logging.getLogger(__name__)
 
 _FTS_TABLES = ("facts_fts", "events_fts")
-# Bumped when a release changes what the schema means, not only its shape.
-# 1: 0.1/0.2. 2: 0.3 revocation views and side tables. A library refuses a
-# database whose recorded version is higher than this, before writing to it.
-# 0.2 never reads this table, so it cannot be stopped from opening a 0.3 file.
-SCHEMA_VERSION = 2
+# Schema versions: 1 is 0.1/0.2, 2 is 0.3's revocation views and side tables
+# (schema.sql), and each later one is a numbered migration. A library refuses
+# a database whose recorded version is higher than its own, before writing to
+# it. 0.2 never reads this table, so it cannot be stopped from opening a 0.3 file.
+
+# How long a connection waits for another connection's lock before it fails,
+# so a second process waits out a migration or a long write instead of erroring.
+_BUSY_TIMEOUT_S = 30.0
 
 _INSERT_MATCH = (
     "INSERT OR IGNORE INTO content_matches (kind, item_id, revocation_id) VALUES (?,?,?)"
@@ -92,6 +112,74 @@ def _is_private_memory(path: str | Path) -> bool:
     return text in ("", ":memory:") or "mode=memory" in text
 
 
+def _read_only_uri(path: str | Path) -> str:
+    """A ``file:`` URI with ``mode=ro`` for an existing database file.
+
+    In this mode SQLite itself refuses every write, and a missing file is an
+    error rather than a new empty database. ``as_uri`` escapes ``?``, ``#``
+    and ``%`` in the path.
+    """
+    return Path(path).absolute().as_uri() + "?mode=ro"
+
+
+async def _recorded_version(conn: aiosqlite.Connection) -> int | None:
+    """The highest schema version the database records; None if it records none."""
+    async with conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+    ) as cur:
+        if await cur.fetchone() is None:
+            return None
+    async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
+        row = await cur.fetchone()
+    return None if row is None or row[0] is None else int(row[0])
+
+
+def _newer_schema_message(path: str | Path, found: int, target: int) -> str:
+    return (
+        f"database {path} was written by a newer version of Engram "
+        f"(schema {found}; this version supports up to {target}). "
+        "Upgrade jamjet-engram to open it. Nothing was written."
+    )
+
+
+async def _refuse_if_newer(conn: aiosqlite.Connection, path: str | Path) -> None:
+    """Raise `SchemaVersionError` if the file records a schema above this library's."""
+    found = await _recorded_version(conn)
+    target = sqlite_migrations.target_version()
+    if found is not None and found > target:
+        raise SchemaVersionError(_newer_schema_message(path, found, target))
+
+
+async def _run_pragma(conn: aiosqlite.Connection, pragma: str) -> None:
+    """Run one PRAGMA, waiting out another process that holds the file.
+
+    SQLite does not call the busy handler for every lock a PRAGMA needs. The
+    first journal_mode=WAL on a new file fails at once with "database is
+    locked" when another process opens the same file at the same moment. So
+    wait and retry for as long as the busy timeout.
+    """
+    deadline = time.monotonic() + _BUSY_TIMEOUT_S
+    while True:
+        try:
+            await conn.execute(pragma)
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(0.02)
+
+
+async def _apply_migration(conn: aiosqlite.Connection, migration: Migration) -> None:
+    """Run one migration's statements and record its version. No commit.
+
+    Called inside the open's write transaction, so a failure part way
+    leaves nothing of it behind.
+    """
+    for stmt in migration.statements:
+        await conn.execute(stmt)
+    await conn.execute("INSERT INTO schema_version (version) VALUES (?)", (migration.version,))
+
+
 async def _shielded_rollback(conn: aiosqlite.Connection) -> None:
     """Roll back, even if the caller is cancelled again while waiting.
 
@@ -112,26 +200,18 @@ async def _shielded_rollback(conn: aiosqlite.Connection) -> None:
         pass  # already logged by log_failure
 
 
-def _quote_rows(
-    items: Sequence[tuple[str, str, str]], revoked: Sequence[tuple[str, str]]
-) -> list[tuple[str, str, str]]:
-    """(kind, item_id, revocation_id) for every item whose text quotes a revoked text."""
-    rows: list[tuple[str, str, str]] = []
-    for kind, item_id, text in items:
-        norm = normalize_text(text)
-        rows.extend(
-            (kind, item_id, rev_id) for rev_id, rev_norm in revoked if quotes(norm, rev_norm)
-        )
-    return rows
-
-
 def _ids_json(ids: Collection[str]) -> str:
     """Bind a set of ids as one parameter: `x IN (SELECT value FROM json_each(?))`."""
     return json.dumps(sorted(ids))
 
 
+def _utc(dt: datetime) -> datetime:
+    """A naive time is read as UTC, so every stored time names one instant."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
 def _dt(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt else None
+    return _utc(dt).isoformat() if dt else None
 
 
 def _require_aware(since: datetime | None) -> None:
@@ -143,21 +223,67 @@ def _require_aware(since: datetime | None) -> None:
 def _parse_dt(s: str | None) -> datetime | None:
     if s is None:
         return None
-    return datetime.fromisoformat(s)
+    return _parse_required_dt(s)
+
+
+def _parse_required_dt(s: str) -> datetime:
+    return _utc(datetime.fromisoformat(s))
+
+
+def _check_fact(fact: Fact) -> None:
+    """Refuse a fact the stores cannot hold alike. Blank text is the facade's to refuse."""
+    check_text("text", fact.text, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True)
+    if fact.session_id is not None:
+        check_text("session_id", fact.session_id, max_bytes=MAX_FACT_TEXT_BYTES)
+    for name, value in (("category", fact.category), ("source_event_id", fact.source_event_id)):
+        if value is not None:
+            check_text(name, value, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True)
+    check_json("metadata", fact.metadata)
+
+
+def _check_message(message: ChatMessage) -> None:
+    check_text("content", message.content, max_bytes=MAX_MESSAGE_BYTES, allow_blank=True)
+    check_text("session_id", message.session_id, max_bytes=MAX_FACT_TEXT_BYTES)
+    check_json("metadata", message.metadata)
+
+
+def _check_event(event: Event) -> None:
+    for name, value in (
+        ("subject_canonical", event.subject_canonical),
+        ("verb", event.verb),
+        ("object_canonical", event.object_canonical),
+    ):
+        check_text(name, value, max_bytes=MAX_FACT_TEXT_BYTES)
+    for alias in event.aliases:
+        check_text("alias", alias, max_bytes=MAX_FACT_TEXT_BYTES)
+    check_json("metadata", event.metadata)
+
+
+def _check_audit(reason: str, actor: str) -> None:
+    check_text("reason", reason, max_bytes=MAX_FACT_TEXT_BYTES)
+    check_text("actor", actor, max_bytes=MAX_FACT_TEXT_BYTES)
 
 
 class SqliteStore:
     """Async SQLite + FTS5 store. Open with `await SqliteStore.open(path)`."""
 
     def __init__(
-        self, conn: aiosqlite.Connection, read_conn: aiosqlite.Connection | None = None
+        self,
+        conn: aiosqlite.Connection,
+        read_conn: aiosqlite.Connection | None = None,
+        *,
+        read_only: bool = False,
+        path: str | Path = ":memory:",
     ) -> None:
         # Writes go through `_conn`, one transaction at a time (see
         # _transaction). Reads go through `_reading()`: a second connection for
         # file databases, which in WAL mode only ever sees committed data, or,
         # for an in-memory database, the write connection under the same lock.
+        # A read-only store has the one connection, opened read-only.
         self._conn = conn
         self._rconn = read_conn
+        self._read_only = read_only
+        self._path = path
         self._fts_secure_delete = False
         # One Engram shares its connections across tasks, and SQLite has one
         # transaction per connection. Every write transaction holds this lock,
@@ -170,20 +296,40 @@ class SqliteStore:
         self._access_task: asyncio.Task[None] | None = None
 
     @classmethod
-    async def open(cls, path: str | Path) -> SqliteStore:
-        conn = await aiosqlite.connect(str(path))
+    async def open(cls, path: str | Path, *, read_only: bool = False) -> SqliteStore:
+        """Open, or create, the store at ``path``: a file, or ":memory:".
+
+        A writable open brings the file to this library's schema in one write
+        transaction: it refuses a file from a newer Engram, runs schema.sql,
+        then every numbered migration the file lacks
+        (`engram.store.sqlite_migrations`). Each later write transaction
+        checks the version again, so if a newer Engram migrates the file while
+        this store is open, its writes raise `SchemaVersionError`.
+
+        ``read_only=True`` opens an existing file for reads only. It runs no
+        schema statement and writes nothing, so the file must already be at
+        this library's schema version (`SchemaVersionError` otherwise). Every
+        write method then raises `ReadOnlyStoreError`. ":memory:" cannot be
+        opened read-only. A read-only store checks the version only at open:
+        if a newer Engram migrates the file later, its reads go on through the
+        newer views.
+        """
+        if read_only:
+            return await cls._open_read_only(path)
+        conn = await aiosqlite.connect(str(path), timeout=_BUSY_TIMEOUT_S)
         conn.row_factory = aiosqlite.Row
         try:
             # Cheap early exit before even the PRAGMAs touch the file.
             await cls._refuse_newer_schema(conn, path)
             pragmas, statements = _schema_statements()
             for pragma in pragmas:
-                await conn.execute(pragma)
+                await _run_pragma(conn, pragma)
             # Overwrite freed pages with zeros so deleted content does not linger
             # in the database file (per connection; see erase()).
-            await conn.execute("PRAGMA secure_delete = ON")
-            # Check and create in one write transaction, so a newer library
-            # cannot record its version between our check and our views.
+            await _run_pragma(conn, "PRAGMA secure_delete = ON")
+            # Check, create and migrate in one write transaction, so a newer
+            # library cannot record its version between our check and our
+            # views, and a failed migration leaves the file as it was.
             await conn.execute("BEGIN IMMEDIATE")
             try:
                 await cls._refuse_newer_schema(conn, path)
@@ -191,8 +337,9 @@ class SqliteStore:
                     await conn.execute(stmt)
                 await conn.execute(
                     "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
-                    (SCHEMA_VERSION,),
+                    (BASELINE_VERSION,),
                 )
+                await cls._migrate(conn, path)
                 await conn.commit()
             except BaseException:
                 await _shielded_rollback(conn)
@@ -202,11 +349,11 @@ class SqliteStore:
             raise
         read_conn: aiosqlite.Connection | None = None
         if not _is_private_memory(path):
-            read_conn = await aiosqlite.connect(str(path))
+            read_conn = await aiosqlite.connect(str(path), timeout=_BUSY_TIMEOUT_S)
             read_conn.row_factory = aiosqlite.Row
             # Fail closed if a write is ever routed to the read connection.
             await read_conn.execute("PRAGMA query_only = ON")
-        store = cls(conn, read_conn)
+        store = cls(conn, read_conn, path=path)
         try:
             store._fts_secure_delete = await store._enable_fts_secure_delete()
             await store._backfill_fact_meta()
@@ -214,6 +361,51 @@ class SqliteStore:
             await store.close()
             raise
         return store
+
+    @classmethod
+    async def _open_read_only(cls, path: str | Path) -> SqliteStore:
+        if _is_private_memory(path):
+            raise ValueError("an in-memory database cannot be opened read-only: it starts empty")
+        try:
+            conn = await aiosqlite.connect(_read_only_uri(path), uri=True, timeout=_BUSY_TIMEOUT_S)
+        except aiosqlite.Error as e:
+            raise StoreError(f"cannot open {path} read-only: {e}") from e
+        conn.row_factory = aiosqlite.Row
+        try:
+            await conn.execute("PRAGMA query_only = ON")
+            await cls._require_current_schema(conn, path)
+        except aiosqlite.Error as e:
+            # For example a WAL file whose -shm cannot be created next to it.
+            await conn.close()
+            raise StoreError(f"cannot open {path} read-only: {e}") from e
+        except BaseException:
+            await conn.close()
+            raise
+        return cls(conn, read_only=True, path=path)
+
+    @staticmethod
+    async def _migrate(conn: aiosqlite.Connection, path: str | Path) -> None:
+        """Apply, in order, each migration above the file's version. No commit."""
+        found = await _recorded_version(conn)
+        start = BASELINE_VERSION if found is None else found
+        for migration in sqlite_migrations.pending(start):
+            try:
+                await _apply_migration(conn, migration)
+            except aiosqlite.Error as e:
+                raise StoreError(
+                    f"schema migration {migration.version} failed on {path}: {e}. "
+                    "The open was rolled back; the file keeps its old schema."
+                ) from e
+
+    @property
+    def read_only(self) -> bool:
+        """True when opened with ``read_only=True``: every write is refused."""
+        return self._read_only
+
+    def _require_writable(self) -> None:
+        """Raise before a write method reads or writes anything on a read-only store."""
+        if self._read_only:
+            raise ReadOnlyStoreError("this store was opened read-only; writes are refused")
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -227,11 +419,16 @@ class SqliteStore:
 
         BEGIN IMMEDIATE takes SQLite's write lock up front, so reads made at
         the start of the body cannot go stale under another process's write.
+
+        Under that lock it reads the file's schema version again: a newer
+        Engram may have migrated the file since this store opened it, and this
+        library never writes to a schema newer than it knows.
         """
         async with self._write_lock:
             self._lock_owner = asyncio.current_task()
             try:
                 await self._conn.execute("BEGIN IMMEDIATE")
+                await _refuse_if_newer(self._conn, self._path)
                 yield
                 await self._conn.commit()
             except BaseException:
@@ -269,19 +466,25 @@ class SqliteStore:
         Opening recreates the visibility views from this library's schema.sql,
         which would replace a newer version's revocation rules with older ones.
         """
-        async with conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
-        ) as cur:
-            if await cur.fetchone() is None:
-                return
-        async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
-            row = await cur.fetchone()
-        found = row[0] if row is not None else None
-        if found is not None and int(found) > SCHEMA_VERSION:
-            raise StoreError(
-                f"database {path} was written by a newer version of Engram "
-                f"(schema {found}; this version supports up to {SCHEMA_VERSION}). "
-                "Upgrade jamjet-engram to open it. Nothing was written."
+        await _refuse_if_newer(conn, path)
+
+    @staticmethod
+    async def _require_current_schema(conn: aiosqlite.Connection, path: str | Path) -> None:
+        """Raise unless the database is at exactly this library's schema version.
+
+        A read-only open cannot upgrade a file, and must not read one whose
+        visibility rules are newer than its own.
+        """
+        found = await _recorded_version(conn)
+        target = sqlite_migrations.target_version()
+        if found is not None and found > target:
+            raise SchemaVersionError(_newer_schema_message(path, found, target))
+        if found != target:
+            shown = "none" if found is None else str(found)
+            raise SchemaVersionError(
+                f"database {path} is at schema {shown}; this version of Engram reads "
+                f"schema {target}. Open it writable once to upgrade it, then open it "
+                "read-only. Nothing was written."
             )
 
     async def _enable_fts_secure_delete(self) -> bool:
@@ -355,6 +558,8 @@ class SqliteStore:
         this raises ScopeErasedError and writes nothing: the fact was derived
         from data that erase removed. It must be timezone-aware (ValueError).
         """
+        self._require_writable()
+        _check_fact(fact)
         _require_aware(not_erased_since)
         sources = list(derived_from or [])
         try:
@@ -546,12 +751,6 @@ class SqliteStore:
             (kind, item_id, _ids_json(keep)),
         )
 
-    @staticmethod
-    def _event_text(event: Event) -> str:
-        return " ".join(
-            [event.subject_canonical, event.verb, event.object_canonical, *event.aliases]
-        )
-
     async def derivation_targets_in_scope(self, ids: Iterable[UUID], scope: Scope) -> set[UUID]:
         """Which of ``ids`` exist in ``scope`` (visible or not). Returns ids only."""
         async with self._reading() as db:
@@ -592,6 +791,8 @@ class SqliteStore:
     async def list_facts_by_session(
         self, session_id: str, scope: Scope, limit: int = 100
     ) -> list[Fact]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             async with db.execute(
                 """SELECT * FROM live_facts
@@ -603,6 +804,8 @@ class SqliteStore:
             return [self._row_to_fact(r) for r in rows]
 
     async def keyword_search(self, query: str, scope: Scope, limit: int = 30) -> list[Fact]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             sanitized = self._sanitize_fts(query)
             if not sanitized:
@@ -637,6 +840,8 @@ class SqliteStore:
         the FTS5 virtual table — joining or CTE-wrapping breaks it. So we do
         FTS5 + scoring in one query, then aggregate in Python.
         """
+        if check_limit("top_sessions", top_sessions, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             sanitized = self._sanitize_fts(query)
             if not sanitized:
@@ -679,8 +884,11 @@ class SqliteStore:
         """Count a read of this fact. Applied shortly after, in its own transaction.
 
         Queued so a recall() never waits behind a long write; call
-        flush_access() when the counts must be on disk now.
+        flush_access() when the counts must be on disk now. Does nothing on a
+        read-only store.
         """
+        if self._read_only:
+            return
         key = str(fact_id)
         count, _ = self._pending_access.get(key, (0, None))
         self._pending_access[key] = (count + 1, _dt(datetime.now().astimezone()))
@@ -698,7 +906,10 @@ class SqliteStore:
                             WHERE id = ?""",
                         [(n, at, fid) for fid, (n, at) in batch.items()],
                     )
-            except aiosqlite.Error:
+            except (aiosqlite.Error, SchemaVersionError):
+                # A newer Engram may have migrated the file since this store
+                # opened it; the counts are advisory, so drop them, never raise
+                # from close().
                 logger.exception("could not record access counts; dropped %d", len(batch))
 
     async def flush_access(self) -> None:
@@ -716,6 +927,8 @@ class SqliteStore:
         ``not_erased_since`` works as in :meth:`upsert_fact`: if the scope was
         erased at or after it, raises ScopeErasedError and writes nothing.
         """
+        self._require_writable()
+        _check_message(message)
         _require_aware(not_erased_since)
         async with self._transaction():
             if not_erased_since is not None and await self._scope_erased_since(
@@ -757,11 +970,13 @@ class SqliteStore:
     # ── Events (Phase 11) ────────────────────────────────────────────────
 
     async def upsert_event(self, event: Event) -> None:
+        self._require_writable()
+        _check_event(event)
         try:
             async with self._transaction():
                 await self._check_owner("event", str(event.id), event.scope)
                 keep = await self._add_matches(
-                    "event", str(event.id), self._event_text(event), event.scope
+                    "event", str(event.id), _rules.event_text(event), event.scope
                 )
                 cur = await self._conn.execute(
                     """INSERT INTO events (
@@ -817,6 +1032,8 @@ class SqliteStore:
         time_end: datetime | None = None,
         limit: int = 10,
     ) -> list[Event]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             sanitized = self._sanitize_fts(query) if query else ""
             try:
@@ -887,7 +1104,7 @@ class SqliteStore:
             subject_canonical=row["subject_canonical"],
             verb=row["verb"],
             object_canonical=row["object_canonical"],
-            time_start=datetime.fromisoformat(row["time_start"]),
+            time_start=_parse_required_dt(row["time_start"]),
             time_end=_parse_dt(row["time_end"]),
             confidence=row["confidence"],
             aliases=json.loads(row["aliases"]) if row["aliases"] else [],
@@ -900,6 +1117,8 @@ class SqliteStore:
     async def list_messages(
         self, session_id: str, scope: Scope, limit: int = 1000
     ) -> list[ChatMessage]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             async with db.execute(
                 """SELECT * FROM live_messages
@@ -1185,6 +1404,8 @@ class SqliteStore:
         already revoked without one attaches the replacement; a different
         replacement than the one recorded is refused.
         """
+        self._require_writable()
+        _check_audit(reason, actor)
         try:
             async with self._transaction():
                 fact = await self._governance_fact(fact_id, scope)
@@ -1307,12 +1528,12 @@ class SqliteStore:
             async with self._conn.execute(sql if ids is None else sql + only, params) as cur:
                 for r in await cur.fetchall():
                     if kind == "event":
-                        items.append((kind, r["id"], self._event_text(self._row_to_event(r))))
+                        items.append((kind, r["id"], _rules.event_text(self._row_to_event(r))))
                     else:
                         items.append((kind, r["id"], r["body"]))
         # Normalizing and matching a whole scope is CPU work (about a second at
         # 20k facts); run it in a thread so the event loop keeps serving reads.
-        rows = await asyncio.to_thread(_quote_rows, items, list(revoked))
+        rows = await asyncio.to_thread(_rules.quote_rows, items, list(revoked))
         if rows:
             await self._conn.executemany(_INSERT_MATCH, rows)
 
@@ -1392,6 +1613,8 @@ class SqliteStore:
         the revoked fact named in ``explain().hidden_by`` instead. That keeps a
         write of revoked text from being a handle to un-revoke the original.
         """
+        self._require_writable()
+        _check_audit(reason, actor)
         try:
             async with self._transaction():
                 if await self._governance_fact(fact_id, scope) is None:
@@ -1466,7 +1689,7 @@ class SqliteStore:
             fact_id=UUID(row["fact_id"]),
             reason=row["reason"],
             actor=row["actor"],
-            revoked_at=datetime.fromisoformat(row["revoked_at"]),
+            revoked_at=_parse_required_dt(row["revoked_at"]),
             replaced_by=UUID(row["replaced_by"]) if row["replaced_by"] else None,
             reinstated_at=_parse_dt(row["reinstated_at"]),
             reinstated_by=row["reinstated_by"],
@@ -1504,6 +1727,8 @@ class SqliteStore:
         run of an erased text. The caller (``Engram.erase``) drops the vectors
         and then calls :meth:`finalize_erasure`.
         """
+        self._require_writable()
+        _check_audit(reason, actor)
         try:
             async with self._transaction():
                 record = await self._erase_in_tx(
@@ -1528,7 +1753,7 @@ class SqliteStore:
         async with self._conn.execute(
             "SELECT id, text, source_message_id FROM facts WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            facts = {
+            facts: dict[str, _rules.FactRow] = {
                 r["id"]: (r["text"], normalize_text(r["text"]), r["source_message_id"])
                 for r in await cur.fetchall()
             }
@@ -1539,49 +1764,29 @@ class SqliteStore:
             for r in await cur.fetchall():
                 children.setdefault(r["source_fact_id"], []).append(r["fact_id"])
 
-        erased: set[str] = set()
-        frontier = [str(fact_id)]
-        while frontier:
-            fid = frontier.pop()
-            if fid in erased or fid not in facts:
-                continue
-            erased.add(fid)
-            norm = facts[fid][1]
-            frontier.extend(c for c in children.get(fid, []) if c not in erased)
-            if norm:
-                frontier.extend(
-                    other
-                    for other, (_, other_norm, _) in facts.items()
-                    if other not in erased and quotes(other_norm, norm)
-                )
-
-        norms = {facts[f][1] for f in erased} - {""}
-        for label, value in (("reason", reason), ("actor", actor)):
-            value_norm = normalize_text(value)
-            if any(quotes_any_run(value_norm, n) for n in norms):
-                raise ValueError(f"erasure {label} must not quote the content being erased")
-
+        erased = _rules.erase_closure(facts, children, str(fact_id))
+        norms, hashes = _rules.erased_norms_and_hashes(erased, facts)
+        _rules.refuse_quoting_audit_fields(reason, actor, norms)
         ids = sorted(erased)
-        hashes = {content_hash(facts[f][0]) for f in erased if facts[f][1]}
 
-        message_ids = {facts[f][2] for f in erased if facts[f][2]}
         async with self._conn.execute(
             "SELECT id, content FROM messages WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            for r in await cur.fetchall():
-                content_norm = normalize_text(r["content"])
-                if any(quotes(content_norm, n) for n in norms):
-                    message_ids.add(r["id"])
-        event_ids: set[str] = set()
+            message_ids = _rules.messages_to_erase(
+                erased, facts, [(r["id"], r["content"]) for r in await cur.fetchall()], norms
+            )
         async with self._conn.execute(
             "SELECT * FROM events WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            for r in await cur.fetchall():
-                ev = self._row_to_event(r)
-                linked = any(str(s) in erased for s in ev.source_fact_ids)
-                ev_norm = normalize_text(self._event_text(ev))
-                if linked or any(quotes(ev_norm, n) for n in norms):
-                    event_ids.add(r["id"])
+            events = [(r["id"], self._row_to_event(r)) for r in await cur.fetchall()]
+        event_ids = _rules.events_to_erase(
+            erased,
+            [
+                (row_id, [str(s) for s in ev.source_fact_ids], _rules.event_text(ev))
+                for row_id, ev in events
+            ],
+            norms,
+        )
 
         record = ErasureRecord(
             org_id=scope.org_id,
@@ -1614,37 +1819,33 @@ class SqliteStore:
                 f"DELETE FROM events WHERE id {in_ids}", (_ids_json(event_ids),)
             )
 
-        kept_hashes = 0
         async with self._conn.execute(
             "SELECT * FROM revocations WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            revs = await cur.fetchall()
-        for r in revs:
-            names_content = r["fact_id"] in erased or (
-                r["content_hash"] is not None and r["content_hash"] in hashes
-            )
-            reason_quotes = any(
-                quotes_any_run(normalize_text(r["reason"]), n)
-                or quotes_any_run(normalize_text(r["reinstate_reason"] or ""), n)
-                for n in norms
-            )
-            if not (names_content or reason_quotes):
-                continue
-            keep_hash = names_content and block_reinsertion and r["content_hash"] is not None
-            kept_hashes += int(keep_hash)
+            revs = [dict(r) for r in await cur.fetchall()]
+        scrubs = _rules.revocations_to_scrub(
+            revs, erased, hashes, norms, block_reinsertion=block_reinsertion
+        )
+        for s in scrubs:
             await self._conn.execute(
                 """UPDATE revocations
-                      SET reason = ?,
-                          reinstate_reason = CASE WHEN reinstate_reason IS NULL
-                                                  THEN NULL ELSE ? END,
+                      SET reason = CASE WHEN ? THEN ? ELSE reason END,
+                          reinstate_reason = CASE WHEN ? AND reinstate_reason IS NOT NULL
+                                                  THEN ? ELSE reinstate_reason END,
                           content_norm = CASE WHEN ? THEN NULL ELSE content_norm END,
-                          content_hash = CASE WHEN ? THEN content_hash ELSE
-                                              CASE WHEN ? THEN NULL ELSE content_hash END
-                                         END
+                          content_hash = CASE WHEN ? THEN NULL ELSE content_hash END
                     WHERE id = ?""",
-                (scrubbed, scrubbed, names_content, keep_hash, names_content, r["id"]),
+                (
+                    s.scrub_text,
+                    scrubbed,
+                    s.scrub_text,
+                    scrubbed,
+                    s.clear_norm,
+                    s.drop_hash,
+                    s.revocation_id,
+                ),
             )
-        record.guarantees["reinsertion_hashes_kept"] = kept_hashes
+        record.guarantees["reinsertion_hashes_kept"] = sum(s.keep_hash for s in scrubs)
 
         for kind, items in (("fact", ids), ("message", message_ids), ("event", event_ids)):
             if items:
@@ -1679,6 +1880,7 @@ class SqliteStore:
         self, record: ErasureRecord, extra_artifacts: dict[str, int], extra: dict[str, Any]
     ) -> ErasureRecord:
         """Record what else was removed, then flush the WAL so old pages leave the -wal file."""
+        self._require_writable()
         async with self._conn.execute("PRAGMA secure_delete") as cur:
             row = await cur.fetchone()
         secure = bool(row and row[0])
@@ -1705,6 +1907,8 @@ class SqliteStore:
 
     async def checkpoint(self) -> bool:
         """Checkpoint and truncate the WAL. True unless a reader blocked it."""
+        # A read-only connection reports a checkpoint it cannot do as done.
+        self._require_writable()
         # Under the write lock: a checkpoint cannot run inside a transaction.
         async with self._write_lock, self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)") as cur:
             row = await cur.fetchone()
@@ -1725,7 +1929,7 @@ class SqliteStore:
                     fact_ids=[UUID(i) for i in json.loads(r["fact_ids"])],
                     actor=r["actor"],
                     reason=r["reason"],
-                    erased_at=datetime.fromisoformat(r["erased_at"]),
+                    erased_at=_parse_required_dt(r["erased_at"]),
                     artifacts=json.loads(r["artifacts"]),
                     guarantees=json.loads(r["guarantees"]),
                 )
@@ -1803,6 +2007,7 @@ class SqliteStore:
         every turn later recorded under the same session id. That is
         fail-closed and accepted; reusing the id shows an empty session.
         """
+        self._require_writable()
         # By predicate, not by a list of ids: a list binds one variable per
         # turn, and SQLite refuses more than 32,766 in one statement.
         session = "org_id=? AND user_id=? AND session_id=?"
@@ -1843,6 +2048,8 @@ class SqliteStore:
         `fact_entity_refs` rows go through ON DELETE CASCADE (foreign_keys is ON,
         set from schema.sql in `open`).
         """
+        self._require_writable()
+        _check_audit(reason, actor)
         where = "org_id=? AND user_id=?"
         args = (scope.org_id, scope.user_id)
         removed: dict[str, int] = {}
@@ -1917,7 +2124,7 @@ class SqliteStore:
             id=UUID(row["id"]),
             text=row["text"],
             scope=scope,
-            valid_from=datetime.fromisoformat(row["valid_from"]),
+            valid_from=_parse_required_dt(row["valid_from"]),
             invalid_at=_parse_dt(row["invalid_at"]),
             confidence=row["confidence"],
             category=row["category"],
@@ -1944,6 +2151,6 @@ class SqliteStore:
             session_id=row["session_id"],
             role=row["role"],
             content=row["content"],
-            timestamp=datetime.fromisoformat(row["timestamp"]),
+            timestamp=_parse_required_dt(row["timestamp"]),
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
         )

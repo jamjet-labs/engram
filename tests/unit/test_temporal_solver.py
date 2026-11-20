@@ -4,11 +4,11 @@ from uuid import uuid4
 
 import pytest
 
-from engram import Engram
 from engram.models import Event
 from engram.read.reader import Reader, ReaderConfig
 from engram.scope import Scope
 from engram.solve.temporal import SolverResult, TemporalQuery, TemporalSolver
+from tests.conformance.backends import OpenMemory
 
 
 def test_temporal_query_minimal():
@@ -106,173 +106,175 @@ async def _seed_events(memory, scope, *, verb, object_canonical, dates):
 
 
 @pytest.mark.asyncio
-async def test_solve_count_before_anchor(monkeypatch):
+async def test_solve_count_before_anchor(monkeypatch, open_memory: OpenMemory):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        await _seed_events(
-            memory,
-            scope,
-            verb="run",
-            object_canonical="marathon",
-            dates=[datetime(2023, m, 1, tzinfo=UTC) for m in (1, 3, 5, 7)],
-        )
-        anchor_dt = datetime(2023, 8, 1, tzinfo=UTC)
-        await _seed_events(
-            memory,
-            scope,
-            verb="participate",
-            object_canonical="charity gala",
-            dates=[anchor_dt],
-        )
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        q = TemporalQuery(
-            op="count",
-            verb="run",
-            object="marathon",
-            anchor_event="charity gala",
-            bound="before",
-        )
-        result = await s.solve(q, scope)
-        assert result is not None
-        assert result.answer == 4
+    memory = await open_memory()
+    await _seed_events(
+        memory,
+        scope,
+        verb="run",
+        object_canonical="marathon",
+        dates=[datetime(2023, m, 1, tzinfo=UTC) for m in (1, 3, 5, 7)],
+    )
+    anchor_dt = datetime(2023, 8, 1, tzinfo=UTC)
+    await _seed_events(
+        memory,
+        scope,
+        verb="participate",
+        object_canonical="charity gala",
+        dates=[anchor_dt],
+    )
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    q = TemporalQuery(
+        op="count",
+        verb="run",
+        object="marathon",
+        anchor_event="charity gala",
+        bound="before",
+    )
+    result = await s.solve(q, scope)
+    assert result is not None
+    assert result.answer == 4
 
 
 @pytest.mark.asyncio
-async def test_solve_rejects_anchor_with_no_word_overlap(monkeypatch):
+async def test_solve_rejects_anchor_with_no_word_overlap(monkeypatch, open_memory: OpenMemory):
     """Sanity check: store may fall back to listing all events for FTS-unfriendly
     anchor names (e.g. all-hyphen). Solver must reject those false matches."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        await _seed_events(
-            memory,
-            scope,
-            verb="run",
-            object_canonical="marathon",
-            dates=[datetime(2023, 1, 1, tzinfo=UTC)],
-        )
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        # Anchor name has nothing in common with seeded events; sanitiser would
-        # drop the dashes entirely, so the store would otherwise return marathons.
-        q = TemporalQuery(
-            op="count",
-            verb="run",
-            anchor_event="--",
-            bound="before",
-        )
-        assert await s.solve(q, scope) is None
+    memory = await open_memory()
+    await _seed_events(
+        memory,
+        scope,
+        verb="run",
+        object_canonical="marathon",
+        dates=[datetime(2023, 1, 1, tzinfo=UTC)],
+    )
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    # Anchor name has nothing in common with seeded events; sanitiser would
+    # drop the dashes entirely, so the store would otherwise return marathons.
+    q = TemporalQuery(
+        op="count",
+        verb="run",
+        anchor_event="--",
+        bound="before",
+    )
+    assert await s.solve(q, scope) is None
 
 
 @pytest.mark.asyncio
-async def test_solve_returns_none_for_unknown_anchor(monkeypatch):
+async def test_solve_returns_none_for_unknown_anchor(monkeypatch, open_memory: OpenMemory):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        q = TemporalQuery(
-            op="count",
-            verb="run",
-            anchor_event="nonexistent-event",
-            bound="before",
-        )
-        assert await s.solve(q, scope) is None
+    memory = await open_memory()
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    q = TemporalQuery(
+        op="count",
+        verb="run",
+        anchor_event="nonexistent-event",
+        bound="before",
+    )
+    assert await s.solve(q, scope) is None
 
 
 @pytest.mark.asyncio
-async def test_solve_count_after_anchor(monkeypatch):
+async def test_solve_count_after_anchor(monkeypatch, open_memory: OpenMemory):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        await _seed_events(
-            memory,
-            scope,
-            verb="run",
-            object_canonical="marathon",
-            dates=[datetime(2023, m, 1, tzinfo=UTC) for m in (1, 3, 9, 11)],
-        )
-        anchor_dt = datetime(2023, 5, 1, tzinfo=UTC)
-        await _seed_events(
-            memory,
-            scope,
-            verb="run",
-            object_canonical="anchor-event",
-            dates=[anchor_dt],
-        )
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        q = TemporalQuery(
-            op="count",
-            verb="run",
-            object="marathon",
-            anchor_event="anchor-event",
-            bound="after",
-        )
-        result = await s.solve(q, scope)
-        assert result is not None
-        assert result.answer == 2  # months 9 and 11
+    memory = await open_memory()
+    await _seed_events(
+        memory,
+        scope,
+        verb="run",
+        object_canonical="marathon",
+        dates=[datetime(2023, m, 1, tzinfo=UTC) for m in (1, 3, 9, 11)],
+    )
+    anchor_dt = datetime(2023, 5, 1, tzinfo=UTC)
+    await _seed_events(
+        memory,
+        scope,
+        verb="run",
+        object_canonical="anchor-event",
+        dates=[anchor_dt],
+    )
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    q = TemporalQuery(
+        op="count",
+        verb="run",
+        object="marathon",
+        anchor_event="anchor-event",
+        bound="after",
+    )
+    result = await s.solve(q, scope)
+    assert result is not None
+    assert result.answer == 2  # months 9 and 11
 
 
 @pytest.mark.asyncio
-async def test_solve_returns_none_when_op_unsupported(monkeypatch):
+async def test_solve_returns_none_when_op_unsupported(monkeypatch, open_memory: OpenMemory):
     """duration / ordering / before_after / elapsed all fall through for now."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        for op in ("duration", "ordering", "before_after", "elapsed"):
-            q = TemporalQuery(op=op, verb="run")
-            assert await s.solve(q, scope) is None
-
-
-@pytest.mark.asyncio
-async def test_solve_count_returns_none_without_verb_or_object(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        # Need at least one event in the store so the empty-store guard passes.
-        await _seed_events(
-            memory,
-            scope,
-            verb="x",
-            object_canonical="y",
-            dates=[datetime(2023, 1, 1, tzinfo=UTC)],
-        )
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        q = TemporalQuery(op="count")
+    memory = await open_memory()
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    for op in ("duration", "ordering", "before_after", "elapsed"):
+        q = TemporalQuery(op=op, verb="run")
         assert await s.solve(q, scope) is None
 
 
 @pytest.mark.asyncio
-async def test_solve_returns_none_when_event_store_empty(monkeypatch):
+async def test_solve_count_returns_none_without_verb_or_object(
+    monkeypatch, open_memory: OpenMemory
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    scope = Scope(org_id="default", user_id="alice")
+    memory = await open_memory()
+    # Need at least one event in the store so the empty-store guard passes.
+    await _seed_events(
+        memory,
+        scope,
+        verb="x",
+        object_canonical="y",
+        dates=[datetime(2023, 1, 1, tzinfo=UTC)],
+    )
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    q = TemporalQuery(op="count")
+    assert await s.solve(q, scope) is None
+
+
+@pytest.mark.asyncio
+async def test_solve_returns_none_when_event_store_empty(monkeypatch, open_memory: OpenMemory):
     """Fail-closed: empty SVO calendar means we can't answer; don't return 0."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        q = TemporalQuery(op="count", verb="run", object="marathon")
-        # No events seeded → solver must return None, not SolverResult(answer=0).
-        assert await s.solve(q, scope) is None
+    memory = await open_memory()
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    q = TemporalQuery(op="count", verb="run", object="marathon")
+    # No events seeded → solver must return None, not SolverResult(answer=0).
+    assert await s.solve(q, scope) is None
 
 
 @pytest.mark.asyncio
-async def test_solve_returns_none_when_count_is_zero(monkeypatch):
+async def test_solve_returns_none_when_count_is_zero(monkeypatch, open_memory: OpenMemory):
     """Defer to LLM when count=0 — in LongMemEval the user has usually done
     the thing, so 0 means our SVO extraction missed the relevant events."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        # Seed an unrelated event so the empty-store guard passes.
-        await _seed_events(
-            memory,
-            scope,
-            verb="cook",
-            object_canonical="dinner",
-            dates=[datetime(2023, 1, 1, tzinfo=UTC)],
-        )
-        s = TemporalSolver(store=memory._store, llm=AsyncMock())
-        # Count for "run marathon" — no matches exist.
-        q = TemporalQuery(op="count", verb="run", object="marathon")
-        assert await s.solve(q, scope) is None
+    memory = await open_memory()
+    # Seed an unrelated event so the empty-store guard passes.
+    await _seed_events(
+        memory,
+        scope,
+        verb="cook",
+        object_canonical="dinner",
+        dates=[datetime(2023, 1, 1, tzinfo=UTC)],
+    )
+    s = TemporalSolver(store=memory._store, llm=AsyncMock())
+    # Count for "run marathon": no matches exist.
+    q = TemporalQuery(op="count", verb="run", object="marathon")
+    assert await s.solve(q, scope) is None
 
 
 # 3.4: Reader pre-pass integration

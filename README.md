@@ -50,6 +50,12 @@ uv add 'jamjet-engram[rerank]'        # cross-encoder reranker (recommended)
 
 Requires Python 3.12+. SQLite (stdlib) and `hnswlib` (auto-installed) are the only persistence dependencies.
 
+### Stores
+
+Engram talks to its storage through one protocol, `engram.store.EngramStore`. SQLite is the store today (`Engram.open("memory.db")`), and `Engram.open(store=...)` takes any store that meets the protocol. Several processes can share one SQLite file: writes take the file's write lock, and a process waits up to 30 seconds for it.
+
+Open with `read_only=True` to serve reads from a file another process writes to. A read-only open runs no schema change and writes nothing, so the file must already be at this version (`SchemaVersionError` if not), and every write raises `ReadOnlyStoreError`. A file written by a newer Engram is refused. Stores refuse text with a NUL character or over 64 KiB, messages over 1 MiB, metadata over 64 KiB, and `limit` or `top_k` above their caps.
+
 ---
 
 ## 60-second tour

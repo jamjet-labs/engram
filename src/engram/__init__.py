@@ -8,7 +8,14 @@ library callers should import.
 from engram.classify.base import QuestionType
 from engram.classify.rules import RuleBasedClassifier
 from engram.engram import Engram
-from engram.errors import EngramError, ExtractionError, NotFoundError, StoreError
+from engram.errors import (
+    EngramError,
+    ExtractionError,
+    NotFoundError,
+    ReadOnlyStoreError,
+    SchemaVersionError,
+    StoreError,
+)
 from engram.governance import ErasureRecord, Provenance, Revocation, RevokedContentError
 from engram.llm.base import LLMClient, LLMMessage, LLMResponse
 from engram.models import ChatMessage, Fact, MemoryTier, Polarity
@@ -33,12 +40,14 @@ __all__ = [
     "Polarity",
     "Provenance",
     "QuestionType",
+    "ReadOnlyStoreError",
     "Reader",
     "ReaderConfig",
     "RetrievalConfig",
     "Revocation",
     "RevokedContentError",
     "RuleBasedClassifier",
+    "SchemaVersionError",
     "Scope",
     "StoreError",
     "Tool",

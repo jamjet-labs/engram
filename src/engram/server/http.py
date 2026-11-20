@@ -34,7 +34,12 @@ from engram.server.auth import (
     normalize_host,
     normalize_origin,
 )
-from engram.server.legacy_v1 import LEGACY_HEALTH_PATH, fact_json, register_legacy_routes
+from engram.server.legacy_v1 import (
+    LEGACY_HEALTH_PATH,
+    fact_json,
+    refused_detail,
+    register_legacy_routes,
+)
 from engram.server.transport import build_streamable_http_mount
 
 
@@ -142,6 +147,11 @@ class _ExtractedFactSummary(BaseModel):
 
 class _ExtractResponse(BaseModel):
     facts: list[_ExtractedFactSummary]
+
+
+def _bad_input(e: ValueError) -> HTTPException:
+    """A 400 for input Engram refuses. The detail names the field and the rule, never the value."""
+    return HTTPException(status_code=400, detail=refused_detail(e))
 
 
 # Health checks are open: no token, Origin or Host check. They reveal nothing.
@@ -283,6 +293,8 @@ def build_http_app(
             )
         except NotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise _bad_input(e) from e
         except ScopeErasedError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         return _RecordResponse(fact_id=fact.id, text=fact.text)
@@ -374,6 +386,8 @@ def build_http_app(
             facts = await engram.extract(msgs, session_date=req.session_date, persist=req.persist)
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        except ValueError as e:
+            raise _bad_input(e) from e
         return _ExtractResponse(
             facts=[
                 _ExtractedFactSummary(
@@ -389,14 +403,17 @@ def build_http_app(
 
     @app.post("/v1/sessions/{session_id}/messages")
     async def append_message(session_id: str, req: _MessageRequest) -> dict[str, str]:
-        msg = await engram.record_message(
-            content=req.content,
-            role=req.role,
-            session_id=session_id,
-            user_id=req.user_id,
-            org_id=req.org_id,
-            timestamp=req.timestamp,
-        )
+        try:
+            msg = await engram.record_message(
+                content=req.content,
+                role=req.role,
+                session_id=session_id,
+                user_id=req.user_id,
+                org_id=req.org_id,
+                timestamp=req.timestamp,
+            )
+        except ValueError as e:
+            raise _bad_input(e) from e
         return {"message_id": str(msg.id)}
 
     return app

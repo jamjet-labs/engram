@@ -12,7 +12,7 @@ from engram.extract.event_extractor import EventExtractor
 from engram.llm.base import LLMMessage, LLMResponse
 from engram.models import ChatMessage, Event
 from engram.scope import Scope
-from engram.store.sqlite import SqliteStore
+from tests.conformance.backends import OpenStore
 
 
 def _now() -> datetime:
@@ -25,8 +25,8 @@ SCOPE = Scope(org_id="acme", user_id="alice")
 # ── Event store CRUD ────────────────────────────────────────────────
 
 
-async def test_event_upsert_then_get() -> None:
-    store = await SqliteStore.open(":memory:")
+async def test_event_upsert_then_get(open_store: OpenStore) -> None:
+    store = await open_store()
     try:
         e = Event(
             scope=SCOPE,
@@ -45,8 +45,8 @@ async def test_event_upsert_then_get() -> None:
         await store.close()
 
 
-async def test_event_get_respects_scope() -> None:
-    store = await SqliteStore.open(":memory:")
+async def test_event_get_respects_scope(open_store: OpenStore) -> None:
+    store = await open_store()
     try:
         e = Event(
             scope=SCOPE,
@@ -62,8 +62,8 @@ async def test_event_get_respects_scope() -> None:
         await store.close()
 
 
-async def test_event_search_keyword() -> None:
-    store = await SqliteStore.open(":memory:")
+async def test_event_search_keyword(open_store: OpenStore) -> None:
+    store = await open_store()
     try:
         await store.upsert_event(
             Event(
@@ -90,8 +90,8 @@ async def test_event_search_keyword() -> None:
         await store.close()
 
 
-async def test_event_search_time_window() -> None:
-    store = await SqliteStore.open(":memory:")
+async def test_event_search_time_window(open_store: OpenStore) -> None:
+    store = await open_store()
     try:
         recent = Event(
             scope=SCOPE,
@@ -116,9 +116,9 @@ async def test_event_search_time_window() -> None:
         await store.close()
 
 
-async def test_event_search_aliases_match() -> None:
+async def test_event_search_aliases_match(open_store: OpenStore) -> None:
     """An alias should be discoverable via FTS."""
-    store = await SqliteStore.open(":memory:")
+    store = await open_store()
     try:
         await store.upsert_event(
             Event(
@@ -136,8 +136,8 @@ async def test_event_search_aliases_match() -> None:
         await store.close()
 
 
-async def test_event_no_query_lists_by_time() -> None:
-    store = await SqliteStore.open(":memory:")
+async def test_event_no_query_lists_by_time(open_store: OpenStore) -> None:
+    store = await open_store()
     try:
         e1 = Event(
             scope=SCOPE,
