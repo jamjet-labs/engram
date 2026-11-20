@@ -237,7 +237,9 @@ ENGRAM_WRITES: dict[str, EngramCall] = {
     # Without the check this would embed the facts it brings back.
     "reinstate": lambda m, s: m.reinstate(s.revoked, reason="it was right", actor="test"),
     "erase": lambda m, s: m.erase(s.kept, reason="asked to", actor="test"),
-    "forget": lambda m, s: m.forget(s.kept.id, reason="wrong", actor="test"),
+    "forget_in_org": lambda m, s: m.forget_in_org(
+        s.kept.id, org_id=WHO["org_id"], reason="wrong", actor="test"
+    ),
     "erase_user": lambda m, s: m.erase_user(reason="asked to", actor="test", **WHO),
     "delete_conversation": lambda m, s: m.delete_conversation("s1", **WHO),
 }
@@ -255,7 +257,7 @@ ENGRAM_READS: dict[str, EngramCall] = {
     "extract_events": lambda m, s: m.extract_events([_message()], persist=False),
     "list_conversations": lambda m, s: m.list_conversations(**WHO),
     "list_messages": lambda m, s: m.list_messages("s1", **WHO),
-    "fact_counts": lambda m, s: m.fact_counts(),
+    "fact_counts_in_org": lambda m, s: m.fact_counts_in_org(org_id=WHO["org_id"]),
 }
 
 ENGRAM_LIFECYCLE = {"open", "close"}
@@ -433,10 +435,11 @@ STORE_READS: dict[str, StoreCall] = {
     "list_erasures": lambda st, s: st.list_erasures(ACME_ALICE),
     "hidden_fact_ids": lambda st, s: st.hidden_fact_ids(ACME_ALICE),
     "fact_row_committed": lambda st, s: st.fact_row_committed(s.kept.id, ACME_ALICE),
-    "find_fact_scope": lambda st, s: st.find_fact_scope(s.kept.id),
+    "find_fact_owner_in_org": lambda st, s: st.find_fact_owner_in_org(s.kept.id, "acme"),
     "list_fact_ids": lambda st, s: st.list_fact_ids(ACME_ALICE),
     "fact_text_quoted_by": lambda st, s: st.fact_text_quoted_by(KEPT, ACME_ALICE),
     "fact_counts": lambda st, s: st.fact_counts(ACME_ALICE),
+    "fact_counts_in_org": lambda st, s: st.fact_counts_in_org("acme"),
     "list_session_ids": lambda st, s: st.list_session_ids(ACME_ALICE),
     "list_session_messages": lambda st, s: st.list_session_messages("s1", ACME_ALICE),
     "scope_guard": lambda st, s: st.scope_guard(ACME_ALICE),

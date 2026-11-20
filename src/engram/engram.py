@@ -22,6 +22,7 @@ from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.errors import (
     ReadOnlyStoreError,
+    ScopeError,
     ScopeRequiredError,
 )
 from engram.extract.event_extractor import EventExtractor
@@ -89,7 +90,9 @@ class Engram:
     and ``user_id``. A missing id, or the id ``"default"``, raises
     ScopeRequiredError unless the Engram was opened with
     ``allow_default_scope=True``. An id that is not a string, or is empty or
-    blank, always raises.
+    blank, always raises. Two methods name an org alone and reach each of its
+    users, `forget_in_org` and `fact_counts_in_org`; the same rules hold for
+    their ``org_id``. No method reaches more than one org.
 
     To hand code one scope and nothing else, give it ``memory.scoped(org_id=...,
     user_id=...)``: a `ScopedEngram` whose methods take no scope.
@@ -220,27 +223,44 @@ class Engram:
         Any other id that Scope refuses raises ValueError.
         """
         _check_given_ids(user_id, org_id)
-        if not self._allow_default_scope:
-            for name, value in (("org_id", org_id), ("user_id", user_id)):
-                if value is None:
-                    raise ScopeRequiredError(
-                        f"{name} is required: name the scope, or open the Engram with "
-                        "allow_default_scope=True to use the default one"
-                    )
+        self._require_given(("org_id", org_id), ("user_id", user_id))
         scope = Scope(
             org_id=_DEFAULT_ID if org_id is None else org_id,
             user_id=_DEFAULT_ID if user_id is None else user_id,
         )
-        if not self._allow_default_scope:
-            # Read from the Scope, not the arguments: a str subclass can
-            # compare unequal to "default" and still be stored as it.
-            for name, value in (("org_id", scope.org_id), ("user_id", scope.user_id)):
-                if value == _DEFAULT_ID:
-                    raise ScopeRequiredError(
-                        f'{name} "default" names the default scope, which needs the Engram '
-                        "opened with allow_default_scope=True"
-                    )
+        # Read from the Scope, not the arguments: a str subclass can
+        # compare unequal to "default" and still be stored as it.
+        self._refuse_default(("org_id", scope.org_id), ("user_id", scope.user_id))
         return scope
+
+    def _resolve_org(self, org_id: str | None) -> str:
+        """The org a call that reaches each of its users names, by the rules of `_resolve_scope`."""
+        _check_given_ids(None, org_id)
+        self._require_given(("org_id", org_id))
+        # Scope checks the org id; the user part is not used.
+        org = Scope(org_id=_DEFAULT_ID if org_id is None else org_id).org_id
+        self._refuse_default(("org_id", org))
+        return org
+
+    def _require_given(self, *ids: tuple[str, str | None]) -> None:
+        if self._allow_default_scope:
+            return
+        for name, value in ids:
+            if value is None:
+                raise ScopeRequiredError(
+                    f"{name} is required: name the scope, or open the Engram with "
+                    "allow_default_scope=True to use the default one"
+                )
+
+    def _refuse_default(self, *ids: tuple[str, str]) -> None:
+        if self._allow_default_scope:
+            return
+        for name, value in ids:
+            if value == _DEFAULT_ID:
+                raise ScopeRequiredError(
+                    f'{name} "default" names the default scope, which needs the Engram '
+                    "opened with allow_default_scope=True"
+                )
 
     def _require_writable(self) -> None:
         # First thing in every write method: before validation, any store
@@ -422,24 +442,34 @@ class Engram:
             fact, reason=reason, actor=actor, block_reinsertion=block_reinsertion
         )
 
-    async def forget(self, fact_id: UUID, *, reason: str, actor: str) -> bool:
-        """Revoke a fact named by id alone, for the v1 REST contract.
+    async def forget_in_org(
+        self, fact_id: UUID, *, org_id: str | None = None, reason: str, actor: str
+    ) -> bool:
+        """Revoke a fact named by its id and its org, whichever user of the org holds it.
 
-        Soft and reversible, like the Rust server's invalidate. Returns False
-        if no fact has this id, or if it was erased before the revoke landed.
-        Use `erase` to hard-delete.
+        For the v1 REST contract, where forget names an org and no user.
+        Soft and reversible, like `revoke`. Returns False if no fact in this
+        org has this id (another org's id included), or if it was erased
+        before the revoke landed. ``org_id`` follows the rules of every root
+        method: not given, or "default", needs ``allow_default_scope=True``,
+        and an empty or blank id is refused. Without ``allow_default_scope``,
+        a fact held by the user "default" raises ScopeRequiredError, as any
+        call that names that user does.
 
-        Not an authorization check: it resolves the owner of any fact id across
-        every scope and revokes it there. Use it only where the caller is
-        trusted for every scope, as on a one-token server.
+        It reaches every user in the org. To stay in one user's scope, use
+        `ScopedEngram.forget`.
         """
         self._require_writable()
+        org = self._resolve_org(org_id)
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = await self._store.find_fact_scope(fact_id)
-        if scope is None:
+        owner = await self._store.find_fact_owner_in_org(fact_id, org)
+        if owner is None:
             return False
-        return await self._handle(scope.user_id, scope.org_id).forget(
+        if owner.org_id != org:
+            # Asked for one org, so another org's owner is a store bug. Fail closed.
+            raise ScopeError("the store returned a fact owner in another org")
+        return await self._handle(owner.user_id, owner.org_id).forget(
             fact_id, reason=reason, actor=actor
         )
 
@@ -476,14 +506,13 @@ class Engram:
         self._require_writable()
         return await self._handle(user_id, org_id).delete_conversation(session_id)
 
-    async def fact_counts(self) -> tuple[int, int]:
-        """(all facts, visible and not invalidated facts) across every tenant.
+    async def fact_counts_in_org(self, *, org_id: str | None = None) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) of every user in one org.
 
-        Not scoped to a caller: like `forget`, it assumes the caller is trusted
-        for every scope, as on a one-token server. `ScopedEngram.fact_counts`
+        ``org_id`` follows the rules of `forget_in_org`. `ScopedEngram.fact_counts`
         counts one scope.
         """
-        return await self._store.fact_counts(None)
+        return await self._store.fact_counts_in_org(self._resolve_org(org_id))
 
     async def list_messages(
         self,

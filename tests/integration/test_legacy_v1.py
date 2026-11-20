@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
-from typing import Any
-from urllib.parse import quote_plus
+from types import SimpleNamespace
+from typing import Any, cast
+from urllib.parse import quote, quote_plus
 from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from engram import Engram
@@ -21,6 +25,7 @@ from engram.llm.base import LLMMessage, LLMResponse
 from engram.models import ChatMessage, Fact
 from engram.scope import Scope
 from engram.server.http import build_http_app
+from engram.server.legacy_v1 import register_legacy_routes
 
 TOKEN = "t" * 40
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -430,7 +435,13 @@ def test_forget_then_stats(client: TestClient) -> None:
     gone = client.get("/v1/memory/recall", params={"q": "pizza", "user_id": "alice"}, headers=AUTH)
     assert gone.json()["results"] == []
     stats = client.get("/v1/memory/stats", headers=AUTH).json()
-    assert stats == {"total_facts": 1, "valid_facts": 0, "invalidated_facts": 1}
+    assert stats == {
+        "org_id": "default",
+        "user_id": None,
+        "total_facts": 1,
+        "valid_facts": 0,
+        "invalidated_facts": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -913,3 +924,405 @@ async def test_delete_messages_refuses_an_empty_scope_id(
 def test_delete_user_refuses_an_empty_id(client: TestClient) -> None:
     r = client.delete("/v1/memory/users/", headers=AUTH)
     assert r.status_code == 400 and set(r.json()) == {"error"}
+
+
+# ── Forget, stats and delete user name their scope ──────────────────────
+#
+# As in Rust (jamjet PR 193): `?org_id=` defaults to "default", and without
+# `?user_id=` forget and stats act on the whole org.
+
+
+def _record_in(c: TestClient, text: str, *, user: str, org: str = "default") -> str:
+    r = c.post(
+        "/v1/memory/record", headers=AUTH, json={"text": text, "user_id": user, "org_id": org}
+    )
+    assert r.status_code == 200, r.text
+    return str(r.json()["fact_id"])
+
+
+def _hits(c: TestClient, q: str, *, user: str, org: str = "default") -> list[str]:
+    r = c.get("/v1/memory/recall", params={"q": q, "user_id": user, "org_id": org}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    return [h["fact_id"] for h in r.json()["results"]]
+
+
+@pytest.mark.asyncio
+async def test_forget_cannot_reach_another_org(served: tuple[TestClient, Engram]) -> None:
+    client, memory = served
+    fid = _record_in(client, "alice keeps a red bike", user="alice", org="acme")
+    unknown = client.delete(f"/v1/memory/facts/{NO_SUCH_FACT}", headers=AUTH).json()
+    for params in ({}, {"org_id": "globex"}, {"org_id": "globex", "user_id": "alice"}):
+        r = client.delete(f"/v1/memory/facts/{fid}", params=params, headers=AUTH)
+        assert r.status_code == 404, params
+        # Reads exactly like an unknown id.
+        assert r.json() == {"error": unknown["error"].replace(NO_SUCH_FACT, fid)}, params
+    assert await memory.revocations(user_id="alice", org_id="acme") == []
+    assert _hits(client, "red bike", user="alice", org="acme") == [fid]
+
+    r = client.delete(f"/v1/memory/facts/{fid}", params={"org_id": "acme"}, headers=AUTH)
+    assert r.json() == {"success": True, "deleted_fact_id": fid}
+    assert [
+        str(rev.fact_id) for rev in await memory.revocations(user_id="alice", org_id="acme")
+    ] == [fid]
+    assert _hits(client, "red bike", user="alice", org="acme") == []
+
+
+@pytest.mark.asyncio
+async def test_forget_with_user_id_cannot_reach_another_user(
+    served: tuple[TestClient, Engram],
+) -> None:
+    client, memory = served
+    fid = _record_in(client, "bob keeps a red bike", user="bob")
+    for params in ({"user_id": "alice"}, {"user_id": "alice", "org_id": "default"}):
+        r = client.delete(f"/v1/memory/facts/{fid}", params=params, headers=AUTH)
+        assert r.status_code == 404 and r.json() == {"error": f"fact {fid} not found"}, params
+    assert await memory.revocations(user_id="bob") == []
+    assert _hits(client, "red bike", user="bob") == [fid]
+
+    r = client.delete(f"/v1/memory/facts/{fid}", params={"user_id": "bob"}, headers=AUTH)
+    assert r.json() == {"success": True, "deleted_fact_id": fid}
+    assert [str(rev.fact_id) for rev in await memory.revocations(user_id="bob")] == [fid]
+
+
+async def _seed_counts(client: TestClient, memory: Engram) -> None:
+    """default/alice: 2 facts, 1 forgotten. default/bob: 1. acme/alice: 1."""
+    _record_in(client, "alice likes tea", user="alice")
+    gone = _record_in(client, "alice likes jazz", user="alice")
+    await memory.revoke(UUID(gone), reason="wrong", actor="test", user_id="alice")
+    _record_in(client, "bob likes chess", user="bob")
+    _record_in(client, "alice likes rowing", user="alice", org="acme")
+
+
+def _stats(c: TestClient, **params: str) -> dict[str, Any]:
+    r = c.get("/v1/memory/stats", params=params, headers=AUTH)
+    assert r.status_code == 200, r.text
+    body: dict[str, Any] = r.json()
+    return body
+
+
+@pytest.mark.asyncio
+async def test_stats_count_only_the_named_scope(served: tuple[TestClient, Engram]) -> None:
+    client, memory = served
+    await _seed_counts(client, memory)
+    assert _stats(client, user_id="alice") == {
+        "org_id": "default",
+        "user_id": "alice",
+        "total_facts": 2,
+        "valid_facts": 1,
+        "invalidated_facts": 1,
+    }
+    assert _stats(client, user_id="alice", org_id="acme") == {
+        "org_id": "acme",
+        "user_id": "alice",
+        "total_facts": 1,
+        "valid_facts": 1,
+        "invalidated_facts": 0,
+    }
+    assert _stats(client, user_id="carol") == {
+        "org_id": "default",
+        "user_id": "carol",
+        "total_facts": 0,
+        "valid_facts": 0,
+        "invalidated_facts": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stats_without_user_counts_the_org(served: tuple[TestClient, Engram]) -> None:
+    client, memory = served
+    await _seed_counts(client, memory)
+    assert _stats(client) == {
+        "org_id": "default",
+        "user_id": None,
+        "total_facts": 3,
+        "valid_facts": 2,
+        "invalidated_facts": 1,
+    }
+    assert _stats(client, org_id="acme") == {
+        "org_id": "acme",
+        "user_id": None,
+        "total_facts": 1,
+        "valid_facts": 1,
+        "invalidated_facts": 0,
+    }
+    assert _stats(client, org_id="globex")["total_facts"] == 0
+
+
+async def _fact_ids(memory: Engram, org: str, user: str) -> list[UUID]:
+    return await memory._store.list_fact_ids(Scope(org_id=org, user_id=user))
+
+
+@pytest.mark.asyncio
+async def test_delete_user_erases_only_the_org_in_the_body(
+    served: tuple[TestClient, Engram],
+) -> None:
+    client, memory = served
+    _record_in(client, "bob keeps a red bike", user="bob")
+    _record_in(client, "bob keeps a blue bike", user="bob", org="acme")
+    r = client.request("DELETE", "/v1/memory/users/bob", headers=AUTH, json={"org_id": "acme"})
+    assert r.json() == {"success": True, "deleted_facts": 1}
+    assert await _fact_ids(memory, "acme", "bob") == []
+    assert len(await _fact_ids(memory, "default", "bob")) == 1
+    assert await memory.erasures(user_id="bob") == []
+    assert await memory.erasures(user_id="bob", org_id="acme") != []
+
+    # No body, or a null org, is the default org, as before.
+    for kw in ({"json": {"org_id": None}}, {}):
+        _record_in(client, "bob keeps a green bike", user="bob")
+        r = client.request("DELETE", "/v1/memory/users/bob", headers=AUTH, **kw)
+        assert r.json()["success"] is True, kw
+        assert await _fact_ids(memory, "default", "bob") == [], kw
+
+
+@pytest.mark.asyncio
+async def test_delete_user_with_a_query_string_is_still_400(
+    served: tuple[TestClient, Engram],
+) -> None:
+    # The Java client sends the user id unencoded, so `?org_id=` in the URL
+    # could be part of the id. The org goes in the body.
+    client, memory = served
+    _record_in(client, "bob keeps a red bike", user="bob")
+    _record_in(client, "bob keeps a blue bike", user="bob", org="acme")
+    for path in ("/v1/memory/users/bob?org_id=acme", "/v1/memory/users/bob?org_id=default"):
+        r = client.request("DELETE", path, headers=AUTH, json={"org_id": "acme"})
+        assert r.status_code == 400 and set(r.json()) == {"error"}, path
+    assert len(await _fact_ids(memory, "default", "bob")) == 1
+    assert len(await _fact_ids(memory, "acme", "bob")) == 1
+    assert await memory.erasures(user_id="bob") == []
+    assert await memory.erasures(user_id="bob", org_id="acme") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [{"org": "acme"}, {"org_id": "acme", "user_id": "carol"}, ["acme"], "acme"],
+    ids=["misspelt-key", "extra-key", "list", "string"],
+)
+async def test_delete_user_refuses_a_body_it_does_not_read(
+    served: tuple[TestClient, Engram], body: Any
+) -> None:
+    # A misspelt org key must not fall back to the default org and erase there.
+    client, memory = served
+    _record_in(client, "bob keeps a red bike", user="bob")
+    _record_in(client, "bob keeps a blue bike", user="bob", org="acme")
+    r = client.request("DELETE", "/v1/memory/users/bob", headers=AUTH, json=body)
+    assert r.status_code == 422
+    assert len(await _fact_ids(memory, "default", "bob")) == 1
+    assert len(await _fact_ids(memory, "acme", "bob")) == 1
+    assert await memory.erasures(user_id="bob") == []
+
+
+# ── Empty and blank ids are 400, and nothing is done ────────────────────
+#
+# Each route table below is compared with the app's own routes, so a new
+# route fails these tests until its ids are listed.
+
+IDS = ("user_id", "org_id")
+BLANKS = ["", " ", "\t", "　"]
+TURN = [{"role": "user", "content": "I like tea"}]
+
+# (blank id, a fact id the seed stored in the default scope) -> (path, request kwargs)
+Slot = Callable[[str, str], tuple[str, dict[str, Any]]]
+
+
+def _in_body(path: str, field: str, **body: Any) -> Slot:
+    return lambda blank, fid: (path.format(fid=fid), {"json": {**body, field: blank}})
+
+
+def _in_query(path: str, field: str, **params: Any) -> Slot:
+    return lambda blank, fid: (path.format(fid=fid), {"params": {**params, field: blank}})
+
+
+V1_ID_SLOTS: dict[str, dict[str, Slot]] = {
+    "GET /health": {},
+    "HEAD /health": {},
+    "POST /v1/memory/consolidate": {},  # reads no id; always 501
+    "POST /v1/memory": {f: _in_body("/v1/memory", f, messages=TURN) for f in IDS},
+    "GET /v1/memory/search": {f: _in_query("/v1/memory/search", f, q="tea") for f in IDS},
+    "POST /v1/memory/context": {f: _in_body("/v1/memory/context", f, query="tea") for f in IDS},
+    "DELETE /v1/memory/facts/{fact_id}": {f: _in_query("/v1/memory/facts/{fid}", f) for f in IDS},
+    "GET /v1/memory/stats": {f: _in_query("/v1/memory/stats", f) for f in IDS},
+    "DELETE /v1/memory/users/{user_id:path}": {
+        "path user_id": lambda blank, fid: ("/v1/memory/users/" + quote(blank, safe=""), {}),
+        "body org_id": _in_body("/v1/memory/users/default", "org_id"),
+    },
+    "POST /v1/memory/messages": {
+        f: _in_body("/v1/memory/messages", f, conversation_id="c1", messages=TURN) for f in IDS
+    },
+    "GET /v1/memory/messages/{conversation_id:path}": {
+        f: _in_query("/v1/memory/messages/c1", f) for f in IDS
+    },
+    "GET /v1/memory/messages": {f: _in_query("/v1/memory/messages", f) for f in IDS},
+    "DELETE /v1/memory/messages/{conversation_id:path}": {
+        f: _in_query("/v1/memory/messages/c1", f) for f in IDS
+    },
+}
+
+_EXTRACT_TURN = [{"content": "I like tea", "role": "user", "session_id": "s1"}]
+
+NATIVE_ID_SLOTS: dict[str, dict[str, Slot]] = {
+    "GET /healthz": {},
+    "HEAD /healthz": {},
+    "POST /v1/memory/record": {f: _in_body("/v1/memory/record", f, text="I like tea") for f in IDS},
+    "POST /v1/memory/search": {f: _in_body("/v1/memory/search", f, query="tea") for f in IDS},
+    "POST /v1/memory/recall_with_provenance": {
+        f: _in_body("/v1/memory/recall_with_provenance", f, query="tea") for f in IDS
+    },
+    "GET /v1/memory/recall": {f: _in_query("/v1/memory/recall", f, q="tea") for f in IDS},
+    "GET /v1/memory/raw_facts": {f: _in_query("/v1/memory/raw_facts", f, query="tea") for f in IDS},
+    "GET /v1/memory/context": {f: _in_query("/v1/memory/context", f, query="tea") for f in IDS},
+    "POST /v1/memory/extract": {
+        f: _in_body("/v1/memory/extract", f, messages=_EXTRACT_TURN) for f in IDS
+    },
+    "POST /v1/sessions/{session_id}/messages": {
+        f: _in_body("/v1/sessions/s1/messages", f, content="hi", role="user", session_id="s1")
+        for f in IDS
+    },
+}
+
+MCP_TOOL_ARGS: dict[str, dict[str, Any]] = {
+    "memory_record": {"text": "I like tea"},
+    "memory_recall": {"query": "tea"},
+    "memory_context": {"query": "tea"},
+}
+
+
+def _stub_engram() -> Engram:
+    # Building the routes reads only this flag. No request reaches the stub.
+    return cast(Engram, SimpleNamespace(allow_default_scope=True))
+
+
+def _route_keys(app: FastAPI) -> list[str]:
+    return sorted(
+        f"{method} {route.path}"
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+    )
+
+
+def _legacy_routes() -> list[str]:
+    app = FastAPI()
+    register_legacy_routes(app, _stub_engram())
+    return _route_keys(app)
+
+
+def _native_routes() -> list[str]:
+    legacy = set(_legacy_routes())
+    app = build_http_app(_stub_engram(), allow_unauthenticated=True)
+    return [key for key in _route_keys(app) if key not in legacy]
+
+
+def test_the_id_tables_list_every_route_the_app_serves() -> None:
+    assert set(_legacy_routes()) == set(V1_ID_SLOTS)
+    assert set(_native_routes()) == set(NATIVE_ID_SLOTS)
+
+
+@dataclass
+class _Seeded:
+    memory: Engram
+    llm: OneFactLLM
+    client: TestClient
+    fact_id: str  # a fact in the default scope, where a blank id used to land
+
+
+@pytest_asyncio.fixture
+async def seeded() -> AsyncIterator[_Seeded]:
+    llm = OneFactLLM()
+    memory = await Engram.open(":memory:", llm=llm, allow_default_scope=True)
+    app = build_http_app(memory, auth_token=TOKEN)
+    # A 500 shows as a status, so a red run says what the route answered.
+    client = TestClient(app, base_url="http://127.0.0.1", raise_server_exceptions=False)
+    try:
+        mine = await memory.record("the default user likes tea")
+        await memory.record("alice likes tea", user_id="alice")
+        await memory.record_message("I like tea", session_id="c1")
+        await memory.record_message("I like tea", session_id="c1", user_id="alice")
+        yield _Seeded(memory, llm, client, str(mine.id))
+    finally:
+        await memory.close()
+
+
+async def _everything(s: _Seeded) -> tuple[dict[str, list[str]], int]:
+    """Every row of every table, and the LLM call count: what "nothing was done" means."""
+    store = s.memory._store
+    await store.flush_access()
+    conn = store._conn
+    async with conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'") as cur:
+        tables = sorted(r[0] for r in await cur.fetchall())
+    rows: dict[str, list[str]] = {}
+    for table in tables:  # names from sqlite_master, not from a request
+        async with conn.execute(f'SELECT * FROM "{table}"') as cur:
+            rows[table] = sorted(repr(tuple(r)) for r in await cur.fetchall())
+    return rows, s.llm.n
+
+
+async def _refused_with_nothing_done(
+    s: _Seeded, route: str, slots: dict[str, Slot], key: str, values: list[str] = BLANKS
+) -> None:
+    method = route.split(" ", 1)[0]
+    for slot, build in slots.items():
+        for value in values:
+            before = await _everything(s)
+            path, kw = build(value, s.fact_id)
+            r = s.client.request(method, path, headers=AUTH, **kw)
+            where = f"{route} {slot}={value!r}"
+            assert r.status_code == 400, f"{where}: {r.status_code} {r.text}"
+            assert set(r.json()) == {key}, where
+            assert await _everything(s) == before, where
+
+
+# Not blank, but no scope id: Scope refuses each, and the route must say so with 400.
+NO_SCOPE_IDS = [" alice", "alice ", "a\x1fb", "a\x7fb"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "table", "key"),
+    [
+        *(pytest.param(r, V1_ID_SLOTS, "error", id=r) for r in _legacy_routes()),
+        *(pytest.param(r, NATIVE_ID_SLOTS, "detail", id=r) for r in _native_routes()),
+    ],
+)
+async def test_ids_a_scope_refuses_are_400_on_every_route(
+    seeded: _Seeded, route: str, table: dict[str, dict[str, Slot]], key: str
+) -> None:
+    await _refused_with_nothing_done(seeded, route, table[route], key, NO_SCOPE_IDS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", _legacy_routes())
+async def test_blank_ids_are_400_on_every_v1_route(seeded: _Seeded, route: str) -> None:
+    assert route in V1_ID_SLOTS, f"{route}: list its ids in V1_ID_SLOTS"
+    await _refused_with_nothing_done(seeded, route, V1_ID_SLOTS[route], "error")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [*_native_routes(), *(f"MCP {tool}" for tool in MCP_TOOL_ARGS)])
+async def test_native_routes_and_mcp_tools_refuse_blank_ids(seeded: _Seeded, target: str) -> None:
+    if not target.startswith("MCP "):
+        assert target in NATIVE_ID_SLOTS, f"{target}: list its ids in NATIVE_ID_SLOTS"
+        await _refused_with_nothing_done(seeded, target, NATIVE_ID_SLOTS[target], "detail")
+        return
+    pytest.importorskip("mcp")
+    from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
+
+    from engram.server.mcp import build_mcp_server
+
+    server = build_mcp_server(seeded.memory)
+    listed = await server.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list"))
+    assert {t.name for t in listed.root.tools} == set(MCP_TOOL_ARGS)
+    tool = target.removeprefix("MCP ")
+    for field in IDS:
+        for blank in BLANKS:
+            before = await _everything(seeded)
+            params = CallToolRequestParams(
+                name=tool, arguments={**MCP_TOOL_ARGS[tool], field: blank}
+            )
+            result = await server.request_handlers[CallToolRequest](
+                CallToolRequest(method="tools/call", params=params)
+            )
+            where = f"{tool} {field}={blank!r}"
+            assert result.root.isError is True, where
+            assert "empty or blank" in result.root.content[0].text, where
+            assert await _everything(seeded) == before, where

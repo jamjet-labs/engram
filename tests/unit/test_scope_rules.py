@@ -205,18 +205,37 @@ ROOT_CALLS: dict[str, RootCall] = {
     "delete_conversation": lambda m, ids: m.delete_conversation("s1", **ids),
 }
 
+# The calls that name an org and reach each of its users. They take org_id
+# alone and follow the same rules for it.
+ORG_CALLS: dict[str, RootCall] = {
+    "forget_in_org": lambda m, ids: m.forget_in_org(uuid4(), reason="wrong", actor="test", **ids),
+    "fact_counts_in_org": lambda m, ids: m.fact_counts_in_org(**ids),
+}
 
-def _methods_that_take_a_scope() -> list[str]:
+
+def _methods_taking(ids: set[str]) -> list[str]:
+    """Public Engram methods whose scope parameters are exactly ``ids``."""
     return sorted(
         name
         for name, member in inspect.getmembers(Engram, inspect.isfunction)
         if not name.startswith("_")
-        and {"user_id", "org_id"} & set(inspect.signature(member).parameters)
+        and {"user_id", "org_id"} & set(inspect.signature(member).parameters) == ids
     )
+
+
+def _methods_that_take_a_scope() -> list[str]:
+    return _methods_taking({"user_id", "org_id"})
+
+
+def _methods_that_take_an_org() -> list[str]:
+    return _methods_taking({"org_id"})
 
 
 def test_root_call_table_lists_exactly_the_methods_that_take_a_scope() -> None:
     assert set(ROOT_CALLS) == set(_methods_that_take_a_scope())
+    assert set(ORG_CALLS) == set(_methods_that_take_an_org())
+    # Nothing names a user without its org.
+    assert _methods_taking({"user_id"}) == []
 
 
 @pytest.mark.parametrize("method", _methods_that_take_a_scope())
@@ -507,6 +526,51 @@ async def test_default_is_judged_on_the_id_the_scope_stores(field: str) -> None:
         assert embedder.calls == []
     finally:
         await strict.close()
+
+
+# ── Calls that name an org ─────────────────────────────────────────────
+
+# (org ids given, what the refusal says, refused only on a strict Engram)
+ORG_REFUSALS = [
+    pytest.param({}, "org_id is required", True, id="no-org"),
+    pytest.param({"org_id": None}, "org_id is required", True, id="none-org"),
+    pytest.param({"org_id": "default"}, '"default" names the default scope', True, id="default"),
+    pytest.param(
+        {"org_id": _NeverEqualStr("default")},
+        '"default" names the default scope',
+        True,
+        id="default-str-subclass",
+    ),
+    pytest.param({"org_id": ""}, "empty or blank", False, id="empty"),
+    pytest.param({"org_id": " \t"}, "empty or blank", False, id="blank"),
+    pytest.param({"org_id": b"acme"}, "must be a string", False, id="bytes"),
+]
+
+
+@pytest.mark.parametrize("method", _methods_that_take_an_org())
+@pytest.mark.parametrize(("given", "message", "strict_only"), ORG_REFUSALS)
+async def test_every_org_wide_root_method_follows_the_scope_rules(
+    method: str, given: dict[str, Any], message: str, strict_only: bool
+) -> None:
+    assert method in ORG_CALLS, f"{method} takes an org: add it to ORG_CALLS"
+    embedder = SpyEmbedder()
+    strict, store = await _strict(embedder)
+    try:
+        with pytest.raises(ScopeRequiredError, match=message):
+            await ORG_CALLS[method](strict, given)
+        assert store.calls == []
+        assert embedder.calls == []
+    finally:
+        await strict.close()
+
+    allowing = RecordingStore(await SqliteStore.open(":memory:"))
+    async with await Engram.open(store=allowing, allow_default_scope=True) as allowed:  # type: ignore[arg-type]
+        if strict_only:
+            await ORG_CALLS[method](allowed, given)  # the default org, as on the server
+        else:
+            with pytest.raises(ScopeRequiredError, match=message):
+                await ORG_CALLS[method](allowed, given)
+            assert allowing.calls == []
 
 
 # ── The server keeps its contract ──────────────────────────────────────

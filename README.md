@@ -224,18 +224,18 @@ The routes, status codes and JSON keys follow the Rust v0.5.x server. These diff
 - `GET /v1/memory/search` is hybrid recall, not keyword-only, and its hits carry `confidence`.
 - `tier` values are `working`, `episodic`, `semantic` and `archival`.
 - `POST /v1/memory/context` accepts `format` and ignores it, and has no `tier_breakdown`. `token_count` is an estimate of about 4 characters per token.
-- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200), and a `reason` over 1000 characters returns 422.
-- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
+- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. As in Rust, it takes `?org_id=` (default `default`) and `?user_id=`. A fact outside that org, or outside that user's scope when one is given, returns 404, and so does an unknown id (Rust returned 200 for that). A `reason` over 1000 characters returns 422.
+- `GET /v1/memory/stats` counts the org in `?org_id=` (default `default`), or one user in it with `?user_id=`, and returns both ids, as Rust does. It has no `total_entities` or `total_relationships`.
 - `POST /v1/memory/consolidate` returns 501. The Python engine has no consolidation.
-- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It never returns success unless the erase finished: 409 if the erase is refused, 503 if a fact was written while it ran (calling again finishes it), and 500 for a storage error.
-- A request without `user_id` uses the user `default`. Rust used the whole org there, which this server has no equivalent for.
+- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It takes the org in an optional JSON body, `{"org_id": "acme"}`, default `default`, where Rust took `?org_id=`. A body with any other key returns 422. It never returns success unless the erase finished: 409 if the erase is refused, 503 if a fact was written while it ran (calling again finishes it), and 500 for a storage error.
+- Without `user_id`, forget and stats act on the whole org, as in Rust. Every other route uses the user `default`, where Rust used the whole org.
+- An empty or blank `user_id` or `org_id` returns 400 on every route, and nothing is done. Only a missing id means `default`.
 - The message routes are scoped to `(org_id, user_id)`. Rust filtered on `org_id` alone.
 - Message `role` must be `user`, `assistant`, `system` or `tool`. Rust accepted any string.
 - Message `metadata` is accepted and not stored, and comes back as `{}`.
 - `seq` is a turn's 0-based position among the conversation's visible turns, oldest first. Rust stored the index within each save call.
 - `GET /v1/memory/messages` lists conversations by first turn. Rust listed them by id.
 - `GET /v1/memory/messages/{id}` for an unknown conversation returns 200 with an empty list.
-- `DELETE /v1/memory/messages/{id}` with an empty `user_id` or `org_id` returns 400 instead of using the `default` scope.
 - A request that fails validation (a missing field, a wrong type, a value out of range) returns 422 with FastAPI's `{"detail": ...}` body. Rust returned 400 with `{"error": ...}`.
 
 The module docstring of `src/engram/server/legacy_v1.py` is the full list.
@@ -244,7 +244,7 @@ The module docstring of `src/engram/server/legacy_v1.py` is the full list.
 
 The published Java client puts the conversation id in the message paths with `URLEncoder`, which writes a space as `+` and a `/` as `%2F`. To match it, the message routes read `+` as a space and `%2B` as a plus. Other clients should send a space as `%20` and a plus as `%2B`. Conversation ids may contain `/`.
 
-The client puts the user id in `DELETE /v1/memory/users/{id}` without encoding it. That route refuses any query string with 400, so `deleteUser("bob?x=1")` erases nothing rather than erasing `bob`. The server cannot catch a `#`: the client drops it and the rest of the id before sending, so `deleteUser("bob#1234")` erases `bob`. An id that ends in `?` arrives cut short in the same way. The server also decodes percent escapes in the path, and the client sends `%` as is, so `deleteUser("a%2Fb")` erases the user `a/b`. Keep `?`, `#` and `%` out of user ids when you use this client.
+The client puts the user id in `DELETE /v1/memory/users/{id}` without encoding it. That route refuses any query string with 400, so `deleteUser("bob?x=1")` erases nothing rather than erasing `bob`. For the same reason the route reads the org from the body and not from `?org_id=`, which could be part of the id. The server cannot catch a `#`: the client drops it and the rest of the id before sending, so `deleteUser("bob#1234")` erases `bob`. An id that ends in `?` arrives cut short in the same way. The server also decodes percent escapes in the path, and the client sends `%` as is, so `deleteUser("a%2Fb")` erases the user `a/b`. Keep `?`, `#` and `%` out of user ids when you use this client.
 
 ### Forgetting and conversations
 
@@ -256,7 +256,7 @@ Deleting a user with a very large history can take long enough to time out over 
 
 ### One token, one trust domain
 
-Any token holder can forget a fact by id in any scope. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
+Forget, stats and delete user reach only the org a request names, and only the user when it names one. But the request picks both, so any token holder can still reach any scope. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 ## Revocation, erasure and provenance
 

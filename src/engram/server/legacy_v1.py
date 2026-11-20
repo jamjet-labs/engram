@@ -19,10 +19,14 @@ Errors
   turn stores none of its turns.
 
 Scope
-- `org_id` defaults to "default", as in Rust. A missing `user_id` means the
-  Python user "default"; Rust used an org-wide scope there, which Python does
-  not have. So the server needs an Engram opened with
+- `org_id` defaults to "default", as in Rust. Forget and stats without a
+  `user_id` act on the whole org, as in Rust. On every other route a
+  missing `user_id` means the Python user "default"; Rust used the whole org
+  there. So the server needs an Engram opened with
   `allow_default_scope=True`, and refuses to build without one.
+- An id sent empty or blank (`user_id=""`, `"org_id": " "`), or one Engram
+  refuses as a scope id, is 400 on every route and nothing is done. Only a
+  missing id means "default". The error names the field and the rule.
 - The message routes are scoped to `(org_id, user_id)`. Rust filtered on
   `org_id` alone.
 
@@ -42,15 +46,21 @@ Facts
 - `POST /v1/memory/context` accepts `format` and ignores it: Python renders
   one format. `token_count` is the ~4 characters per token estimate the
   budget uses. There is no `tier_breakdown`.
-- `DELETE /v1/memory/facts/{id}` is 404 for an unknown id (Rust: 200), and
-  422 for a `reason` over 1000 characters.
-- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
+- `DELETE /v1/memory/facts/{id}` takes `?org_id=` and `?user_id=` as Rust
+  does. A fact outside that org, or that user's scope when one is given, is
+  404, as is an unknown id (Rust: 200 for an unknown id). A `reason` over
+  1000 characters is 422.
+- `GET /v1/memory/stats` takes `?org_id=` and `?user_id=` and returns them as
+  `org_id` and `user_id`, as Rust does. It has no `total_entities` or
+  `total_relationships`.
 - `POST /v1/memory/consolidate` is 501: Python has no consolidation.
-- `DELETE /v1/memory/users/{id}` also erases the user's chat turns, events,
-  entities and relationships, leaving content-free erasure records. It never
-  reports success unless the erase finished: 409 if it is refused, 503 if a
-  fact was written while it ran (calling again finishes it), 500 for any
-  other storage error.
+- `DELETE /v1/memory/users/{id}` takes the org in an optional JSON body,
+  `{"org_id": "..."}`, default "default". Rust took `?org_id=`, which this
+  route refuses (see Path ids). A body with any other key is 422. It also
+  erases the user's chat turns, events, entities and relationships, leaving
+  content-free erasure records. It never reports success unless the erase
+  finished: 409 if it is refused, 503 if a fact was written while it ran
+  (calling again finishes it), 500 for any other storage error.
 
 Path ids (compatibility with the published Java client)
 - The client puts the user id in the delete-user path without encoding it,
@@ -61,7 +71,8 @@ Path ids (compatibility with the published Java client)
   inverse of `URLEncoder`, decoded from the raw path. Other clients send a
   literal `+` as `%2B` and a space as `%20` or `+`.
 - `DELETE /v1/memory/users/{id}` with any query string is 400 and erases
-  nothing: the client would send `bob?x=1` as the user `bob` and a query.
+  nothing: the client would send `bob?x=1` as the user `bob` and a query,
+  so `?org_id=` could come from the id itself. Name the org in the body.
   A `#` cannot be caught: the client drops it and the rest of the id before
   sending, so `bob#1` arrives as `bob`. The same goes for an id that ends in
   `?`. The server decodes percent escapes in the path and the client sends
@@ -79,8 +90,6 @@ Messages
 - `GET /v1/memory/messages` lists conversations by first turn (Rust: by id).
 - `GET /v1/memory/messages/{id}` for a conversation with no visible turns,
   unknown ids included, is 200 with an empty list.
-- `DELETE /v1/memory/messages/{id}` with an empty `user_id` or `org_id` is
-  400, not the "default" scope.
 - Rule (c) of the `live_messages` view: forgetting a fact extracted from a
   conversation withholds every turn of it, turns saved later included, until
   the fact is reinstated. Extraction sets no `source_message_id`, so the view
@@ -98,7 +107,7 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from engram.engram import Engram, context_lines
 from engram.errors import (
@@ -122,8 +131,10 @@ LEGACY_HEALTH_PATH = "/health"
 _FORGET_ACTOR = "restv1"
 _FORGET_REASON = "forgotten through the v1 REST API"
 _DEFAULT_BUDGET = 2000
+_DEFAULT_ID = "default"
 
-# Scope ids: Scope allows 1-128 characters; an empty one means the default.
+# Scope ids: Scope allows 1-128 characters. A missing one means "default";
+# an empty or blank one is refused by _scope.
 _QueryId = Annotated[str | None, Query(max_length=128)]
 _BodyId = Annotated[str | None, Field(default=None, max_length=128)]
 _Role = Literal["user", "assistant", "system", "tool"]
@@ -166,8 +177,39 @@ class _SaveMessagesRequest(BaseModel):
     org_id: _BodyId
 
 
+class _DeleteUserRequest(BaseModel):
+    # A misspelt key must not fall back to the default org and erase there.
+    model_config = ConfigDict(extra="forbid")
+    org_id: _BodyId
+
+
+class _RefusedId(Exception):
+    """A request id that names no scope. The route answers 400 and does nothing."""
+
+
 def _scope(user_id: str | None, org_id: str | None) -> Scope:
-    return Scope(org_id=org_id or "default", user_id=user_id or "default")
+    """The scope a request names. Only a missing id means "default".
+
+    An id sent empty or blank raises _RefusedId: a client that sends
+    ``user_id=""`` by mistake must not reach the default user. So does any
+    other id Scope refuses. Each route calls this before it reads or writes
+    anything, and `register_legacy_routes` answers _RefusedId with 400.
+    """
+    for name, value in (("user_id", user_id), ("org_id", org_id)):
+        if value is not None and not value.strip():
+            raise _RefusedId(f"{name} must not be empty or blank")
+    try:
+        return Scope(
+            org_id=_DEFAULT_ID if org_id is None else org_id,
+            user_id=_DEFAULT_ID if user_id is None else user_id,
+        )
+    except ValidationError as e:
+        raise _RefusedId(refused_detail(e)) from e
+
+
+def _org(org_id: str | None) -> str:
+    """The org a request names, by the rules of `_scope`."""
+    return _scope(None, org_id).org_id
 
 
 def require_default_scope(engram: Engram) -> None:
@@ -275,6 +317,12 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
     """
     require_default_scope(engram)
 
+    async def refused_id(request: Request, exc: Exception) -> JSONResponse:
+        # Raised by _scope, which every route calls before it acts.
+        return _error(400, f"{exc}. Nothing was done.")
+
+    app.add_exception_handler(_RefusedId, refused_id)
+
     @app.api_route(LEGACY_HEALTH_PATH, methods=["GET", "HEAD"], response_model=None)
     async def health(request: Request) -> Response | dict[str, str]:
         """Rust's health check. Open like /healthz: it reveals nothing."""
@@ -344,22 +392,33 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
 
     @app.delete("/v1/memory/facts/{fact_id}", response_model=None)
     async def forget(
-        fact_id: str, req: _ForgetRequest | None = None
+        fact_id: str,
+        req: _ForgetRequest | None = None,
+        user_id: _QueryId = None,
+        org_id: _QueryId = None,
     ) -> dict[str, Any] | JSONResponse:
-        """Revoke a fact named by id alone. Soft and reversible, like Rust's invalidate.
+        """Revoke a fact. Soft and reversible, like Rust's invalidate.
 
-        There is no scope check: `Engram.forget` finds the fact's owner in
-        any scope. That is safe only because one server token is one trust
-        domain, so the token already grants every scope. Do not reuse this
-        handler behind per-tenant auth.
+        As in Rust, `?org_id=` names the org ("default" when absent) and
+        `?user_id=`, when given, one user in it. Without a user the fact may
+        belong to any user of that org. A fact outside the org, or outside
+        the user's scope when one is given, is 404, as an unknown id is.
         """
         try:
             parsed = UUID(fact_id)
         except ValueError as e:
             return _error(400, f"invalid fact_id: {e}")
+        org = _org(org_id)
+        scope = None if user_id is None else _scope(user_id, org)
         reason = ((req.reason if req else None) or "").strip() or _FORGET_REASON
         try:
-            found = await engram.forget(parsed, reason=reason, actor=_FORGET_ACTOR)
+            if scope is None:
+                found = await engram.forget_in_org(
+                    parsed, org_id=org, reason=reason, actor=_FORGET_ACTOR
+                )
+            else:
+                handle = engram.scoped(org_id=scope.org_id, user_id=scope.user_id)
+                found = await handle.forget(parsed, reason=reason, actor=_FORGET_ACTOR)
         except ValueError as e:  # a reason Engram refuses to store
             return _error(400, refused_detail(e))
         if not found:
@@ -367,10 +426,21 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         return {"success": True, "deleted_fact_id": fact_id}
 
     @app.get("/v1/memory/stats")
-    async def stats() -> dict[str, int]:
-        """Fact counts across every scope, as Rust reported them (one token, one domain)."""
-        total, valid = await engram.fact_counts()
-        return {"total_facts": total, "valid_facts": valid, "invalidated_facts": total - valid}
+    async def stats(user_id: _QueryId = None, org_id: _QueryId = None) -> dict[str, Any]:
+        """Fact counts in one scope, or in the whole org without `?user_id=`, as in Rust."""
+        org = _org(org_id)
+        if user_id is None:
+            total, valid = await engram.fact_counts_in_org(org_id=org)
+        else:
+            s = _scope(user_id, org)
+            total, valid = await engram.scoped(org_id=s.org_id, user_id=s.user_id).fact_counts()
+        return {
+            "org_id": org,
+            "user_id": user_id,
+            "total_facts": total,
+            "valid_facts": valid,
+            "invalidated_facts": total - valid,
+        }
 
     @app.post("/v1/memory/consolidate", response_model=None)
     async def consolidate() -> JSONResponse:
@@ -380,12 +450,15 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
     async def delete_user(
         request: Request,
         user_id: Annotated[str, Path(max_length=128)],
+        req: _DeleteUserRequest | None = None,
     ) -> dict[str, Any] | JSONResponse:
-        """Hard-erase everything held for (default org, user_id), as Rust did.
+        """Hard-erase everything held for (org_id, user_id), as Rust did.
 
         The id is the rest of the path, `/` included, as the Java client sends
-        it (unencoded). Any query string is refused with 400 before anything
-        is erased: from that client it means the id held a `?`.
+        it (unencoded). The org comes from an optional JSON body,
+        `{"org_id": "..."}`, and is "default" without one. Any query string
+        is refused with 400 before anything is erased: from that client it
+        means the id held a `?`, so `?org_id=` could be part of the id.
 
         Never reports success unless `erase_user` finished. 409 if it refuses
         the audit fields as quoting a fact; they are fresh random tokens on
@@ -397,14 +470,13 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
             return _error(
                 400,
                 "delete user takes no query string; a '?' in the user id would cut it "
-                "short. Nothing was erased.",
+                "short. Name the org in the body. Nothing was erased.",
             )
-        if not user_id:
-            return _error(400, "user_id must not be empty. Nothing was erased.")
+        s = _scope(user_id, None if req is None else req.org_id)
         reason, actor = _erase_audit_fields()
         try:
             n = await engram.erase_user(
-                user_id=user_id, org_id="default", reason=reason, actor=actor
+                user_id=s.user_id, org_id=s.org_id, reason=reason, actor=actor
             )
         except ValueError as e:
             return _error(
@@ -557,14 +629,13 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
     ) -> dict[str, Any] | JSONResponse:
         """Hard-delete one conversation's turns. Facts extracted from them stay, as in Rust.
 
-        An empty `user_id` or `org_id` is refused rather than read as "default",
-        so a client bug cannot delete the default user's conversation.
+        An empty or blank `user_id` or `org_id` is refused rather than read as
+        "default", so a client bug cannot delete the default user's
+        conversation.
         """
         conversation_id = _form_decoded_tail(request, conversation_id)
         if not conversation_id:
             return _error(400, "conversation_id must not be empty")
-        if user_id == "" or org_id == "":
-            return _error(400, "user_id and org_id must not be empty when given")
         s = _scope(user_id, org_id)
         n = await engram.delete_conversation(conversation_id, user_id=s.user_id, org_id=s.org_id)
         return {"success": True, "deleted_count": n}

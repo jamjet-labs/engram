@@ -203,10 +203,11 @@ class EngramStore(Protocol):
 
     # ── v1 REST support (ids and counts only, no text) ───────────────────
     #
-    # In the form the v1 routes first used. `find_fact_scope`, and
-    # `fact_counts(None)`, reach every scope; they are to be replaced by
-    # scoped calls, and `fact_row_committed` leaves when stores keep their
-    # own vectors.
+    # `find_fact_owner_in_org` and `fact_counts_in_org` read every user of
+    # the one org they are given, for the root calls named for that
+    # (`Engram.forget_in_org`, `Engram.fact_counts_in_org`). Nothing here
+    # reads more than one org. `fact_row_committed` leaves when stores keep
+    # their own vectors.
 
     @abstractmethod
     async def fact_row_committed(self, fact_id: UUID, scope: Scope) -> bool:
@@ -214,8 +215,12 @@ class EngramStore(Protocol):
         ...
 
     @abstractmethod
-    async def find_fact_scope(self, fact_id: UUID) -> Scope | None:
-        """The scope a fact id belongs to, in any scope. Not an authorization check."""
+    async def find_fact_owner_in_org(self, fact_id: UUID, org_id: str) -> Scope | None:
+        """The scope of the fact with this id in ``org_id``, hidden facts included.
+
+        None when no fact in that org has the id, so another org's id reads
+        like an unknown one.
+        """
         ...
 
     @abstractmethod
@@ -229,11 +234,13 @@ class EngramStore(Protocol):
         ...
 
     @abstractmethod
-    async def fact_counts(self, scope: Scope | None) -> tuple[int, int]:
-        """(all facts, visible and not invalidated facts) in ``scope``.
+    async def fact_counts(self, scope: Scope) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) in ``scope``."""
+        ...
 
-        ``None`` counts every scope, for the v1 stats route until it names one.
-        """
+    @abstractmethod
+    async def fact_counts_in_org(self, org_id: str) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) of every user in ``org_id``."""
         ...
 
     @abstractmethod

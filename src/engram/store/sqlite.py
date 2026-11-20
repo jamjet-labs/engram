@@ -1964,20 +1964,17 @@ class SqliteStore:
 
     # ── v1 REST support (ids and counts only, no text) ───────────────────
 
-    async def find_fact_scope(self, fact_id: UUID) -> Scope | None:
-        """The scope a fact id belongs to, for the v1 forget route.
+    async def find_fact_owner_in_org(self, fact_id: UUID, org_id: str) -> Scope | None:
+        """The scope of the fact with this id in ``org_id``, for `Engram.forget_in_org`.
 
-        The v1 contract names a fact by id alone. One server token is one trust
-        domain, so resolving the scope from the id grants nothing the token did
-        not already allow.
-
-        Not an authorization check: it returns the owner of any fact id in any
-        scope, hidden facts included. Use it only where the caller is already
-        trusted for every scope, as on a one-token server.
+        Hidden facts included, so forgetting one twice finds it again. None
+        when no fact in that org has the id: another org's id reads like an
+        unknown one. Returns ids only, never text.
         """
         async with self._reading() as db:
             async with db.execute(
-                "SELECT org_id, user_id FROM facts WHERE id=?", (str(fact_id),)
+                "SELECT org_id, user_id FROM facts WHERE id = ? AND org_id = ?",
+                (str(fact_id), org_id),
             ) as cur:
                 row = await cur.fetchone()
         return None if row is None else Scope(org_id=row[0], user_id=row[1])
@@ -2009,23 +2006,27 @@ class SqliteStore:
                 rows = await cur.fetchall()
         return any(quotes_any_run(value_norm, normalize_text(r[0])) for r in rows)
 
-    async def fact_counts(self, scope: Scope | None) -> tuple[int, int]:
-        """(all facts, visible and not invalidated facts) in ``scope``.
+    async def fact_counts(self, scope: Scope) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) in ``scope``."""
+        return await self._counts(
+            "SELECT COUNT(*) FROM facts WHERE org_id = ? AND user_id = ?",
+            "SELECT COUNT(*) FROM live_facts"
+            " WHERE invalid_at IS NULL AND org_id = ? AND user_id = ?",
+            (scope.org_id, scope.user_id),
+        )
 
-        ``None`` counts every scope, for the v1 stats route until it names one.
-        """
-        args: tuple[str, ...]
-        if scope is None:
-            total_sql = "SELECT COUNT(*) FROM facts"
-            valid_sql = "SELECT COUNT(*) FROM live_facts WHERE invalid_at IS NULL"
-            args = ()
-        else:
-            total_sql = "SELECT COUNT(*) FROM facts WHERE org_id = ? AND user_id = ?"
-            valid_sql = (
-                "SELECT COUNT(*) FROM live_facts"
-                " WHERE invalid_at IS NULL AND org_id = ? AND user_id = ?"
-            )
-            args = (scope.org_id, scope.user_id)
+    async def fact_counts_in_org(self, org_id: str) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) of every user in ``org_id``."""
+        return await self._counts(
+            "SELECT COUNT(*) FROM facts WHERE org_id = ?",
+            "SELECT COUNT(*) FROM live_facts WHERE invalid_at IS NULL AND org_id = ?",
+            (org_id,),
+        )
+
+    async def _counts(
+        self, total_sql: str, valid_sql: str, args: tuple[str, ...]
+    ) -> tuple[int, int]:
+        # Both statements are literals from the two callers above.
         async with self._reading() as db:
             async with db.execute(total_sql, args) as cur:
                 total_row = await cur.fetchone()
