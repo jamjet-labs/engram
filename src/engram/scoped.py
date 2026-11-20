@@ -188,11 +188,12 @@ class ScopedEngram:
     async def guard(self) -> ScopeWriteGuard:
         """The scope's erase epoch now, for a write that starts now.
 
-        Take it when a write starts and pass it to each `record_message` and
-        `extract` the write makes. If :meth:`erase_all` erases the scope after
-        this, those calls store nothing and raise ScopeErasedError (`extract`
-        returns what it stored before). No clock is read. A read: it works
-        read-only too. `record` and `extract` take their own when given none.
+        Take it when a write starts and pass it to each `record_message`,
+        `extract` and `extract_events` the write makes. If :meth:`erase_all`
+        erases the scope after this, those calls store nothing and raise
+        ScopeErasedError (`extract` and `extract_events` return what they
+        stored before). No clock is read. A read: it works read-only too.
+        `record`, `extract` and `extract_events` take their own when given none.
         """
         guard = await self._engram._store.scope_guard(self._scope)
         if not isinstance(guard, ScopeWriteGuard) or _names(guard.scope) != _names(self._scope):
@@ -407,6 +408,8 @@ class ScopedEngram:
         messages: list[ChatMessage],
         session_date: datetime | None = None,
         persist: bool = True,
+        *,
+        guard: ScopeWriteGuard | None = None,
     ) -> list[Event]:
         """Phase 11: extract SVO events from a chat segment via LLM.
 
@@ -415,17 +418,36 @@ class ScopedEngram:
         calendar by default. Requires an LLM to have been passed at
         `Engram.open(llm=...)`. With ``persist=False`` nothing is stored, so
         it also works read-only.
+
+        ``guard`` works as in :meth:`extract`: if :meth:`erase_all` erases the
+        scope while this runs, the events not yet stored are dropped, and the
+        result lists only those stored before the erase.
         """
         engram = self._engram
         extractor = _event_extraction(engram, persist)
+        self._own_guard(guard)
         if not messages:
             return []
         self._own_messages(messages)
+        if persist and guard is None:
+            guard = await self.guard()
         events = _only_in(self._scope, await extractor.extract(messages, session_date=session_date))
-        if persist:
-            for ev in events:
-                await engram._store.upsert_event(ev)
-        return events
+        if not persist:
+            return events
+        stored: list[Event] = []
+        for ev in events:
+            try:
+                await engram._store.upsert_event(ev, guard=guard)
+            except ScopeErasedError:
+                logger.info(
+                    "extract_events: the scope was erased while event extraction ran; "
+                    "returning %d of %d events",
+                    len(stored),
+                    len(events),
+                )
+                break
+            stored.append(ev)
+        return stored
 
     async def supersede(
         self,

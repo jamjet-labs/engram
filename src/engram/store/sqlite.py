@@ -986,11 +986,20 @@ class SqliteStore:
 
     # ── Events (Phase 11) ────────────────────────────────────────────────
 
-    async def upsert_event(self, event: Event) -> None:
+    async def upsert_event(self, event: Event, *, guard: ScopeWriteGuard | None = None) -> None:
+        """Insert or update an event.
+
+        ``guard`` works as in :meth:`upsert_fact`: if the scope's erase epoch
+        has moved since it was taken, raises ScopeErasedError and writes
+        nothing.
+        """
         self._require_writable()
         _check_event(event)
+        _check_guard(guard, event.scope)
         try:
             async with self._transaction():
+                if guard is not None:
+                    await self._refuse_if_erased(guard, "the event")
                 await self._check_owner("event", str(event.id), event.scope)
                 keep = await self._add_matches(
                     "event", str(event.id), _rules.event_text(event), event.scope

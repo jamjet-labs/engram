@@ -314,14 +314,16 @@ class Engram:
         messages: list[ChatMessage],
         session_date: datetime | None = None,
         persist: bool = True,
+        *,
+        guard: ScopeWriteGuard | None = None,
     ) -> list[Event]:
         """Phase 11: extract SVO events from a chat segment via LLM.
 
         Runs `ScopedEngram.extract_events` in the first message's scope. A
-        message from any other scope raises ScopeError before the LLM call.
-        Persists the events by default. Requires an LLM to have been passed
-        at `Engram.open(llm=...)`. With ``persist=False`` nothing is stored,
-        so it also works read-only.
+        message from any other scope, or a ``guard`` for another scope, raises
+        ScopeError before the LLM call. Persists the events by default.
+        Requires an LLM to have been passed at `Engram.open(llm=...)`. With
+        ``persist=False`` nothing is stored, so it also works read-only.
         """
         if persist:
             self._require_writable()
@@ -329,7 +331,7 @@ class Engram:
             _event_extraction(self, persist)
             return []
         return await self._message_handle(messages).extract_events(
-            messages, session_date=session_date, persist=persist
+            messages, session_date=session_date, persist=persist, guard=guard
         )
 
     async def search_events(

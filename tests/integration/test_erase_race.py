@@ -22,7 +22,7 @@ from engram import Engram
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.errors import ScopeErasedError, StoreError
 from engram.llm.base import LLMMessage, LLMResponse
-from engram.models import ChatMessage, Fact
+from engram.models import ChatMessage, Event, Fact
 from engram.scope import Scope, ScopeWriteGuard
 from engram.server.http import build_http_app
 from tests.conformance.backends import OpenMemory
@@ -494,7 +494,19 @@ async def test_guard_must_be_a_scope_write_guard(open_memory: OpenMemory) -> Non
         await memory.record_message("hi", user_id="frank", guard=started)
     with pytest.raises(TypeError, match="ScopeWriteGuard"):
         await memory.extract([_turn()], guard=started)
+    event = Event(
+        scope=FRANK,
+        subject_canonical="frank",
+        verb="see",
+        object_canonical="the doctor",
+        time_start=datetime.now().astimezone(),
+    )
+    with pytest.raises(TypeError, match="ScopeWriteGuard"):
+        await memory._store.upsert_event(event, guard=started)
+    with pytest.raises(TypeError, match="ScopeWriteGuard"):
+        await memory.extract_events([_turn()], guard=started)
     assert llm.calls == 0  # refused before the LLM call, not at the first upsert
     assert await memory._store.list_fact_ids(FRANK) == []
     assert await memory.list_messages("default", user_id="frank") == []
     assert await memory.list_messages("s", user_id="frank") == []
+    assert await memory.search_events("", user_id="frank") == []

@@ -24,7 +24,7 @@ import pytest_asyncio
 from engram import Engram, ScopedEngram
 from engram.errors import ScopeErasedError, ScopeError, ScopeResidueRefusedError
 from engram.llm.base import LLMMessage, LLMResponse
-from engram.models import ChatMessage, Fact
+from engram.models import ChatMessage, Event, Fact
 from engram.scope import Scope, ScopeWriteGuard
 from tests.conformance.backends import OpenMemory
 
@@ -33,6 +33,15 @@ BOB = Scope(org_id="acme", user_id="bob")
 ALICE_AT_GLOBEX = Scope(org_id="globex", user_id="alice")
 SECRET = "Alice's locker code is 4417."
 WRITERS = ["record", "extract"]
+EVENT = {
+    "subject_canonical": "alice",
+    "verb": "change",
+    "object_canonical": "locker code",
+    "time_start": "2026-11-01T09:00:00+00:00",
+    "time_end": None,
+    "aliases": ["new locker code"],
+    "confidence": 0.9,
+}
 
 
 class Gate:
@@ -61,10 +70,15 @@ async def gate() -> AsyncIterator[Gate]:
 
 
 class OneFactLLM:
-    """Extracts the same one fact from any conversation, and counts the calls."""
+    """Extracts the same one fact, and ``events`` copies of one event, from any conversation.
 
-    def __init__(self) -> None:
+    It counts the calls. With ``gate``, the first call waits there.
+    """
+
+    def __init__(self, gate: Gate | None = None, events: int = 1) -> None:
         self.calls = 0
+        self.gate = gate
+        self.events = events
 
     async def generate(
         self,
@@ -74,6 +88,8 @@ class OneFactLLM:
         json_mode: bool = False,
     ) -> LLMResponse:
         self.calls += 1
+        if self.gate is not None:
+            await self.gate.hold()
         fact = {
             "text": SECRET,
             "category": "personal",
@@ -82,7 +98,9 @@ class OneFactLLM:
             "entities": [],
             "event_date": None,
         }
-        return LLMResponse(content=json.dumps({"facts": [fact]}), finish_reason="stop")
+        # Each extractor reads only its own key.
+        body = {"facts": [fact], "events": [EVENT] * self.events}
+        return LLMResponse(content=json.dumps(body), finish_reason="stop")
 
 
 def _now() -> datetime:
@@ -196,11 +214,86 @@ async def test_write_started_after_erase_is_stored_when_the_writer_clock_runs_be
     assert [h.fact.text for h in await alice.recall("locker code")] == [SECRET]
 
 
+# ── Events ──────────────────────────────────────────────────────────────
+
+
+def _watch_event_writes(
+    monkeypatch: pytest.MonkeyPatch, memory: Engram, gate: Gate | None = None, hold: int = 0
+) -> list[Event]:
+    """Every event the store is asked to write. With ``gate``, write number ``hold`` waits there."""
+    upsert = memory._store.upsert_event
+    asked: list[Event] = []
+
+    async def watched(event: Event, **kw: Any) -> None:
+        asked.append(event)
+        if gate is not None and len(asked) == hold + 1:
+            await gate.hold()
+        await upsert(event, **kw)
+
+    monkeypatch.setattr(memory._store, "upsert_event", watched)
+    return asked
+
+
+@pytest.mark.parametrize("via", ["handle", "root"])
+async def test_event_extraction_started_before_erase_is_refused(
+    open_memory: OpenMemory,
+    monkeypatch: pytest.MonkeyPatch,
+    gate: Gate,
+    caplog: pytest.LogCaptureFixture,
+    via: str,
+) -> None:
+    caplog.set_level("INFO", logger="engram.scoped")
+    memory = await open_memory(allow_default_scope=False, llm=OneFactLLM(gate))
+    alice = _alice(memory)
+    turn = await alice.record_message("My locker code is 4417.", session_id="s1")
+    asked = _watch_event_writes(monkeypatch, memory)
+    extract_events = alice.extract_events if via == "handle" else memory.extract_events
+    task = asyncio.create_task(extract_events([turn]))
+    await gate.wait_entered()  # the LLM has the turn; no event is stored yet
+    assert await alice.erase_all(reason="asked to", actor="admin") == 0
+    assert await alice.list_messages("s1") == []
+    gate.release.set()
+    assert await task == []
+    [event] = asked  # the store was asked, and refused it
+    assert await memory._store.get_event(event.id, ALICE) is None
+    assert await alice.search_events("") == []
+    [rec] = [r for r in caplog.records if "erased while event extraction ran" in r.getMessage()]
+    assert rec.levelname == "INFO"
+
+
+async def test_event_extraction_returns_the_events_stored_before_the_erase(
+    open_memory: OpenMemory, monkeypatch: pytest.MonkeyPatch, gate: Gate
+) -> None:
+    memory = await open_memory(allow_default_scope=False, llm=OneFactLLM(events=2))
+    alice = _alice(memory)
+    asked = _watch_event_writes(monkeypatch, memory, gate, hold=1)
+    task = asyncio.create_task(alice.extract_events([_turn(ALICE)]))
+    await gate.wait_entered()  # the first event is stored; the second waits
+    first, second = asked
+    assert [e.id for e in await alice.search_events("")] == [first.id]
+    assert await alice.erase_all(reason="asked to", actor="admin") == 0
+    gate.release.set()
+    assert [e.id for e in await task] == [first.id]
+    for event in (first, second):  # the erase took the first, the guard refused the second
+        assert await memory._store.get_event(event.id, ALICE) is None
+    assert await alice.search_events("") == []
+
+
 # ── Guards ──────────────────────────────────────────────────────────────
 
 
 def _alice_fact() -> Fact:
     return Fact(text=SECRET, scope=ALICE, valid_from=_now())
+
+
+def _alice_event() -> Event:
+    return Event(
+        scope=ALICE,
+        subject_canonical="alice",
+        verb="change",
+        object_canonical="locker code",
+        time_start=_now(),
+    )
 
 
 # Each write that takes a guard, given one for another scope.
@@ -209,14 +302,17 @@ GuardedWrite = Callable[[Engram, Any], Awaitable[object]]
 GUARDED_WRITES: dict[str, GuardedWrite] = {
     "store.upsert_fact": lambda m, g: m._store.upsert_fact(_alice_fact(), guard=g),
     "store.upsert_message": lambda m, g: m._store.upsert_message(_turn(ALICE), guard=g),
+    "store.upsert_event": lambda m, g: m._store.upsert_event(_alice_event(), guard=g),
     "scoped.record_message": lambda m, g: _alice(m).record_message(
         SECRET, session_id="s1", guard=g
     ),
     "scoped.extract": lambda m, g: _alice(m).extract([_turn(ALICE)], guard=g),
+    "scoped.extract_events": lambda m, g: _alice(m).extract_events([_turn(ALICE)], guard=g),
     "root.record_message": lambda m, g: m.record_message(
         SECRET, session_id="s1", user_id=ALICE.user_id, org_id=ALICE.org_id, guard=g
     ),
     "root.extract": lambda m, g: m.extract([_turn(ALICE)], guard=g),
+    "root.extract_events": lambda m, g: m.extract_events([_turn(ALICE)], guard=g),
 }
 
 
@@ -236,6 +332,8 @@ async def test_guard_for_another_scope_is_refused(
     assert await memory._store.list_fact_ids(ALICE) == []
     assert await _alice(memory).list_messages("s1") == []
     assert await _handle(memory, other).list_messages("s1") == []
+    assert await _alice(memory).search_events("") == []
+    assert await _handle(memory, other).search_events("") == []
 
 
 @pytest.mark.persistent
@@ -271,14 +369,22 @@ async def test_guard_taken_after_erase_allows_writes(open_memory: OpenMemory) ->
     with pytest.raises(ScopeErasedError):
         await alice.record_message(SECRET, session_id="s1", guard=stale)
     assert await alice.extract([_turn(ALICE)], guard=stale) == []
+    with pytest.raises(ScopeErasedError):
+        await memory._store.upsert_event(_alice_event(), guard=stale)
+    assert await alice.extract_events([_turn(ALICE)], guard=stale) == []
     assert await memory._store.list_fact_ids(ALICE) == []
+    assert await alice.search_events("") == []
 
     stored = _alice_fact()
     await memory._store.upsert_fact(stored, guard=fresh)
     await alice.record_message(SECRET, session_id="s1", guard=fresh)
     [extracted] = await alice.extract([_turn(ALICE)], guard=fresh)
+    event = _alice_event()
+    await memory._store.upsert_event(event, guard=fresh)
+    [found] = await alice.extract_events([_turn(ALICE)], guard=fresh)
     assert set(await memory._store.list_fact_ids(ALICE)) == {stored.id, extracted.id}
     assert [m.content for m in await alice.list_messages("s1")] == [SECRET]
+    assert {e.id for e in await alice.search_events("")} == {event.id, found.id}
 
 
 async def test_erase_of_one_fact_does_not_refuse_other_writes(open_memory: OpenMemory) -> None:
