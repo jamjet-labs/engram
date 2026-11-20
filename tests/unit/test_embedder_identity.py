@@ -34,6 +34,7 @@ from engram.llm.base import LLMMessage, LLMResponse
 from engram.models import ChatMessage
 from engram.retrieve.hybrid import HybridRetriever
 from engram.scope import Scope
+from engram.validate import MAX_FACT_TEXT_BYTES
 from engram.vector.hnsw import HnswVectorStore
 from tests.conformance.backends import OpenMemory, OpenStore
 
@@ -118,6 +119,23 @@ class TwoFactsLLM:
         json_mode: bool = False,
     ) -> LLMResponse:
         facts = [{"text": text, "confidence": 0.9} for text in (BIKE, HELMET)]
+        return LLMResponse(content=json.dumps({"facts": facts}), finish_reason="stop")
+
+
+class OneBadFactLLM:
+    """Extracts a good fact, then one the store refuses."""
+
+    def __init__(self, bad: dict[str, str]) -> None:
+        self._bad = bad
+
+    async def generate(
+        self,
+        messages: list[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> LLMResponse:
+        facts = [{"text": BIKE, "confidence": 0.9}, {"confidence": 0.9, **self._bad}]
         return LLMResponse(content=json.dumps({"facts": facts}), finish_reason="stop")
 
 
@@ -234,6 +252,22 @@ async def test_extract_embeds_its_facts_in_one_call(open_memory: OpenMemory) -> 
     assert await memory._vec.count(ACME_ALICE) == 2
 
 
+async def test_extract_gives_each_fact_the_vector_of_its_own_text(
+    open_memory: OpenMemory,
+) -> None:
+    # Facts and vectors are paired by position. A mix-up stores each fact
+    # under another fact's vector, and every count still comes out right.
+    memory = await open_memory(embedder=TaskTypeEmbedder(), llm=TwoFactsLLM())
+    ids = {f.text: f.id for f in await memory.extract([_turn()])}
+    assert sorted(ids) == sorted([BIKE, HELMET])
+    for text, other in ((BIKE, HELMET), (HELMET, BIKE)):
+        # The query vector is the embedder's vector for this text, so the
+        # fact stored under it scores 1.0 and the other fact scores lower.
+        scores = {sf.fact.id: sf.vector_score for sf in await memory.recall(text, **WHO)}
+        assert scores[ids[text]] == pytest.approx(1.0, abs=1e-6)
+        assert scores[ids[other]] < scores[ids[text]]
+
+
 async def test_reinstate_uses_embed_documents(open_memory: OpenMemory) -> None:
     embedder = TaskTypeEmbedder()
     memory = await open_memory(embedder=embedder)
@@ -266,6 +300,36 @@ async def test_extract_stores_nothing_when_the_embedder_fails(open_memory: OpenM
     memory = await open_memory(embedder=FailingEmbedder(), llm=TwoFactsLLM())
     with pytest.raises(EmbeddingError, match="503"):
         await memory.extract([_turn()])
+    await _assert_nothing_stored(memory)
+
+
+# The second fact the model gives, and what the refusal says.
+BAD_FACTS: dict[str, tuple[dict[str, str], str]] = {
+    "NUL in the text": ({"text": "Alice keeps\x00a spare key."}, "text must not contain a NUL"),
+    "text over the limit": (
+        {"text": "x" * (MAX_FACT_TEXT_BYTES + 1)},
+        f"text is {MAX_FACT_TEXT_BYTES + 1} bytes",
+    ),
+    "NUL in the category": (
+        {"text": HELMET, "category": "gear\x00"},
+        "category must not contain a NUL",
+    ),
+}
+
+
+@pytest.mark.parametrize("bad", sorted(BAD_FACTS))
+async def test_extract_checks_every_fact_before_the_embedder(
+    open_memory: OpenMemory, bad: str
+) -> None:
+    # The store would refuse the second fact. The check runs before the
+    # embedder, so no text it refuses reaches the provider, and the first
+    # fact is not stored either.
+    entry, refusal = BAD_FACTS[bad]
+    embedder = TaskTypeEmbedder()
+    memory = await open_memory(embedder=embedder, llm=OneBadFactLLM(entry))
+    with pytest.raises(ValueError, match=refusal):
+        await memory.extract([_turn()])
+    assert embedder.calls == []
     await _assert_nothing_stored(memory)
 
 

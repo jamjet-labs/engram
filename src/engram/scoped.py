@@ -348,9 +348,12 @@ class ScopedEngram:
         `Engram.open(llm=...)`. With ``persist=False`` nothing is stored, so it
         also works read-only.
 
-        The facts are embedded together (`embed_documents`) before the first
-        is written, so an embedder error, or a bad vector
-        (EmbeddingResponseError), raises and stores none of them.
+        Every fact's text and category are checked as the store checks them
+        before the embedder is called, so a fact the store would refuse
+        raises ValueError and stores none of them. The facts are then
+        embedded together (`embed_documents`) before the first is written, so
+        an embedder error, or a bad vector (EmbeddingResponseError), raises
+        and stores none of them.
 
         If :meth:`erase_all` erases the scope while this runs, the facts not
         yet stored are dropped, and the result lists only those stored before
@@ -375,6 +378,15 @@ class ScopedEngram:
         extracted: list[ExtractedFact] = await pipeline.extract(messages, session_date=session_date)
         out: list[Fact] = []
         if persist:
+            # The store's text checks, run on every fact before the embedder:
+            # model text the store would refuse never reaches the provider,
+            # and the facts ahead of it are not stored.
+            for ef in extracted:
+                check_text("text", ef.text, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True)
+                if ef.category is not None:
+                    check_text(
+                        "category", ef.category, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True
+                    )
             facts = [
                 Fact(
                     id=uuid4(),
