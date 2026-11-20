@@ -10,9 +10,11 @@ import aiosqlite
 import pytest
 
 from engram import Engram
-from engram.errors import ScopeResidueRefusedError, StoreError
+from engram.errors import ScopeError, ScopeRequiredError, ScopeResidueRefusedError, StoreError
 from engram.models import Event
 from engram.scope import Scope
+from engram.store.sqlite import SqliteStore
+from tests.conformance.backends import OpenMemory
 
 ALICE = Scope(org_id="default", user_id="alice")
 BOB = Scope(org_id="default", user_id="bob")
@@ -30,15 +32,17 @@ SCOPED_TABLES = {
     "messages",
     "relationships",
     "revocations",
+    "scope_state",
 }
+# Scoped tables erase_user keeps: content-free audit rows, and the erase epoch.
+KEPT_TABLES = {"erasures", "revocations", "scope_state"}
 UNSCOPED_TABLES = {"content_matches", "fact_derivations", "fact_entity_refs", "schema_version"}
 FTS_SHADOW_PREFIXES = ("facts_fts_", "events_fts_")
 
 
 @pytest.fixture
-async def memory():
-    async with await Engram.open(":memory:") as m:
-        yield m
+async def memory(open_memory: OpenMemory) -> Engram:
+    return await open_memory()
 
 
 async def _scalar(db: aiosqlite.Connection, sql: str, args: tuple[Any, ...] = ()) -> int:
@@ -82,49 +86,120 @@ async def _seed_graph(memory: Engram, user: str, fact_id: UUID | None) -> None:
 # ── forget ───────────────────────────────────────────────────────────────
 
 
-async def test_forget_revokes_without_naming_the_scope(memory: Engram) -> None:
+async def test_forget_in_org_revokes_without_naming_the_user(memory: Engram) -> None:
     fact = await memory.record("alice likes tea", user_id="alice")
-    assert await memory.forget(fact.id, reason="user asked", actor="rest:v1") is True
+    assert await memory.forget_in_org(fact.id, reason="user asked", actor="rest:v1") is True
     assert await memory.recall("tea", user_id="alice") == []
     revs = await memory.revocations(user_id="alice")
     assert [r.fact_id for r in revs] == [fact.id]  # soft: a tombstone, not an erasure
 
 
-async def test_forget_unknown_id_is_false(memory: Engram) -> None:
-    assert await memory.forget(uuid4(), reason="x", actor="rest:v1") is False
+async def test_forget_in_org_unknown_id_is_false(memory: Engram) -> None:
+    assert await memory.forget_in_org(uuid4(), reason="x", actor="rest:v1") is False
 
 
-async def test_forget_revokes_in_the_facts_own_org(memory: Engram) -> None:
+async def test_forget_in_org_cannot_reach_another_org(memory: Engram) -> None:
     fact = await memory.record("alice likes tea", user_id="alice", org_id="acme")
-    assert await memory.forget(fact.id, reason="user asked", actor="rest:v1") is True
+    for org in ("globex", "default", None):
+        assert await memory.forget_in_org(fact.id, org_id=org, reason="x", actor="rest:v1") is False
+    assert await memory.revocations(user_id="alice", org_id="acme") == []
+    assert await memory.forget_in_org(fact.id, org_id="acme", reason="x", actor="rest:v1") is True
     assert [r.fact_id for r in await memory.revocations(user_id="alice", org_id="acme")] == [
         fact.id
     ]
 
 
-async def test_forget_is_false_when_the_fact_is_erased_before_the_revoke(
+async def test_forget_in_org_refuses_an_owner_the_store_found_in_another_org(
     memory: Engram, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def stale_lookup(fact_id: UUID) -> Scope:
+    fact = await memory.record("alice likes tea", user_id="alice", org_id="acme")
+
+    async def leaky_lookup(fact_id: UUID, org_id: str) -> Scope:
+        return Scope(org_id="acme", user_id="alice")  # whatever org was asked for
+
+    monkeypatch.setattr(memory._store, "find_fact_owner_in_org", leaky_lookup)
+    with pytest.raises(ScopeError):
+        await memory.forget_in_org(fact.id, reason="x", actor="rest:v1")
+    assert await memory.revocations(user_id="alice", org_id="acme") == []
+
+
+async def test_forget_in_org_is_false_when_the_fact_is_erased_before_the_revoke(
+    memory: Engram, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def stale_lookup(fact_id: UUID, org_id: str) -> Scope:
         return ALICE  # the owner, as read just before a concurrent erase
 
-    monkeypatch.setattr(memory._store, "find_fact_scope", stale_lookup)
-    assert await memory.forget(uuid4(), reason="user asked", actor="rest:v1") is False
+    monkeypatch.setattr(memory._store, "find_fact_owner_in_org", stale_lookup)
+    assert await memory.forget_in_org(uuid4(), reason="user asked", actor="rest:v1") is False
 
 
 @pytest.mark.parametrize(
-    ("reason", "actor", "field"), [(" ", "rest:v1", "reason"), ("x", " ", "actor")]
+    ("given", "field"),
+    [
+        ({"reason": " ", "actor": "rest:v1"}, "reason"),
+        ({"reason": "x", "actor": " "}, "actor"),
+        ({"reason": "x", "actor": "rest:v1", "org_id": ""}, "org_id"),
+        ({"reason": "x", "actor": "rest:v1", "org_id": " "}, "org_id"),
+    ],
 )
-async def test_forget_refuses_a_blank_field_before_looking_up_the_id(
-    memory: Engram, reason: str, actor: str, field: str
+async def test_forget_in_org_refuses_a_blank_field_before_looking_up_the_id(
+    memory: Engram, monkeypatch: pytest.MonkeyPatch, given: dict[str, str], field: str
 ) -> None:
+    looked_up: list[UUID] = []
+
+    async def lookup(fact_id: UUID, org_id: str) -> Scope | None:
+        looked_up.append(fact_id)
+        return None
+
+    monkeypatch.setattr(memory._store, "find_fact_owner_in_org", lookup)
     with pytest.raises(ValueError, match=field):
-        await memory.forget(uuid4(), reason=reason, actor=actor)
+        await memory.forget_in_org(uuid4(), **given)
+    assert looked_up == []
+
+
+@pytest.mark.persistent
+async def test_strict_forget_in_org_refuses_a_fact_held_by_the_default_user(
+    open_memory: OpenMemory,
+) -> None:
+    # The org is named, so the lookup runs; the owner is the user "default",
+    # which a strict Engram never acts on.
+    writer = await open_memory()
+    fact = await writer.record("the default user likes tea", org_id="acme")
+    await writer.close()
+    strict = await open_memory.reopen(allow_default_scope=False)
+    with pytest.raises(ScopeRequiredError, match='user_id "default"'):
+        await strict.forget_in_org(fact.id, org_id="acme", reason="x", actor="rest:v1")
+    allowed = await open_memory.reopen()
+    assert await allowed.revocations(user_id="default", org_id="acme") == []
+
+
+async def test_fact_counts_in_org(memory: Engram) -> None:
+    await memory.record("one", user_id="alice")
+    two = await memory.record("two", user_id="bob")
+    await memory.revoke(two.id, reason="test", actor="t", user_id="bob")
+    three = await memory.record("three", user_id="bob", org_id="acme")
+    await memory.revoke(three.id, reason="test", actor="t", user_id="bob", org_id="acme")
+    assert await memory.fact_counts_in_org() == (2, 1)
+    assert await memory.fact_counts_in_org(org_id="default") == (2, 1)
+    assert await memory.fact_counts_in_org(org_id="acme") == (1, 0)
+    assert await memory.fact_counts_in_org(org_id="globex") == (0, 0)
+    assert await memory.scoped(org_id="default", user_id="bob").fact_counts() == (1, 0)
+    for blank in ("", " "):
+        with pytest.raises(ScopeRequiredError, match="empty or blank"):
+            await memory.fact_counts_in_org(org_id=blank)
+
+
+def test_the_root_has_no_call_that_reaches_every_org() -> None:
+    # PR 16's forget and fact_counts reached every scope. Each now names an org.
+    assert not hasattr(Engram, "forget")
+    assert not hasattr(Engram, "fact_counts")
+    assert not hasattr(SqliteStore, "find_fact_scope")
 
 
 # ── erase_user ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.sqlite_only
 async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
     tea = await memory.record("alice likes tea", user_id="alice")
     revoked = await memory.record("alice likes jazz music", user_id="alice")
@@ -161,8 +236,9 @@ async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
                 cols = {r[1] for r in await cur.fetchall()}
             assert ({"org_id", "user_id"} <= cols) == (table in SCOPED_TABLES), table
         # The seed reaches every scoped table, so an empty table cannot pass for erased.
-        for table in sorted(SCOPED_TABLES - {"erasures"}):
+        for table in sorted(SCOPED_TABLES - {"erasures", "scope_state"}):
             assert await _scoped_count(db, table, "alice") > 0, table
+        assert await _scalar(db, "SELECT COUNT(*) FROM scope_state") == 0  # never erased
         fact_ids = {str(i) for i in await store.list_fact_ids(ALICE)}
         assert fact_ids == {str(tea.id), str(revoked.id), str(derived.id)}
         message_ids = await _ids(db, "SELECT id FROM messages WHERE user_id='alice'")
@@ -181,8 +257,11 @@ async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
     assert await memory.erase_user(user_id="alice", reason="gdpr request", actor="rest:v1") == 3
 
     async with store._reading() as db:
-        for table in sorted(SCOPED_TABLES - {"erasures", "revocations", "facts_fts"}):
+        for table in sorted(SCOPED_TABLES - KEPT_TABLES - {"facts_fts"}):
             assert await _scoped_count(db, table, "alice") == 0, table
+        # The epoch moved, in alice's scope only.
+        epochs = await _ids(db, "SELECT user_id || ':' || erase_epoch FROM scope_state")
+        assert epochs == {"alice:1"}
         for token in ("alice", "jazz", "oolong", "tea"):
             n = await _scalar(
                 db, "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH ?", (token,)
@@ -242,6 +321,7 @@ async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
         assert await _scalar(db, "SELECT COUNT(*) FROM fact_entity_refs") == 1
 
 
+@pytest.mark.sqlite_only
 async def test_erase_user_clears_a_hash_an_earlier_erase_kept(memory: Engram) -> None:
     fact = await memory.record("alice likes jazz", user_id="alice")
     await memory.revoke(fact.id, reason="test", actor="t", user_id="alice")
@@ -277,7 +357,8 @@ async def test_erase_user_records_the_residue_it_removes(memory: Engram) -> None
         "revocations_scrubbed": 0,
         "scope_erasure": 1,
     }
-    assert "sqlite_secure_delete" in record.guarantees  # finalized like a per-fact erasure
+    # Finalized like a per-fact erasure: the residue step alone records no guarantees.
+    assert record.guarantees
     assert await memory.list_conversations(user_id="alice") == []
 
 
@@ -407,13 +488,6 @@ async def test_list_messages_has_no_cap_by_default(memory: Engram) -> None:
             f"m{i}", session_id="s1", user_id="alice", timestamp=T + timedelta(seconds=i)
         )
     assert len(await memory.list_messages("s1", user_id="alice")) == 1001
-
-
-async def test_fact_counts(memory: Engram) -> None:
-    await memory.record("one", user_id="alice")
-    two = await memory.record("two", user_id="bob", org_id="acme")
-    await memory.revoke(two.id, reason="test", actor="t", user_id="bob", org_id="acme")
-    assert await memory.fact_counts() == (2, 1)
 
 
 async def test_only_the_residue_refusal_is_a_scope_residue_refused_error(

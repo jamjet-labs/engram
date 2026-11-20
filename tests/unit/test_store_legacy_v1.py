@@ -10,21 +10,31 @@ import pytest
 from engram import Engram
 from engram.models import Event, Fact
 from engram.scope import Scope
+from tests.conformance.backends import OpenMemory
 
 ALICE = Scope(org_id="default", user_id="alice")
 BOB = Scope(org_id="default", user_id="bob")
+ACME_ALICE = Scope(org_id="acme", user_id="alice")
 
 
 @pytest.fixture
-async def memory():
-    async with await Engram.open(":memory:") as m:
-        yield m
+async def memory(open_memory: OpenMemory) -> Engram:
+    return await open_memory()
 
 
-async def test_find_fact_scope(memory: Engram) -> None:
+async def test_find_fact_owner_in_org(memory: Engram) -> None:
+    store = memory._store
     fact = await memory.record("alice likes tea", user_id="alice")
-    assert await memory._store.find_fact_scope(fact.id) == ALICE
-    assert await memory._store.find_fact_scope(uuid4()) is None
+    hidden = await memory.record("alice likes jazz", user_id="alice")
+    await memory.revoke(hidden.id, reason="test", actor="t", user_id="alice")
+    elsewhere = await memory.record("alice likes chess", user_id="alice", org_id="acme")
+    assert await store.find_fact_owner_in_org(fact.id, "default") == ALICE
+    assert await store.find_fact_owner_in_org(hidden.id, "default") == ALICE  # hidden too
+    assert await store.find_fact_owner_in_org(elsewhere.id, "acme") == ACME_ALICE
+    # Another org's id reads like an unknown one.
+    assert await store.find_fact_owner_in_org(elsewhere.id, "default") is None
+    assert await store.find_fact_owner_in_org(fact.id, "acme") is None
+    assert await store.find_fact_owner_in_org(uuid4(), "default") is None
 
 
 async def test_list_fact_ids_includes_revoked(memory: Engram) -> None:
@@ -46,11 +56,19 @@ async def test_list_session_ids_and_delete_session(memory: Engram) -> None:
     assert await memory._store.list_session_ids(BOB) == ["s1"]  # other scope untouched
 
 
-async def test_fact_counts(memory: Engram) -> None:
+async def test_fact_counts_in_a_scope_and_in_an_org(memory: Engram) -> None:
+    store = memory._store
     await memory.record("one", user_id="alice")
     two = await memory.record("two", user_id="bob")
     await memory.revoke(two.id, reason="test", actor="t", user_id="bob")
-    assert await memory._store.fact_counts() == (2, 1)
+    await memory.record("three", user_id="alice", org_id="acme")
+    assert await store.fact_counts(ALICE) == (1, 1)
+    assert await store.fact_counts(BOB) == (1, 0)
+    assert await store.fact_counts(ACME_ALICE) == (1, 1)
+    assert await store.fact_counts(Scope(org_id="acme", user_id="bob")) == (0, 0)
+    assert await store.fact_counts_in_org("default") == (2, 1)
+    assert await store.fact_counts_in_org("acme") == (1, 1)
+    assert await store.fact_counts_in_org("globex") == (0, 0)
 
 
 async def test_erase_scope_residue_refuses_while_facts_remain(memory: Engram) -> None:
@@ -59,6 +77,7 @@ async def test_erase_scope_residue_refuses_while_facts_remain(memory: Engram) ->
         await memory._store.erase_scope_residue(ALICE, reason="test", actor="t")
 
 
+@pytest.mark.sqlite_only
 async def test_erase_scope_residue_refuses_while_only_a_revoked_fact_remains(
     memory: Engram,
 ) -> None:
@@ -99,6 +118,7 @@ async def _count(memory: Engram, table: str, user: str) -> int:
     return int(row[0])
 
 
+@pytest.mark.sqlite_only
 async def test_erase_scope_residue_clears_scope_only(memory: Engram) -> None:
     t = datetime(2026, 11, 10, tzinfo=UTC)
     fact = await memory.record("alice likes tea", user_id="alice")
@@ -157,6 +177,7 @@ async def test_erase_scope_residue_clears_scope_only(memory: Engram) -> None:
     assert row is not None and row[0] == 0
 
 
+@pytest.mark.sqlite_only
 async def test_erase_scope_residue_scrubs_every_tombstone_in_scope(memory: Engram) -> None:
     conn = memory._store._conn
     # A tombstone whose fact is already gone, still carrying its hash and text.

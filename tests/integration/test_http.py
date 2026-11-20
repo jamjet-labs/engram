@@ -19,7 +19,7 @@ from engram.server.http import build_http_app
 
 @pytest_asyncio.fixture
 async def client_engram() -> AsyncIterator[tuple[TestClient, Engram]]:
-    memory = await Engram.open(":memory:")
+    memory = await Engram.open(":memory:", allow_default_scope=True)
     app = build_http_app(memory, allow_unauthenticated=True)
     client = TestClient(app, base_url="http://127.0.0.1")
     try:
@@ -166,7 +166,7 @@ class _StubLLM:
 
 @asynccontextmanager
 async def _asgi_client(**open_kw: Any) -> AsyncIterator[AsyncClient]:
-    memory = await Engram.open(":memory:", **open_kw)
+    memory = await Engram.open(":memory:", allow_default_scope=True, **open_kw)
     # A server error comes back as a 500 response, not as an exception here.
     transport = ASGITransport(
         app=build_http_app(memory, allow_unauthenticated=True), raise_app_exceptions=False

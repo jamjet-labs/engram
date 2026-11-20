@@ -116,7 +116,7 @@ async def test_search_events_never_returns_an_event_before_its_match_row(
 async def test_recall_during_erase_never_returns_the_erased_text(kind: str, tmp_path: Path) -> None:
     # Deterministic: after every DELETE or revocation scrub inside erase(), a
     # recall() from another task gets a chance to run before erase goes on.
-    async with await Engram.open(_target(kind, tmp_path)) as memory:
+    async with await Engram.open(_target(kind, tmp_path), allow_default_scope=True) as memory:
         text = "Patient 7 diagnosis is acute myeloid leukemia stage two"
         fact = await memory.record(text, user_id="ops")
         for j in range(3):
@@ -160,7 +160,7 @@ async def test_recall_does_not_wait_for_a_long_write(
 ) -> None:
     # On a file database reads use their own connection, and recording access
     # counts is queued, so recall() returns while a write transaction is open.
-    async with await Engram.open(str(tmp_path / "e.db")) as memory:
+    async with await Engram.open(str(tmp_path / "e.db"), allow_default_scope=True) as memory:
         await memory.record("alice prefers espresso", user_id="alice")
         b = await memory.record(B, user_id="ops")
         reached, release = asyncio.Event(), asyncio.Event()
@@ -244,7 +244,7 @@ class _SameTxReader:
 
 @pytest.mark.sqlite_only
 async def test_upserts_never_expose_revoked_text_inside_their_transaction() -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops")
         b = await memory.record(B, user_id="ops")
         old = await memory.record(f"Old handover: {B}", user_id="ops")
@@ -275,7 +275,7 @@ async def test_upserts_never_expose_revoked_text_inside_their_transaction() -> N
 
 @pytest.mark.sqlite_only
 async def test_erase_never_exposes_erased_text_inside_its_transaction() -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         text = "Patient 7 diagnosis is acute myeloid leukemia stage two"
         fact = await memory.record(text, user_id="ops")
         for j in range(3):
@@ -290,7 +290,7 @@ async def test_erase_never_exposes_erased_text_inside_its_transaction() -> None:
 async def test_the_read_connection_refuses_writes(tmp_path: Path) -> None:
     import aiosqlite
 
-    async with await Engram.open(str(tmp_path / "e.db")) as memory:
+    async with await Engram.open(str(tmp_path / "e.db"), allow_default_scope=True) as memory:
         assert memory._store._rconn is not None
         with pytest.raises(aiosqlite.OperationalError, match="readonly"):
             await memory._store._rconn.execute("DELETE FROM revocations")
@@ -303,7 +303,7 @@ async def test_reads_never_see_a_write_that_is_later_rolled_back(
 ) -> None:
     # The base property behind all of the above: uncommitted rows are invisible
     # to other tasks, so a write that fails or is cancelled was never seen.
-    async with await Engram.open(_target(kind, tmp_path)) as memory:
+    async with await Engram.open(_target(kind, tmp_path), allow_default_scope=True) as memory:
         await memory.record("zebra crossing notes for monday", user_id="ops")
         reached, release = asyncio.Event(), asyncio.Event()
         real = memory._store._drop_stale_matches

@@ -28,6 +28,16 @@ class ScopeError(EngramError):
     """Operation crossed a scope boundary that's not permitted."""
 
 
+class ScopeRequiredError(ValueError, EngramError):
+    """A call did not name its scope, or named it with an id it cannot use.
+
+    A missing ``user_id`` or ``org_id``, or the literal ``"default"``, is
+    refused unless the Engram was opened with ``allow_default_scope=True``.
+    An id that is not a string, or is empty or blank, is refused always.
+    Nothing was read or written.
+    """
+
+
 class ValidationError(EngramError):
     """Input failed validation beyond what Pydantic catches (e.g., business rules)."""
 
@@ -43,10 +53,10 @@ class EmbeddingError(EngramError):
 class ScopeErasedError(EngramError):
     """A write lost a race with ``Engram.erase_user`` on its scope. Nothing was stored.
 
-    Raised by ``SqliteStore.upsert_fact(not_erased_since=...)`` when the
-    scope's data was erased at or after the time the write started. Not a
-    StoreError: the store is fine, and retrying would store the data the
-    erase was asked to remove.
+    Raised by a write given a ``ScopeWriteGuard`` (``guard=...``) when the
+    scope's erase epoch has moved since the guard was taken: an erase of the
+    scope committed after the write started. Not a StoreError: the store is
+    fine, and retrying would store the data the erase was asked to remove.
     """
 
 

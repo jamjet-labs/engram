@@ -208,6 +208,7 @@ async def main(limit: int, extract: bool) -> None:
             llm=llm,
             reranker=reranker,
             retrieval_config=cfg,
+            allow_default_scope=True,  # questions live in org "default"
         ) as memory:
             t0 = time.time()
             n_chunks = await _ingest(memory, q, user_id="alice", extract=extract)

@@ -11,7 +11,6 @@ from engram import Engram
 from engram.embedding.ollama import OllamaEmbedding
 from engram.llm.ollama import OllamaLLM
 from engram.models import ChatMessage
-from engram.scope import Scope
 
 
 async def main() -> None:
@@ -20,7 +19,8 @@ async def main() -> None:
         embedder=OllamaEmbedding(model="nomic-embed-text", dim=768),
         llm=OllamaLLM(model="llama3.2:3b"),
     ) as memory:
-        scope = Scope(org_id="acme", user_id="alice")
+        alice = memory.scoped(org_id="acme", user_id="alice")
+        scope = alice.scope
         session_date = datetime(2024, 3, 12, tzinfo=UTC)
         msgs = [
             ChatMessage(
@@ -38,13 +38,13 @@ async def main() -> None:
                 timestamp=session_date,
             ),
         ]
-        facts = await memory.extract(msgs, session_date=session_date)
+        facts = await alice.extract(msgs, session_date=session_date)
         print(f"Extracted {len(facts)} facts:")
         for f in facts:
             ed = f.event_date.date().isoformat() if f.event_date else "no-date"
             print(f"  [{f.confidence:.2f}] [{ed}] {f.text}")
 
-        results = await memory.recall(query="when was Tokyo trip?", user_id="alice", top_k=3)
+        results = await alice.recall("when was Tokyo trip?", top_k=3)
         print("\nRecall on 'when was Tokyo trip?':")
         for r in results:
             print(f"  [{r.score:.3f}] {r.fact.text}")

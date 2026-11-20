@@ -59,7 +59,7 @@ def _rev_rows(db: Path) -> list[tuple[str, str | None]]:
 
 
 async def test_revoke_and_reinstate_at_once_both_land(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         b = await memory.record(B, user_id="ops")
         x = await memory.record(X, user_id="ops")
         await memory.revoke(x, reason="r", actor="sec")
@@ -81,7 +81,7 @@ async def test_revoke_and_reinstate_at_once_both_land(monkeypatch: pytest.Monkey
 
 
 async def test_two_revokes_at_once_both_land(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         b = await memory.record(B, user_id="ops")
         x = await memory.record(X, user_id="ops")
 
@@ -104,7 +104,7 @@ async def test_record_does_not_commit_half_a_revocation(
 ) -> None:
     # A plain write in another task must not commit revoke's unfinished work.
     db = tmp_path / "e.db"
-    async with await Engram.open(str(db)) as memory:
+    async with await Engram.open(str(db), allow_default_scope=True) as memory:
         b = await memory.record(B, user_id="ops")
         gate = Gate()
         monkeypatch.setattr(memory._store, "_match_scope", gate.wrap(memory._store._match_scope))
@@ -121,7 +121,7 @@ async def test_record_does_not_commit_half_a_revocation(
 
 
 async def test_cancelled_revoke_leaves_nothing_behind(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         b = await memory.record(B, user_id="ops")
         c = await memory.record(f"Ticket 12 says: {B}", user_id="ops")
         gate = Gate()
@@ -141,7 +141,7 @@ async def test_cancelled_revoke_leaves_nothing_behind(monkeypatch: pytest.Monkey
 
 
 async def test_cancelled_reinstate_keeps_the_tombstone(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops")
         await memory.revoke(a, reason="r", actor="sec")
         gate = Gate()
@@ -158,7 +158,7 @@ async def test_cancelled_reinstate_keeps_the_tombstone(monkeypatch: pytest.Monke
 
 
 async def test_cancelled_erase_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops")
         gate = Gate()
         monkeypatch.setattr(memory._store, "_erase_in_tx", gate.wrap(memory._store._erase_in_tx))
@@ -177,7 +177,7 @@ async def test_cancelled_record_does_not_leak_revoked_text(
 ) -> None:
     # Cancelled after the fact row is written: if the half-written
     # fact were committed later, it would quote revoked text and be visible.
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         b = await memory.record(B, user_id="ops")
         await memory.revoke(b, reason="leaked", actor="sec")
         gate = Gate()
@@ -200,8 +200,8 @@ async def test_begin_immediate_serialises_writers_across_connections(tmp_path: P
     # one's "is it already revoked?" read is not protected, both insert, and
     # the fact ends up with two live tombstones.
     db = tmp_path / "e.db"
-    one = await Engram.open(str(db))
-    two = await Engram.open(str(db))
+    one = await Engram.open(str(db), allow_default_scope=True)
+    two = await Engram.open(str(db), allow_default_scope=True)
     try:
         a = await one.record(A, user_id="ops")
         reached, release = asyncio.Event(), asyncio.Event()
@@ -244,7 +244,7 @@ async def test_failed_rollback_after_a_second_cancel_is_logged(
     loop_errors: list[dict[str, Any]] = []
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         b = await memory.record(B, user_id="ops")
         gate = Gate()
         monkeypatch.setattr(memory._store, "_match_scope", gate.wrap(memory._store._match_scope))

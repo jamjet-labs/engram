@@ -260,7 +260,8 @@ async def serve_engram(
     from engram.server.http import build_http_app
     from engram.server.mcp import build_mcp_server
 
-    engram = await Engram.open(path=db_path)
+    # The server's contract reads a missing user_id or org_id as "default".
+    engram = await Engram.open(path=db_path, allow_default_scope=True)
     if engram._extract is None:
         logger.warning(
             "no LLM configured, so fact extraction is off: POST /v1/memory and "

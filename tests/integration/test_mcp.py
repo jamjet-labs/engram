@@ -20,7 +20,7 @@ def _have_mcp() -> bool:
 @pytest.mark.skipif(not _have_mcp(), reason="mcp package not installed")
 async def test_mcp_server_builds_and_lists_tools() -> None:
     """The MCP server registers expected tools and exposes them."""
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         server = build_mcp_server(memory, name="engram-test")
         # The MCP Server exposes its tools through `request_handlers`. We just
         # verify the server is constructed and has the expected name.
@@ -30,7 +30,7 @@ async def test_mcp_server_builds_and_lists_tools() -> None:
 @pytest.mark.skipif(not _have_mcp(), reason="mcp package not installed")
 async def test_mcp_record_and_recall_via_server() -> None:
     """Smoke test: build the server, then call its tool handlers directly."""
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         server = build_mcp_server(memory, name="engram-test")
 
         # Find the call_tool handler. mcp.server.Server stores handlers in

@@ -14,12 +14,15 @@ async def main() -> None:
     OpenAIEmbedding (see examples/02_extraction_with_ollama.py).
     """
     async with await Engram.open(":memory:") as memory:
-        await memory.record(text="Alice prefers espresso over drip.", user_id="alice")
-        await memory.record(text="Alice's brother lives in Tokyo.", user_id="alice")
-        await memory.record(text="Alice has a pet cat named Whiskers.", user_id="alice")
+        # A scoped handle names its org and user once. Its methods take no scope,
+        # so they cannot reach another one.
+        alice = memory.scoped(org_id="acme", user_id="alice")
+        await alice.record("Alice prefers espresso over drip.")
+        await alice.record("Alice's brother lives in Tokyo.")
+        await alice.record("Alice has a pet cat named Whiskers.")
 
         # Keyword-only query — FTS5 picks the espresso fact directly.
-        results = await memory.recall(query="espresso", user_id="alice", top_k=3)
+        results = await alice.recall("espresso", top_k=3)
         print("Top results for 'espresso':")
         for r in results:
             print(f"  [{r.score:.3f}] {r.fact.text}")

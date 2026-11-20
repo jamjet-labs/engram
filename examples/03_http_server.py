@@ -16,7 +16,10 @@ from engram.server.http import build_http_app
 
 
 async def _build_app() -> uvicorn.Server:
-    memory = await Engram.open("./engram.db")
+    # The v1 routes read a missing org or user id as "default", so the server
+    # needs an Engram opened with allow_default_scope=True. Your own code should
+    # leave it off and name a scope on every call.
+    memory = await Engram.open("./engram.db", allow_default_scope=True)
     # No token: anyone who can reach the port can read and write memory, so
     # bind to loopback only. Pass auth_token=... for anything else.
     app = build_http_app(memory, allow_unauthenticated=True)

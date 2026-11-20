@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from engram.errors import ExtractionError
+from engram.errors import ExtractionError, ScopeError
 from engram.llm.base import LLMClient, LLMMessage
 from engram.models import ChatMessage, Event
 from engram.scope import Scope
@@ -74,9 +74,16 @@ class EventExtractor:
         messages: list[ChatMessage],
         session_date: datetime | None = None,
     ) -> list[Event]:
+        """Events from one scope's messages, each in that scope.
+
+        Messages from more than one scope raise ScopeError before the LLM
+        call: every event would otherwise land in the first message's scope.
+        """
         if not messages:
             return []
         scope = messages[0].scope
+        if any(m.scope != scope for m in messages[1:]):
+            raise ScopeError("messages come from more than one scope; extract events per scope")
         turns = [{"role": m.role, "content": m.content} for m in messages]
         user_prompt = build_event_user_prompt(
             turns,

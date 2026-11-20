@@ -23,7 +23,22 @@ class Migration:
     statements: tuple[str, ...]
 
 
-MIGRATIONS: tuple[Migration, ...] = ()
+MIGRATIONS: tuple[Migration, ...] = (
+    # One erase epoch per scope. `erase_scope_residue` moves it in the
+    # erase's own transaction, and a write that carries a `ScopeWriteGuard`
+    # is refused if it has moved. A scope with no row is at epoch 0.
+    Migration(
+        version=3,
+        statements=(
+            """CREATE TABLE scope_state (
+                org_id      TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                erase_epoch INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (org_id, user_id)
+            )""",
+        ),
+    ),
+)
 
 SCHEMA_VERSION = BASELINE_VERSION + len(MIGRATIONS)
 

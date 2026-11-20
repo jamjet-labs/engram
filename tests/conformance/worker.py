@@ -17,6 +17,7 @@ the same work on two workers and start them together. Commands:
     {"op": "recall", "scope": [org, user], "query": "...", "top_k": 10}
     {"op": "revoke", "scope": [...], "id": "<uuid>", "reason": "...", "actor": "..."}
     {"op": "erase", "scope": [...], "id": "<uuid>", "reason": "...", "actor": "..."}
+    {"op": "erase_all", "scope": [...], "reason": "...", "actor": "..."}  -> {"erased": n}
     {"op": "wait", "seconds": 0.5}
     {"op": "go", "at": <time.time() seconds, optional>}
 
@@ -30,7 +31,9 @@ here, in test code; production code carries no hooks:
     migration-step       after a test-only migration ran, before the open commits
                          (the worker adds that migration; see injected_migration)
     fact-row-written     after a fact row was inserted, before its commit
-    erase-before-commit  after the erase deleted its rows, before its commit
+    erase-before-commit  after the erase deleted its rows, before its commit: a
+                         fact's erase, or the scope-wide erase once it has also
+                         moved the erase epoch
 """
 
 from __future__ import annotations
@@ -93,12 +96,18 @@ def install_crash(label: str) -> None:
         SqliteStore._drop_stale_matches = drop_then_die  # type: ignore[method-assign]
     elif label == "erase-before-commit":
         real_erase = SqliteStore._erase_in_tx
+        real_bump = SqliteStore._bump_erase_epoch
 
         async def erase_then_die(self: SqliteStore, *args: Any, **kw: Any) -> Any:
             await real_erase(self, *args, **kw)
             _die()
 
+        async def bump_then_die(self: SqliteStore, *args: Any, **kw: Any) -> None:
+            await real_bump(self, *args, **kw)
+            _die()
+
         SqliteStore._erase_in_tx = erase_then_die  # type: ignore[method-assign]
+        SqliteStore._bump_erase_epoch = bump_then_die  # type: ignore[method-assign]
     else:
         raise SystemExit(f"unknown crash label {label!r}; known: {', '.join(CRASH_LABELS)}")
 
@@ -137,6 +146,11 @@ class Worker:
                 UUID(cmd["id"]), reason=cmd["reason"], actor=cmd["actor"], user_id=user, org_id=org
             )
             return None
+        if op == "erase_all":
+            n = await e.erase_user(
+                user_id=user, org_id=org, reason=cmd["reason"], actor=cmd["actor"]
+            )
+            return {"erased": n}
         raise ValueError(f"unknown op {op!r}")
 
     async def answer(self, cmd: dict[str, Any]) -> None:

@@ -125,13 +125,13 @@ async def test_mcp_recall_can_include_provenance(open_memory: OpenMemory) -> Non
 async def test_pre_0_3_databases_are_backfilled_on_open(tmp_path: Path) -> None:
     """Rows written before fact_meta existed still get content tombstones applied."""
     db = tmp_path / "old.db"
-    async with await Engram.open(db) as memory:
+    async with await Engram.open(db, allow_default_scope=True) as memory:
         f = await memory.record("legacy claim", user_id="u")
     # Simulate a pre-0.3 database: drop the governance side tables.
     async with aiosqlite.connect(str(db)) as conn:
         await conn.execute("DELETE FROM fact_meta")
         await conn.commit()
-    async with await Engram.open(db) as memory:
+    async with await Engram.open(db, allow_default_scope=True) as memory:
         p = await memory.explain(f.id, user_id="u")
         assert p is not None
         assert p.source == "legacy"

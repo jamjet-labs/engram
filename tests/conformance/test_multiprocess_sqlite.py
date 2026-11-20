@@ -137,9 +137,22 @@ def fact_count(target: str) -> int:
 def db_digest(target: str) -> str:
     """The data the file holds, independent of WAL checkpoints."""
     parts = []
-    for table in ("schema_version", "facts", "fact_meta", "messages", "revocations", "erasures"):
+    tables = (
+        "schema_version",
+        "facts",
+        "fact_meta",
+        "messages",
+        "revocations",
+        "erasures",
+        "scope_state",
+    )
+    for table in tables:
         parts.append(repr(rows(target, f"SELECT * FROM {table} ORDER BY 1")))
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+
+def epochs(target: str) -> list[tuple[Any, ...]]:
+    return rows(target, "SELECT org_id, user_id, erase_epoch FROM scope_state ORDER BY 1, 2")
 
 
 async def two_workers_record(
@@ -289,6 +302,37 @@ async def test_crash_before_the_erase_commits_keeps_the_fact(
 
     assert db_digest(target) == before
     assert fact_count(target) == 1
+
+
+async def test_crash_before_the_scope_erase_commits_keeps_the_turns_and_the_epoch(
+    backend: Backend, tmp_path: Path
+) -> None:
+    """The scope-wide erase and its epoch move in one commit, or neither moves."""
+    target = await new_file(backend, tmp_path)
+    seed = await Engram.open(target)
+    try:
+        await seed.record_message(
+            "Alice's locker code is 4417.", session_id="s1", user_id="alice", org_id="acme"
+        )
+    finally:
+        await seed.close()
+    before = db_digest(target)
+    assert epochs(target) == []
+
+    async with start_workers(target, "erase-before-commit") as (crasher,):
+        await crasher.send(op="erase_all", scope=ACME, reason="asked to", actor="admin")
+        assert await crasher.reply() == {"closed": True}
+        assert await asyncio.wait_for(crasher.proc.wait(), 30) == CRASH_EXIT_CODE
+
+    assert db_digest(target) == before
+    assert epochs(target) == []
+
+    # Without the crash, the turn goes and the epoch moves.
+    async with start_workers(target, None) as (w,):
+        done = await w.call(op="erase_all", scope=ACME, reason="asked to", actor="admin")
+    assert done["ok"] and done["result"] == {"erased": 0}, done
+    assert rows(target, "SELECT count(*) FROM messages") == [(0,)]
+    assert epochs(target) == [("acme", "alice", 1)]
 
 
 async def test_read_only_process_sees_a_writers_commits(backend: Backend, tmp_path: Path) -> None:

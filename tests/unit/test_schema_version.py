@@ -15,6 +15,7 @@ import pytest
 
 from engram.errors import StoreError
 from engram.store.sqlite import SCHEMA_VERSION, SqliteStore
+from engram.store.sqlite_migrations import BASELINE_VERSION
 
 
 def _versions(path: Path) -> list[int]:
@@ -37,7 +38,8 @@ async def test_database_from_a_0_2_library_opens_and_is_upgraded(tmp_path: Path)
         conn.execute("INSERT INTO schema_version VALUES (1)")
     store = await SqliteStore.open(db)
     await store.close()
-    assert _versions(db) == [1, SCHEMA_VERSION]
+    # 0.2's row, the baseline's, then one per numbered migration.
+    assert _versions(db) == [1, *range(BASELINE_VERSION, SCHEMA_VERSION + 1)]
 
 
 async def test_newer_database_is_refused_before_anything_is_written(tmp_path: Path) -> None:

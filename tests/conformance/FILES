@@ -18,3 +18,10 @@ tests/unit/test_temporal_solver.py
 tests/unit/test_tools.py
 tests/unit/test_sqlite_store.py
 tests/property/test_store_props.py
+tests/unit/test_store_legacy_v1.py
+tests/unit/test_engram_legacy_v1.py
+tests/integration/test_erase_race.py
+tests/unit/test_erase_large_id_sets.py
+tests/unit/test_erase_epoch.py
+tests/conformance/test_hostile_scopes.py
+tests/unit/test_refused_scopes.py

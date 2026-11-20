@@ -11,10 +11,11 @@
 from engram import Engram
 
 async with await Engram.open(":memory:") as memory:
-    await memory.record("Alice prefers espresso over drip.", user_id="alice", role="user")
-    await memory.record("Alice's brother lives in Tokyo.",   user_id="alice", role="user")
+    alice = memory.scoped(org_id="acme", user_id="alice")
+    await alice.record("Alice prefers espresso over drip.", role="user")
+    await alice.record("Alice's brother lives in Tokyo.",   role="user")
 
-    results = await memory.recall(query="what does alice drink?", user_id="alice", top_k=1)
+    results = await alice.recall("what does alice drink?", top_k=1)
     print(results[0].fact.text)
     #  Alice prefers espresso over drip.
 ```
@@ -29,7 +30,7 @@ There are several memory libraries for agents already ([Mem0](https://github.com
 
 **1. Mode-aware reading.** Most memory layers do one thing: retrieve facts that match your query. Engram ships two distinct read paths: `Reader(mode="recall")` for "what did the user say about X?" and `Reader(mode="synthesis")` for "recommend something based on the user's preferences." On LongMemEval-S, this lifts `single-session-preference` accuracy from 29% to 71%.
 
-**2. Scoped by user and org.** Every API takes `user_id` + `org_id` (a `Scope`). Facts, vectors, and chat messages are partitioned at the SQL and HNSW levels, so a query in one scope does not return another scope's rows. The scope is a partition, not an access check: the caller names it, and over HTTP or MCP anyone holding the server token can name any scope. To keep tenants apart, run one server per tenant. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
+**2. Scoped by user and org.** `memory.scoped(org_id=..., user_id=...)` returns a `ScopedEngram`. It names its scope once, its methods take no scope, and no call on it can read or write another one. A fact, message or event that comes back from another scope raises `ScopeError` instead of being returned, and a fact id from another scope reads like an unknown id. In the library that is a hard boundary. Over HTTP or MCP it is not one: the request names the scope, so anyone holding the server token can name any scope. To keep tenants apart, run one server per tenant. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 **3. Local-first OR cloud.** Pluggable providers for both LLM (Ollama / OpenAI / Anthropic) and embeddings (Ollama / OpenAI / synthetic). Run completely offline with `nomic-embed-text` + `llama3.2:3b`, or swap in cloud providers when you need throughput.
 
@@ -68,11 +69,12 @@ from engram import Engram
 
 async def main():
     async with await Engram.open(":memory:") as memory:
-        await memory.record("user prefers oat milk", user_id="alice")
-        await memory.record("user drinks coffee twice a day", user_id="alice")
-        await memory.record("user's dog is named Whiskey", user_id="alice")
+        alice = memory.scoped(org_id="acme", user_id="alice")
+        await alice.record("user prefers oat milk")
+        await alice.record("user drinks coffee twice a day")
+        await alice.record("user's dog is named Whiskey")
 
-        results = await memory.recall(query="coffee", user_id="alice", top_k=3)
+        results = await alice.recall("coffee", top_k=3)
         for r in results:
             print(f"  [{r.score:.2f}]  {r.fact.text}")
 
@@ -82,11 +84,7 @@ asyncio.run(main())
 ### Build a context window for an LLM
 
 ```python
-ctx = await memory.context(
-    query="what should I order at the cafe?",
-    user_id="alice",
-    token_budget=2000,
-)
+ctx = await alice.context("what should I order at the cafe?", token_budget=2000)
 # ctx is a newline-joined string ready to drop into a system prompt
 ```
 
@@ -102,17 +100,18 @@ tier = ModelTier.default()  # gpt-4o-mini
 classifier = RuleBasedClassifier()
 
 async with await Engram.open(":memory:", tier=tier) as memory:
+    alice = memory.scoped(org_id="acme", user_id="alice")
     for turn in conversation_history:
-        await memory.record(text=turn["content"], role=turn["role"], user_id="alice")
+        await alice.record(turn["content"], role=turn["role"])
 
     question = "Recommend a movie for tonight"
     qt = await classifier.classify(question)
 
     if is_preference_question(question, qt):
-        ctx = await memory.context(query=question, user_id="alice", role_filter=("user",))
+        ctx = await alice.context(question, role_filter=("user",))
         reader = Reader(tier.reader, mode="synthesis")
     else:
-        ctx = await memory.context(query=question, user_id="alice", classifier=classifier)
+        ctx = await alice.context(question, classifier=classifier)
         reader = Reader(tier.reader)
 
     res = await reader.read(question=question, context=ctx)
@@ -224,18 +223,18 @@ The routes, status codes and JSON keys follow the Rust v0.5.x server. These diff
 - `GET /v1/memory/search` is hybrid recall, not keyword-only, and its hits carry `confidence`.
 - `tier` values are `working`, `episodic`, `semantic` and `archival`.
 - `POST /v1/memory/context` accepts `format` and ignores it, and has no `tier_breakdown`. `token_count` is an estimate of about 4 characters per token.
-- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200), and a `reason` over 1000 characters returns 422.
-- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
+- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. As in Rust, it takes `?org_id=` (default `default`) and `?user_id=`. A fact outside that org, or outside that user's scope when one is given, returns 404, and so does an unknown id (Rust returned 200 for that). A `reason` over 1000 characters returns 422.
+- `GET /v1/memory/stats` counts the org in `?org_id=` (default `default`), or one user in it with `?user_id=`, and returns both ids, as Rust does. It has no `total_entities` or `total_relationships`.
 - `POST /v1/memory/consolidate` returns 501. The Python engine has no consolidation.
-- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It never returns success unless the erase finished: 409 if the erase is refused, 503 if a fact was written while it ran (calling again finishes it), and 500 for a storage error.
-- A request without `user_id` uses the user `default`. Rust used the whole org there, which this server has no equivalent for.
+- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It takes the org in an optional JSON body, `{"org_id": "acme"}`, default `default`, where Rust took `?org_id=`. A body with any other key returns 422. It never returns success unless the erase finished: 409 if the erase is refused, 503 if a fact was written while it ran (calling again finishes it), and 500 for a storage error.
+- Without `user_id`, forget and stats act on the whole org, as in Rust. Every other route uses the user `default`, where Rust used the whole org.
+- An empty or blank `user_id` or `org_id` returns 400 on every route, and nothing is done. Only a missing id means `default`.
 - The message routes are scoped to `(org_id, user_id)`. Rust filtered on `org_id` alone.
 - Message `role` must be `user`, `assistant`, `system` or `tool`. Rust accepted any string.
 - Message `metadata` is accepted and not stored, and comes back as `{}`.
 - `seq` is a turn's 0-based position among the conversation's visible turns, oldest first. Rust stored the index within each save call.
 - `GET /v1/memory/messages` lists conversations by first turn. Rust listed them by id.
 - `GET /v1/memory/messages/{id}` for an unknown conversation returns 200 with an empty list.
-- `DELETE /v1/memory/messages/{id}` with an empty `user_id` or `org_id` returns 400 instead of using the `default` scope.
 - A request that fails validation (a missing field, a wrong type, a value out of range) returns 422 with FastAPI's `{"detail": ...}` body. Rust returned 400 with `{"error": ...}`.
 
 The module docstring of `src/engram/server/legacy_v1.py` is the full list.
@@ -244,7 +243,7 @@ The module docstring of `src/engram/server/legacy_v1.py` is the full list.
 
 The published Java client puts the conversation id in the message paths with `URLEncoder`, which writes a space as `+` and a `/` as `%2F`. To match it, the message routes read `+` as a space and `%2B` as a plus. Other clients should send a space as `%20` and a plus as `%2B`. Conversation ids may contain `/`.
 
-The client puts the user id in `DELETE /v1/memory/users/{id}` without encoding it. That route refuses any query string with 400, so `deleteUser("bob?x=1")` erases nothing rather than erasing `bob`. The server cannot catch a `#`: the client drops it and the rest of the id before sending, so `deleteUser("bob#1234")` erases `bob`. An id that ends in `?` arrives cut short in the same way. The server also decodes percent escapes in the path, and the client sends `%` as is, so `deleteUser("a%2Fb")` erases the user `a/b`. Keep `?`, `#` and `%` out of user ids when you use this client.
+The client puts the user id in `DELETE /v1/memory/users/{id}` without encoding it. That route refuses any query string with 400, so `deleteUser("bob?x=1")` erases nothing rather than erasing `bob`. For the same reason the route reads the org from the body and not from `?org_id=`, which could be part of the id. The server cannot catch a `#`: the client drops it and the rest of the id before sending, so `deleteUser("bob#1234")` erases `bob`. An id that ends in `?` arrives cut short in the same way. The server also decodes percent escapes in the path, and the client sends `%` as is, so `deleteUser("a%2Fb")` erases the user `a/b`. Keep `?`, `#` and `%` out of user ids when you use this client.
 
 ### Forgetting and conversations
 
@@ -256,21 +255,22 @@ Deleting a user with a very large history can take long enough to time out over 
 
 ### One token, one trust domain
 
-Any token holder can forget a fact by id in any scope. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
+Forget, stats and delete user reach only the org a request names, and only the user when it names one. But the request picks both, so any token holder can still reach any scope. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 ## Revocation, erasure and provenance
 
 A 2026 study of five agent-memory systems found that none enforced revocation by default: the revoked fact was still returned, ranked above its replacement, and led agents to the unsafe action ([Shen, Toyoda, Leung, "Revoked but Still Authoritative", arXiv 2609.08258](https://arxiv.org/abs/2609.08258)). `tests/unit/test_revocation.py` reproduces that scenario against this library.
 
 ```python
-old = await memory.record("Production deploys need approval from one reviewer.", user_id="ops")
-new = await memory.record("Production deploys need approval from two reviewers.", user_id="ops")
+ops = memory.scoped(org_id="acme", user_id="ops")
+old = await ops.record("Production deploys need approval from one reviewer.")
+new = await ops.record("Production deploys need approval from two reviewers.")
 
-await memory.supersede(old.id, new.id, user_id="ops", actor="sec-team", reason="policy v2")
+await ops.supersede(old.id, new.id, actor="sec-team", reason="policy v2")
 # or, with no replacement:
-# await memory.revoke(old, reason="policy withdrawn", actor="sec-team", user_id="ops")
+# await ops.revoke(old, reason="policy withdrawn", actor="sec-team")
 
-hits = await memory.recall("deploy approval reviewers", user_id="ops")
+hits = await ops.recall("deploy approval reviewers")
 # only the two-reviewer policy comes back, from recall, context, tools, HTTP and MCP
 ```
 
@@ -291,6 +291,8 @@ Query-time re-extraction and `extract()` drop any fact a tombstone would withhol
 **What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Over HTTP, `DELETE /v1/memory/facts/{id}` revokes a fact and `DELETE /v1/memory/users/{id}` erases everything held for a user. Supersede, reinstate and erasing one fact by id are Python API only in this release. The HTTP server has one shared token and no per-caller identity, so these routes record the server as the actor (`restv1` for forget, `restv1x` and a random token for delete user), not who called. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
 
 **Older and newer libraries.** 0.2 has no version check, so nothing stops it from opening a 0.3 database and ignoring every tombstone. Keep 0.2 processes away from a file once 0.3 has written to it. From 0.3 on, the database records its schema version (2), and a library refuses to open a file written by a newer schema, before writing anything to it.
+
+**Scope ids from 0.2.** 0.2 took any id of 1 to 128 characters, so a 0.2 database can hold memory under an id the rules now refuse, such as `"alice "` with a trailing space or an id with a control character. No call that names a scope accepts such an id, `erase_user` included. After upgrading, run `await memory.refused_scopes()` once: it lists each such `(org_id, user_id)`. Erase one with `await memory.erase_refused_scope(org_id=..., user_id=..., reason=..., actor=...)`, passing the ids as listed. It erases the scope as `erase_user` does, and refuses ids the rules accept.
 
 **Erasure.** `Engram.erase(fact, actor=..., reason=...)` deletes, in one write transaction held from discovery to commit, the fact; every fact in its scope that equals or quotes it (same matching rule as above), and facts derived from any of them, repeated until nothing new is found; events listing them or quoting an erased text; the transcript turns they cite or that quote an erased text; and the free text of any tombstone or reinstatement note that quotes it. A short text such as a single word only matches on equality, so erasing "Paris" does not delete every turn that mentions Paris. FTS rows go with their base rows. The vector index for the scope is rebuilt without the erased vectors. It returns an `ErasureRecord` with ids, counts, actor and reason, and no content. A reason or actor containing any three-token run of an erased text is rejected; a single distinctive word can still get through, so keep audit fields to ticket numbers and roles.
 
@@ -335,7 +337,8 @@ Engram works fine standalone if you're not using JamJet. But if you're building 
 
 | Concept | What it is | Why you care |
 |---|---|---|
-| **`Scope`** | `(org_id, user_id)` pair attached to every fact | Partitions every read at the SQL and vector index layer. The caller picks it, so it is not an access check; see [Tenancy](#tenancy-one-token-is-one-trust-domain). |
+| **`Scope`** | `(org_id, user_id)` pair attached to every fact | Partitions every read at the SQL and vector index layer. Each id is 1 to 128 characters, with no control characters and no leading or trailing space. |
+| **`ScopedEngram`** | A handle from `memory.scoped(org_id=..., user_id=...)` | Its methods take no scope and cannot reach another one. Use it for all per-user work. Over HTTP the caller still names the scope; see [Tenancy](#tenancy-one-token-is-one-trust-domain). |
 | **`Fact`** | Pydantic model: text, scope, validity window, confidence, optional event_date / session_id / role / metadata | The unit of memory. Versioned via `supersede`, scored at retrieval, governed by per-tenant scope. |
 | **`Engram`** | Async facade over store + embedder + retriever + (optional) extractor + (optional) tier | The thing you actually call. `record()`, `recall()`, `context()`, `extract()`. |
 | **`Reader`** | LLM-driven answer generator with two modes: `"recall"` (verifier-gated fact recall) and `"synthesis"` (recommendation grounded in user preferences) | The mode you pick changes the whole pipeline — verifier on or off, tool loop or not, recall prompt or synthesis prompt. |
@@ -416,7 +419,7 @@ The benchmark history (visible in `CHANGELOG.md`) documents two ablation program
 
 ## Running in production
 
-**Scope isolation.** Every API call takes `user_id` + `org_id` (combined into a `Scope`). Facts, vectors, and chat-message storage are partitioned by scope at the SQL and HNSW levels, so a read in one scope does not return another scope's rows. Engram does not check who is asking for a scope. In-process, your code decides; over HTTP and MCP, the scope comes from the request, so every token holder can read and write every scope. Separate tenants with separate servers, as described under [Tenancy](#tenancy-one-token-is-one-trust-domain).
+**Scope isolation.** Facts, vectors, messages and events are partitioned by `(org_id, user_id)` at the SQL and HNSW levels. In the library, a `ScopedEngram` cannot reach another scope: it has no argument that names one, ids are compared whole (a quote, `%`, `_` or a longer id never matches another scope), and anything a store returns from another scope raises `ScopeError`. A root `Engram` call without a scope raises `ScopeRequiredError`, unless you opened it with `allow_default_scope=True`, which treats a missing id as `"default"` as 0.2 did. Over HTTP and MCP the scope comes from the request, so every token holder can read and write every scope. Separate tenants with separate servers, as described under [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 **Embedding provider tradeoffs.** `OllamaEmbedding` runs entirely local (private, free, slower) — recommended for sensitive data or offline usage. `OpenAIEmbedding` is faster and more accurate but sends every recorded text to OpenAI. `SyntheticEmbedding` is for tests only.
 
@@ -501,7 +504,7 @@ docker run -d --name engram-globex \
   ghcr.io/jamjet-labs/engram-py-server:0.3.0
 ```
 
-Give each tenant only its own URL and token. Within one tenant, `user_id` and `org_id` still partition reads, but they are labels your application sets, not a security boundary.
+Give each tenant only its own URL and token. Within one tenant, `user_id` and `org_id` still partition reads, but the request sets them, so over HTTP they are not a security boundary. In the library, a `ScopedEngram` is one.
 
 ### Stdio transport
 

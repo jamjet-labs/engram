@@ -22,10 +22,10 @@ from engram.embedding.synthetic import SyntheticEmbedding
 async def main():
     embedder = SyntheticEmbedding(dim=128)  # toy embedder; use Ollama/OpenAI for real use
     async with await Engram.open(":memory:", embedder=embedder) as memory:
-        await memory.record(text="alice has a cat named Luna", user_id="alice")
-        await memory.record(text="alice loves Italian food", user_id="alice")
+        await memory.record(text="alice has a cat named Luna", user_id="alice", org_id="acme")
+        await memory.record(text="alice loves Italian food", user_id="alice", org_id="acme")
 
-        ctx = await memory.context(query="what does alice like to eat?", user_id="alice")
+        ctx = await memory.context(query="what does alice like to eat?", user_id="alice", org_id="acme")
         print(ctx)
 
 asyncio.run(main())
@@ -48,11 +48,12 @@ async def main():
     classifier = RuleBasedClassifier()
 
     async with await Engram.open(":memory:", embedder=embedder) as memory:
-        await memory.record(text="alice met Bob in Paris in 2019", user_id="alice")
+        await memory.record(text="alice met Bob in Paris in 2019", user_id="alice", org_id="acme")
 
         ctx = await memory.context(
             query="when did alice meet Bob?",
             user_id="alice",
+            org_id="acme",
             classifier=classifier,    # auto-picks budget for temporal-reasoning
         )
         print(ctx)
@@ -94,6 +95,7 @@ async def main():
                 text=turn["content"],
                 role=turn["role"],
                 user_id="alice",
+                org_id="acme",
                 session_id="s1",
             )
 
@@ -106,17 +108,18 @@ async def main():
             ctx = await memory.context(
                 query=question,
                 user_id="alice",
+                org_id="acme",
                 role_filter=("user",),    # only USER turns surface
                 token_budget=2000,
             )
             reader = Reader(tier.reader, mode="synthesis")
             res = await reader.read(question=question, context=ctx)
         else:
-            ctx = await memory.context(query=question, user_id="alice", classifier=classifier)
+            ctx = await memory.context(query=question, user_id="alice", org_id="acme", classifier=classifier)
             reader = Reader(tier.reader)
             res = await reader.read(
                 question=question, context=ctx,
-                scope=Scope(org_id="default", user_id="alice"),
+                scope=Scope(org_id="acme", user_id="alice"),
             )
 
         print(res.answer)

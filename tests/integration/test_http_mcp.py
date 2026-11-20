@@ -56,7 +56,7 @@ async def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator
     yielding to the test. The background task is cancelled on teardown.
     """
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
-    engram = await Engram.open(path=str(tmp_path / "engram.db"))
+    engram = await Engram.open(path=str(tmp_path / "engram.db"), allow_default_scope=True)
     lifespan_task: asyncio.Task[None] | None = None
     try:
         mcp_server = build_mcp_server(engram, name="engram-test")

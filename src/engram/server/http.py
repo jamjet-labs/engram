@@ -170,7 +170,9 @@ def build_http_app(
     """Build a FastAPI app bound to a single Engram instance.
 
     Args:
-        engram: The Engram instance to serve.
+        engram: The Engram instance to serve. Open it with
+            ``allow_default_scope=True``: the routes read a missing
+            `user_id` or `org_id` as "default".
         mcp_server: Optional MCP `Server` (e.g. from `build_mcp_server`). If
             provided, a Streamable HTTP MCP endpoint is mounted at `/mcp`.
         auth_token: Bearer token required on every route, `/v1/*` and `/mcp`
@@ -196,8 +198,9 @@ def build_http_app(
 
     Raises:
         ValueError: neither `auth_token` nor `allow_unauthenticated=True` was
-            given, `auth_token` is not a usable token, or an allowed origin or
-            host is malformed.
+            given, `auth_token` is not a usable token, an allowed origin or
+            host is malformed, or `engram` was opened without
+            ``allow_default_scope=True``.
     """
     # A truthy string such as "false" from a config file must not open the app.
     if not isinstance(allow_unauthenticated, bool):
@@ -299,11 +302,17 @@ def build_http_app(
             raise HTTPException(status_code=409, detail=str(e)) from e
         return _RecordResponse(fact_id=fact.id, text=fact.text)
 
+    async def recall_or_400(query: str, user_id: str, org_id: str, top_k: int) -> list[ScoredFact]:
+        # An id Engram refuses (empty, blank or not a scope id) is 400, raised
+        # before anything is read.
+        try:
+            return await engram.recall(query=query, user_id=user_id, org_id=org_id, top_k=top_k)
+        except ValueError as e:
+            raise _bad_input(e) from e
+
     @app.post("/v1/memory/search", response_model=_SearchResponse)
     async def search(req: _SearchRequest) -> _SearchResponse:
-        results = await engram.recall(
-            query=req.query, user_id=req.user_id, org_id=req.org_id, top_k=req.top_k
-        )
+        results = await recall_or_400(req.query, req.user_id, req.org_id, req.top_k)
         return _SearchResponse(hits=[_hit(sf) for sf in results])
 
     @app.post("/v1/memory/recall_with_provenance", response_model=_ProvenanceSearchResponse)
@@ -313,9 +322,7 @@ def build_http_app(
         A separate route so the /search and /recall shapes stay identical to
         Rust v0.5.x for existing clients.
         """
-        results = await engram.recall(
-            query=req.query, user_id=req.user_id, org_id=req.org_id, top_k=req.top_k
-        )
+        results = await recall_or_400(req.query, req.user_id, req.org_id, req.top_k)
         return _ProvenanceSearchResponse(
             hits=[
                 _ProvenanceHit(**_hit(sf).model_dump(), provenance=sf.provenance)
@@ -338,9 +345,7 @@ def build_http_app(
         text = query if query is not None else q
         if text is None:
             raise HTTPException(status_code=422, detail="query (or q) is required")
-        found = await engram.recall(
-            query=text, user_id=user_id, org_id=org_id, top_k=top_k or max_results or 10
-        )
+        found = await recall_or_400(text, user_id, org_id, top_k or max_results or 10)
         results = [fact_json(sf) for sf in found]
         return {
             "hits": [_hit(sf).model_dump(mode="json") for sf in found],
@@ -364,25 +369,29 @@ def build_http_app(
         org_id: str = "default",
         token_budget: int = 2000,
     ) -> _ContextResponse:
-        ctx = await engram.context(
-            query=query, user_id=user_id, org_id=org_id, token_budget=token_budget
-        )
+        try:
+            ctx = await engram.context(
+                query=query, user_id=user_id, org_id=org_id, token_budget=token_budget
+            )
+        except ValueError as e:  # an id Engram refuses, before anything is read
+            raise _bad_input(e) from e
         return _ContextResponse(context=ctx)
 
     @app.post("/v1/memory/extract", response_model=_ExtractResponse)
     async def extract(req: _ExtractRequest) -> _ExtractResponse:
-        scope = Scope(org_id=req.org_id, user_id=req.user_id)
-        msgs = [
-            ChatMessage(
-                scope=scope,
-                session_id=m.session_id,
-                role=m.role,
-                content=m.content,
-                timestamp=m.timestamp or datetime.now().astimezone(),
-            )
-            for m in req.messages
-        ]
         try:
+            # Scope refuses an empty or blank id before the LLM sees anything.
+            scope = Scope(org_id=req.org_id, user_id=req.user_id)
+            msgs = [
+                ChatMessage(
+                    scope=scope,
+                    session_id=m.session_id,
+                    role=m.role,
+                    content=m.content,
+                    timestamp=m.timestamp or datetime.now().astimezone(),
+                )
+                for m in req.messages
+            ]
             facts = await engram.extract(msgs, session_date=req.session_date, persist=req.persist)
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e

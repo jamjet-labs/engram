@@ -4,15 +4,14 @@ SQLite refuses a statement with more than 32,766 variables. These tests lower
 that limit on the write connection, so a set a little over it is enough to
 show a statement that binds one "?" per id. The last test builds the real
 size, 33,000 turns quoting one fact, with direct inserts (about 2 seconds).
+The limit is SQLite's, so every test here runs on the SQLite backends only.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import uuid4
 
 import aiosqlite
@@ -21,6 +20,9 @@ import pytest
 from engram import Engram
 from engram.models import Event
 from engram.scope import Scope
+from tests.conformance.backends import OpenMemory
+
+pytestmark = pytest.mark.sqlite_only
 
 ALICE = Scope(org_id="default", user_id="alice")
 T = datetime(2026, 11, 10, tzinfo=UTC)
@@ -30,9 +32,8 @@ ADDRESS = "alice's home address is 12 Main Street"
 
 
 @pytest.fixture
-async def memory(tmp_path: Path) -> AsyncIterator[Engram]:
-    async with await Engram.open(tmp_path / "e.db") as m:
-        yield m
+async def memory(open_memory: OpenMemory) -> Engram:
+    return await open_memory()
 
 
 async def _lower_variable_limit(memory: Engram, n: int = LIMIT) -> None:

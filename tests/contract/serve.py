@@ -2,6 +2,9 @@
 
 A scripted LLM stands in for extraction, so the test needs no API key. Each
 extraction call returns one fact that names its call number.
+
+ENGRAM_CONTRACT_TARGET picks the store: a SQLite file path, or ":memory:"
+(the default).
 """
 
 from __future__ import annotations
@@ -44,7 +47,8 @@ class CountingLLM:
 async def main() -> None:
     token = os.environ["ENGRAM_AUTH_TOKEN"]
     port = int(os.environ.get("ENGRAM_PORT", "18765"))
-    memory = await Engram.open(":memory:", llm=CountingLLM())
+    target = os.environ.get("ENGRAM_CONTRACT_TARGET", ":memory:")
+    memory = await Engram.open(target, llm=CountingLLM(), allow_default_scope=True)
     app = build_http_app(memory, auth_token=token)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
     try:

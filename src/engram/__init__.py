@@ -14,6 +14,7 @@ from engram.errors import (
     NotFoundError,
     ReadOnlyStoreError,
     SchemaVersionError,
+    ScopeRequiredError,
     StoreError,
 )
 from engram.governance import ErasureRecord, Provenance, Revocation, RevokedContentError
@@ -23,6 +24,7 @@ from engram.read.preference_gate import is_preference_question
 from engram.read.reader import Reader, ReaderConfig
 from engram.retrieve.base import RetrievalConfig
 from engram.scope import Scope
+from engram.scoped import ScopedEngram
 from engram.tools.base import Tool, ToolRegistry, ToolResult
 
 __all__ = [
@@ -49,6 +51,8 @@ __all__ = [
     "RuleBasedClassifier",
     "SchemaVersionError",
     "Scope",
+    "ScopeRequiredError",
+    "ScopedEngram",
     "StoreError",
     "Tool",
     "ToolRegistry",
