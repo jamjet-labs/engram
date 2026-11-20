@@ -284,3 +284,27 @@ class EngramStore(Protocol):
     async def scope_guard(self, scope: Scope) -> ScopeWriteGuard:
         """The scope's erase epoch as of the latest commit; 0 if it was never erased. A read."""
         ...
+
+    # ── Embedder identity ────────────────────────────────────────────────
+    #
+    # One key per store: the `EmbedderIdentity.key` of the embedder its
+    # vectors come from. `Engram.open` records it on a writable open and
+    # refuses an open with another, so vectors from two embedders never mix.
+
+    @abstractmethod
+    async def embedder_key(self) -> str | None:
+        """The embedder key the store records, as of the latest commit; None if none. A read."""
+        ...
+
+    @abstractmethod
+    async def set_embedder_key(self, key: str, *, replace: bool) -> None:
+        """Record ``key`` as the store's embedder. Check and write are one transaction.
+
+        No key recorded: records it. The same key: does nothing. Another key:
+        with ``replace=False`` raises EmbedderMismatchError naming both keys
+        and writes nothing; with ``replace=True`` replaces it. So of two
+        processes that record different keys at once, one wins and the other
+        is refused. ``key`` is checked like other text (blank or NUL is a
+        ValueError); ``replace`` must be a bool (TypeError).
+        """
+        ...

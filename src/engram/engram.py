@@ -14,11 +14,11 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from engram.classify.base import QuestionClassifier
-from engram.embedding.base import EmbeddingProvider
+from engram.embedding.base import EmbeddingProvider, embedder_identity
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.errors import (
     ReadOnlyStoreError,
@@ -42,18 +42,38 @@ from engram.retrieve.hybrid import HybridRetriever
 from engram.scope import Scope, ScopeWriteGuard, is_refused, stored_scope
 from engram.scoped import ScopedEngram, _event_extraction, _extraction
 from engram.scoped import context_lines as context_lines
+from engram.store import _rules
 from engram.store.base import EngramStore
 from engram.store.open import open_store
 from engram.vector.hnsw import HnswVectorStore
 
 _DEFAULT_ID = "default"
 _MAX_ID_LENGTH = 128  # Scope's limit, and 0.2's
+_EMBEDDER_CHANGES = ("refuse", "switch")
 
 
 def _check_allow_default_scope(value: object) -> None:
     # A truthy string such as "false" from a config file must not widen anything.
     if not isinstance(value, bool):
         raise TypeError("allow_default_scope must be True or False")
+
+
+def _check_on_embedder_change(value: object) -> None:
+    if not isinstance(value, str) or value not in _EMBEDDER_CHANGES:
+        raise ValueError("on_embedder_change must be 'refuse' or 'switch'")
+
+
+async def _hold_store_to_embedder(store: EngramStore, key: str, *, switch: bool) -> None:
+    """Record the embedder key in a writable store, or refuse another one.
+
+    A writable store checks and records in one transaction
+    (`EngramStore.set_embedder_key`). A read-only store writes nothing: a
+    recorded key that differs is refused, and no key is fine.
+    """
+    if store.read_only:
+        _rules.check_embedder_key(await store.embedder_key(), key, replace=False)
+    else:
+        await store.set_embedder_key(key, replace=switch)
 
 
 def _check_given_ids(user_id: str | None, org_id: str | None) -> None:
@@ -144,6 +164,7 @@ class Engram:
         store: EngramStore | None = None,
         read_only: bool = False,
         allow_default_scope: bool = False,
+        on_embedder_change: Literal["refuse", "switch"] = "refuse",
     ) -> Engram:
         """Open an Engram instance on a store, with an in-memory HNSW index.
 
@@ -152,9 +173,23 @@ class Engram:
         - store: an open store to use instead of ``path``: any object that
           meets `engram.store.EngramStore`. The Engram owns it from then on,
           and `close()` closes it. Passing a ``path`` as well is a ValueError.
+          If ``open`` raises, the store stays open and the caller keeps it.
         - read_only: open the store for reads only. Every write method then
           raises `ReadOnlyStoreError` before any embedder or LLM call. A
           ``store`` passed with ``read_only=True`` must itself be read-only.
+
+        Embedder identity:
+        - The store records the embedder its vectors come from, by
+          `EmbedderIdentity.key` (provider, model and vector size). A
+          writable open of a store that records none records this one. A
+          read-only open records nothing.
+        - on_embedder_change: what to do when the store records another
+          embedder. "refuse" (the default) raises `EmbedderMismatchError`,
+          naming both keys, and writes nothing. "switch" records the new
+          one; vectors from the old one do not compare with it, so re-embed
+          after (engram-admin reembed). A read-only open with another
+          embedder is refused, and a read-only open with "switch" raises
+          `ReadOnlyStoreError`. Any other value is a ValueError.
 
         Scopes:
         - allow_default_scope: False (the default) makes every call name its
@@ -165,7 +200,9 @@ class Engram:
 
         Defaults:
         - embedder: SyntheticEmbedding(dim=384) — deterministic, offline-safe.
-          Pass an OllamaEmbedding or OpenAIEmbedding for real semantics.
+          Pass an OllamaEmbedding or OpenAIEmbedding for real semantics. An
+          embedder without an ``identity`` is named by its class, with one
+          warning per open (`engram.embedding.embedder_identity`).
         - llm: None — extraction unavailable until provided.
         - reranker: None — set to a CrossEncoderReranker for higher precision.
         - tier: None — pass a ``ModelTier`` to split reader (answer generation)
@@ -173,6 +210,8 @@ class Engram:
           and ``llm`` is not, ``tier.utility`` is used for extraction/event work.
         """
         _check_allow_default_scope(allow_default_scope)
+        _check_on_embedder_change(on_embedder_change)
+        switch = on_embedder_change == "switch"
         if store is not None:
             if str(path) != ":memory:":
                 raise ValueError("pass a path or a store, not both")
@@ -181,9 +220,24 @@ class Engram:
                     "read_only=True needs a store opened read-only; open the store "
                     "with read_only=True, or leave read_only out"
                 )
+        if switch and (read_only or (store is not None and store.read_only)):
+            raise ReadOnlyStoreError(
+                "on_embedder_change='switch' records a new embedder, and a read-only "
+                "open writes nothing; open writable to switch"
+            )
+        embedder = embedder or SyntheticEmbedding(dim=384)
+        # Once per open, before the store is touched: it may warn, or raise
+        # for an identity that does not match the embedder.
+        key = embedder_identity(embedder).key
+        if store is not None:
+            await _hold_store_to_embedder(store, key, switch=switch)
         else:
             store = await open_store(path, read_only=read_only)
-        embedder = embedder or SyntheticEmbedding(dim=384)
+            try:
+                await _hold_store_to_embedder(store, key, switch=switch)
+            except BaseException:
+                await store.close()
+                raise
         vec = HnswVectorStore(dim=embedder.dim)
         retriever = HybridRetriever(
             fact_store=store,

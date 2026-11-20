@@ -786,6 +786,7 @@ async def test_a_handle_refuses_every_write_when_read_only(
     store = ClaimsReadOnly(await open_store())
     embedder, llm = SpyEmbedder(), SpyLLM()
     memory = await Engram.open(store=store, embedder=embedder, llm=llm)  # type: ignore[arg-type]
+    store.calls.clear()  # the open reads the embedder key; the write must call nothing
     alice, _ = _handles(memory)
     with pytest.raises(ReadOnlyStoreError):
         await HANDLE_WRITES[method](alice)

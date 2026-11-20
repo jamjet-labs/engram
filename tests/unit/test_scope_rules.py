@@ -168,6 +168,7 @@ async def _strict(
 ) -> tuple[Engram, RecordingStore]:
     store = RecordingStore(await SqliteStore.open(":memory:"))
     memory = await Engram.open(store=store, embedder=embedder, llm=llm)  # type: ignore[arg-type]
+    store.calls.clear()  # the open records the embedder; the calls under test start here
     return memory, store
 
 
@@ -575,6 +576,7 @@ async def test_every_org_wide_root_method_follows_the_scope_rules(
 
     allowing = RecordingStore(await SqliteStore.open(":memory:"))
     async with await Engram.open(store=allowing, allow_default_scope=True) as allowed:  # type: ignore[arg-type]
+        allowing.calls.clear()  # the open records the embedder
         if strict_only:
             await ORG_CALLS[method](allowed, given)  # the default org, as on the server
         else:

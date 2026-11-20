@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from engram.embedding.base import EmbedderIdentity
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.errors import ScopeError
 from engram.models import ChatMessage, Event, Fact
@@ -259,6 +260,10 @@ class _SpyEmbedder:
     @property
     def dim(self) -> int:
         return self._inner.dim
+
+    @property
+    def identity(self) -> EmbedderIdentity:
+        return self._inner.identity
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(list(texts))

@@ -26,3 +26,4 @@ tests/unit/test_erase_epoch.py
 tests/conformance/test_hostile_scopes.py
 tests/unit/test_refused_scopes.py
 tests/unit/test_embedder_identity.py
+tests/conformance/test_embedder_identity_store.py

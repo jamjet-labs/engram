@@ -2180,6 +2180,51 @@ class SqliteStore:
             raise StoreError(f"erase_scope_residue: {e}") from e
         return record
 
+    # ── Embedder identity ────────────────────────────────────────────────
+
+    @staticmethod
+    async def _recorded_embedder_key(db: aiosqlite.Connection) -> str | None:
+        """The embedder key as ``db`` sees it; None when none is recorded."""
+        async with db.execute(
+            "SELECT value FROM engram_meta WHERE key = ?", (_rules.EMBEDDER_META_KEY,)
+        ) as cur:
+            row = await cur.fetchone()
+        return None if row is None else str(row[0])
+
+    async def embedder_key(self) -> str | None:
+        """The recorded embedder key, as of the latest commit. A read: it works read-only."""
+        async with self._reading() as db:
+            return await self._recorded_embedder_key(db)
+
+    async def set_embedder_key(self, key: str, *, replace: bool) -> None:
+        """Record ``key`` as this file's embedder (see `EngramStore.set_embedder_key`).
+
+        The read and the write are one BEGIN IMMEDIATE transaction. A second
+        process recording another key at the same moment waits for this one
+        to commit, then reads this key and is refused.
+        """
+        self._require_writable()
+        check_text("embedder key", key, max_bytes=MAX_FACT_TEXT_BYTES)
+        value: object = replace
+        if not isinstance(value, bool):
+            raise TypeError("replace must be True or False")
+        async with self._transaction():
+            recorded = await self._recorded_embedder_key(self._conn)
+            if not _rules.check_embedder_key(recorded, key, replace=replace):
+                return
+            await self._conn.execute(
+                """INSERT INTO engram_meta (key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (_rules.EMBEDDER_META_KEY, key),
+            )
+        if recorded is not None:
+            logger.warning(
+                "embedder changed from %r to %r. Vectors made by the old one do not "
+                "compare with the new; run engram-admin reembed.",
+                recorded,
+                key,
+            )
+
     # ── Row -> Pydantic ──────────────────────────────────────────────────
     #
     # A row's scope is read as stored (`stored_scope`): every read names its

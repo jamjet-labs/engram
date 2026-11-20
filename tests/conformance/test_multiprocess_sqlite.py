@@ -13,7 +13,7 @@ import json
 import sqlite3
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Any
@@ -63,20 +63,26 @@ class WorkerProcess:
 
 @asynccontextmanager
 async def start_workers(
-    target: str, *crash_at: str | None, barrier: bool = False
+    target: str,
+    *crash_at: str | None,
+    barrier: bool = False,
+    extra_args: Sequence[Sequence[str]] = (),
 ) -> AsyncIterator[list[WorkerProcess]]:
     """One worker per argument (None for no crash label), each past its imports.
 
     A worker holds its commands until it reads a "go" line. With `barrier`
     the test sends that itself, to start several workers together; otherwise
-    it is sent here.
+    it is sent here. `extra_args[i]`, when given, is added to worker i's
+    command line (for example ["--embedder", "synthetic:256"]).
     """
     workers: list[WorkerProcess] = []
     try:
-        for label in crash_at:
+        for i, label in enumerate(crash_at):
             args = [sys.executable, "-m", "tests.conformance.worker", "--target", target]
             if label:
                 args += ["--crash-at", label]
+            if i < len(extra_args):
+                args += list(extra_args[i])
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 cwd=REPO_ROOT,
@@ -145,6 +151,7 @@ def db_digest(target: str) -> str:
         "revocations",
         "erasures",
         "scope_state",
+        "engram_meta",
     )
     for table in tables:
         parts.append(repr(rows(target, f"SELECT * FROM {table} ORDER BY 1")))

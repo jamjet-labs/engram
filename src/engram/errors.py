@@ -20,6 +20,15 @@ class SchemaVersionError(StoreError):
     """The database's schema version is not one this library can open in this mode."""
 
 
+class EmbedderMismatchError(StoreError):
+    """The database records another embedder than the one this open was given.
+
+    Vectors from two embedders do not compare, so the open is refused and
+    nothing is written. The message names both embedder keys and the fix:
+    open with ``on_embedder_change="switch"``, then re-embed.
+    """
+
+
 class NotFoundError(EngramError):
     """Requested resource (fact, session, entity) does not exist."""
 
