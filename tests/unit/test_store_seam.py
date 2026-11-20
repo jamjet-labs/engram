@@ -439,6 +439,7 @@ STORE_READS: dict[str, StoreCall] = {
     "fact_counts": lambda st, s: st.fact_counts(ACME_ALICE),
     "list_session_ids": lambda st, s: st.list_session_ids(ACME_ALICE),
     "list_session_messages": lambda st, s: st.list_session_messages("s1", ACME_ALICE),
+    "scope_guard": lambda st, s: st.scope_guard(ACME_ALICE),
 }
 
 # Accepted on a read-only store, and write nothing there.

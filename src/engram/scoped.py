@@ -12,6 +12,9 @@ scope the handle was made for.
   store hands back is checked against the scope (`_only_in`) before the
   handle returns it or acts on it. A store that returned another scope's
   data raises ScopeError instead of leaking it.
+- A write that started before `erase_all` never lands after it: it carries a
+  `ScopeWriteGuard`, the scope's erase epoch when it started, and the store
+  refuses it if the epoch has moved.
 
 The root `Engram` methods run on a handle, so this module holds the one
 implementation of each.
@@ -39,7 +42,7 @@ from engram.models import ChatMessage, Event, ExtractedFact, Fact, MemoryTier, P
 from engram.read.decomposer import should_decompose
 from engram.retrieve.base import ScoredFact
 from engram.retrieve.rrf import reciprocal_rank_fusion
-from engram.scope import Scope
+from engram.scope import Scope, ScopeWriteGuard
 from engram.validate import MAX_FACT_TEXT_BYTES, MAX_MESSAGE_BYTES, check_json, check_text
 
 if TYPE_CHECKING:
@@ -82,21 +85,19 @@ def _only_in[T: _Owned](scope: Scope, items: Iterable[T]) -> list[T]:
     return out
 
 
-def _extraction(
-    engram: Engram, persist: bool, not_erased_since: datetime | None
-) -> tuple[ExtractionPipeline, datetime]:
-    """The checks `extract` makes before it looks at the messages.
-
-    Returns the pipeline and the time the write started.
-    """
+def _extraction(engram: Engram, persist: bool) -> ExtractionPipeline:
+    """The checks `extract` makes before it looks at the messages."""
     if persist:
         engram._require_writable()
-    if not_erased_since is not None and not_erased_since.tzinfo is None:
-        raise ValueError("not_erased_since must be timezone-aware")
-    started = datetime.now().astimezone() if not_erased_since is None else not_erased_since
     if engram._extract is None:
         raise RuntimeError("extraction requires an LLM; pass `llm=...` to Engram.open()")
-    return engram._extract, started
+    return engram._extract
+
+
+def _check_guard_type(guard: ScopeWriteGuard | None) -> None:
+    value: object = guard
+    if value is not None and not isinstance(value, ScopeWriteGuard):
+        raise TypeError("guard must be a ScopeWriteGuard, from ScopedEngram.guard()")
 
 
 def _event_extraction(engram: Engram, persist: bool) -> EventExtractor:
@@ -145,6 +146,12 @@ class ScopedEngram:
             return fact.id
         return fact
 
+    def _own_guard(self, guard: ScopeWriteGuard | None) -> None:
+        # Before anything is read or written, and before any LLM call.
+        _check_guard_type(guard)
+        if guard is not None and _names(guard.scope) != _names(self._scope):
+            raise ScopeError("the guard is for another scope than this handle's")
+
     def _own_messages(self, messages: Sequence[ChatMessage]) -> None:
         want = _names(self._scope)
         for i, message in enumerate(messages):
@@ -177,6 +184,20 @@ class ScopedEngram:
         return False
 
     # ── Writes ──────────────────────────────────────────────────────────
+
+    async def guard(self) -> ScopeWriteGuard:
+        """The scope's erase epoch now, for a write that starts now.
+
+        Take it when a write starts and pass it to each `record_message` and
+        `extract` the write makes. If :meth:`erase_all` erases the scope after
+        this, those calls store nothing and raise ScopeErasedError (`extract`
+        returns what it stored before). No clock is read. A read: it works
+        read-only too. `record` and `extract` take their own when given none.
+        """
+        guard = await self._engram._store.scope_guard(self._scope)
+        if not isinstance(guard, ScopeWriteGuard) or _names(guard.scope) != _names(self._scope):
+            raise ScopeError("the store returned a guard for another scope")
+        return guard
 
     async def record(
         self,
@@ -220,8 +241,6 @@ class ScopedEngram:
         """
         engram = self._engram
         engram._require_writable()
-        # Before any await: an erase_all that finishes after this refuses the write.
-        started = datetime.now().astimezone()
         scope = self._scope
         check_text("text", text, max_bytes=MAX_FACT_TEXT_BYTES)
         if session_id is not None:
@@ -230,6 +249,8 @@ class ScopedEngram:
         if role is not None:
             md["role"] = role
         check_json("metadata", md)
+        # The first await: an erase_all that commits after this refuses the write.
+        guard = await self.guard()
         store = engram._store
         if reject_revoked and await store.is_content_revoked(text, scope):
             raise RevokedContentError("text matches revoked content in this scope")
@@ -252,7 +273,7 @@ class ScopedEngram:
                 writer=actor,
                 source="record",
                 derived_from=derived_from,
-                not_erased_since=started,
+                guard=guard,
             )
         except ScopeErasedError:
             logger.info("record: the scope was erased while the write ran; nothing stored")
@@ -269,15 +290,17 @@ class ScopedEngram:
         session_id: str = "default",
         *,
         timestamp: datetime | None = None,
-        not_erased_since: datetime | None = None,
+        guard: ScopeWriteGuard | None = None,
     ) -> ChatMessage:
         """Record a raw chat turn (no extraction).
 
-        With ``not_erased_since`` (timezone-aware), raises ScopeErasedError and
-        stores nothing if :meth:`erase_all` erased the scope at or after it.
+        With ``guard`` (from :meth:`guard`), raises ScopeErasedError and
+        stores nothing if :meth:`erase_all` erased the scope after the guard
+        was taken. A guard for another scope raises ScopeError.
         """
         engram = self._engram
         engram._require_writable()
+        self._own_guard(guard)
         check_text("content", content, max_bytes=MAX_MESSAGE_BYTES, allow_blank=True)
         check_text("session_id", session_id, max_bytes=MAX_FACT_TEXT_BYTES)
         msg = ChatMessage(
@@ -287,7 +310,7 @@ class ScopedEngram:
             content=content,
             timestamp=timestamp or datetime.now().astimezone(),
         )
-        await engram._store.upsert_message(msg, not_erased_since=not_erased_since)
+        await engram._store.upsert_message(msg, guard=guard)
         return msg
 
     async def extract(
@@ -296,7 +319,7 @@ class ScopedEngram:
         session_date: datetime | None = None,
         persist: bool = True,
         actor: str | None = None,
-        not_erased_since: datetime | None = None,
+        guard: ScopeWriteGuard | None = None,
     ) -> list[Fact]:
         """Extract durable facts from a conversation. Optionally persist them.
 
@@ -307,18 +330,22 @@ class ScopedEngram:
 
         If :meth:`erase_all` erases the scope while this runs, the facts not
         yet stored are dropped, and the result lists only those stored before
-        the erase. ``not_erased_since`` is when the write started; it defaults
-        to the start of this call. Pass an earlier time when the messages were
-        stored before this call, so an erase that removed them in between also
-        refuses the facts drawn from them. It must be timezone-aware (ValueError).
+        the erase. ``guard`` says when the write started; without one, this
+        takes one before the LLM call. Pass the one taken before the messages
+        were stored, so an erase that removed them in between also refuses the
+        facts drawn from them. A guard for another scope raises ScopeError,
+        before the LLM call.
         """
         engram = self._engram
-        pipeline, started = _extraction(engram, persist, not_erased_since)
+        pipeline = _extraction(engram, persist)
+        self._own_guard(guard)
         if not messages:
             return []
         self._own_messages(messages)
         scope = self._scope
         store = engram._store
+        if persist and guard is None:
+            guard = await self.guard()
         # All input messages share a session: take the first one's session_id
         sid: str | None = messages[0].session_id
         extracted: list[ExtractedFact] = await pipeline.extract(messages, session_date=session_date)
@@ -338,9 +365,7 @@ class ScopedEngram:
                     mention_date=ef.mention_date,
                 )
                 try:
-                    await store.upsert_fact(
-                        fact, writer=actor, source="extract", not_erased_since=started
-                    )
+                    await store.upsert_fact(fact, writer=actor, source="extract", guard=guard)
                 except ScopeErasedError:
                     logger.info(
                         "extract: the scope was erased while extraction ran; "

@@ -38,7 +38,7 @@ from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
 from engram.read.decomposer import QueryDecomposer
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.hybrid import HybridRetriever
-from engram.scope import Scope
+from engram.scope import Scope, ScopeWriteGuard
 from engram.scoped import ScopedEngram, _event_extraction, _extraction
 from engram.scoped import context_lines as context_lines
 from engram.store.base import EngramStore
@@ -566,16 +566,21 @@ class Engram:
         user_id: str | None = None,
         org_id: str | None = None,
         timestamp: datetime | None = None,
-        not_erased_since: datetime | None = None,
+        guard: ScopeWriteGuard | None = None,
     ) -> ChatMessage:
-        """Record a raw chat turn (no extraction). See `ScopedEngram.record_message`."""
+        """Record a raw chat turn (no extraction). See `ScopedEngram.record_message`.
+
+        ``guard`` comes from ``scoped(org_id=..., user_id=...).guard()`` for the
+        same scope; with one, a turn written after that scope was erased is
+        refused with ScopeErasedError.
+        """
         self._require_writable()
         return await self._handle(user_id, org_id).record_message(
             content,
             role,
             session_id,
             timestamp=timestamp,
-            not_erased_since=not_erased_since,
+            guard=guard,
         )
 
     async def extract(
@@ -584,24 +589,25 @@ class Engram:
         session_date: datetime | None = None,
         persist: bool = True,
         actor: str | None = None,
-        not_erased_since: datetime | None = None,
+        guard: ScopeWriteGuard | None = None,
     ) -> list[Fact]:
         """Extract durable facts from a conversation. Optionally persist them.
 
         Runs `ScopedEngram.extract` in the first message's scope. A message
-        from any other scope raises ScopeError before the LLM call.
+        from any other scope, or a ``guard`` for another scope, raises
+        ScopeError before the LLM call.
         """
         if persist:
             self._require_writable()
         if not messages:
-            _extraction(self, persist, not_erased_since)
+            _extraction(self, persist)
             return []
         return await self._message_handle(messages).extract(
             messages,
             session_date=session_date,
             persist=persist,
             actor=actor,
-            not_erased_since=not_erased_since,
+            guard=guard,
         )
 
     async def recall(

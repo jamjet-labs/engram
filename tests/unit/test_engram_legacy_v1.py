@@ -31,7 +31,10 @@ SCOPED_TABLES = {
     "messages",
     "relationships",
     "revocations",
+    "scope_state",
 }
+# Scoped tables erase_user keeps: content-free audit rows, and the erase epoch.
+KEPT_TABLES = {"erasures", "revocations", "scope_state"}
 UNSCOPED_TABLES = {"content_matches", "fact_derivations", "fact_entity_refs", "schema_version"}
 FTS_SHADOW_PREFIXES = ("facts_fts_", "events_fts_")
 
@@ -162,8 +165,9 @@ async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
                 cols = {r[1] for r in await cur.fetchall()}
             assert ({"org_id", "user_id"} <= cols) == (table in SCOPED_TABLES), table
         # The seed reaches every scoped table, so an empty table cannot pass for erased.
-        for table in sorted(SCOPED_TABLES - {"erasures"}):
+        for table in sorted(SCOPED_TABLES - {"erasures", "scope_state"}):
             assert await _scoped_count(db, table, "alice") > 0, table
+        assert await _scalar(db, "SELECT COUNT(*) FROM scope_state") == 0  # never erased
         fact_ids = {str(i) for i in await store.list_fact_ids(ALICE)}
         assert fact_ids == {str(tea.id), str(revoked.id), str(derived.id)}
         message_ids = await _ids(db, "SELECT id FROM messages WHERE user_id='alice'")
@@ -182,8 +186,11 @@ async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
     assert await memory.erase_user(user_id="alice", reason="gdpr request", actor="rest:v1") == 3
 
     async with store._reading() as db:
-        for table in sorted(SCOPED_TABLES - {"erasures", "revocations", "facts_fts"}):
+        for table in sorted(SCOPED_TABLES - KEPT_TABLES - {"facts_fts"}):
             assert await _scoped_count(db, table, "alice") == 0, table
+        # The epoch moved, in alice's scope only.
+        epochs = await _ids(db, "SELECT user_id || ':' || erase_epoch FROM scope_state")
+        assert epochs == {"alice:1"}
         for token in ("alice", "jazz", "oolong", "tea"):
             n = await _scalar(
                 db, "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH ?", (token,)

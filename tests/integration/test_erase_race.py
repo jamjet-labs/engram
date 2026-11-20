@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ from engram.embedding.synthetic import SyntheticEmbedding
 from engram.errors import ScopeErasedError, StoreError
 from engram.llm.base import LLMMessage, LLMResponse
 from engram.models import ChatMessage, Fact
-from engram.scope import Scope
+from engram.scope import Scope, ScopeWriteGuard
 from engram.server.http import build_http_app
 from tests.conformance.backends import OpenMemory
 
@@ -247,6 +247,43 @@ async def test_save_messages_stops_when_the_user_is_deleted_between_turns(
         assert listed.json()["conversation_ids"] == []
 
 
+async def test_save_messages_extraction_is_refused_when_the_erase_lands_before_it_starts(
+    open_memory: OpenMemory, gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The only turn is stored, the erase removes it, then extraction runs on the request's copy."""
+    llm = GatedLLM()
+    memory = await _open(open_memory, llm=llm)
+    stored = memory._store.upsert_message
+
+    async def store_then_wait(message: ChatMessage, **kw: Any) -> None:
+        await stored(message, **kw)
+        await gate.hold()
+
+    monkeypatch.setattr(memory._store, "upsert_message", store_then_wait)
+    async with _client(memory) as c:
+        save = asyncio.create_task(
+            c.post(
+                "/v1/memory/messages",
+                json={
+                    "conversation_id": "clinic",
+                    "user_id": "frank",
+                    "messages": [{"role": "user", "content": "I have type 2 diabetes"}],
+                },
+            )
+        )
+        await gate.wait_entered()
+        r = await c.request("DELETE", "/v1/memory/users/frank")
+        assert r.status_code == 200 and r.json()["success"] is True
+        gate.release.set()
+        r = await save
+        assert r.status_code == 201, r.text
+        assert r.json()["fact_ids"] == []
+        assert llm.calls == 1  # extraction ran after the erase; what it drew was refused
+        await _assert_nothing_left(memory, c)
+        got = await c.get("/v1/memory/messages/clinic", params={"user_id": "frank"})
+        assert got.json()["total"] == 0
+
+
 async def test_concurrent_save_and_delete_user_leave_no_turns(open_memory: OpenMemory) -> None:
     """No gates and no LLM, as the shipped image runs: whichever order, no turn survives."""
     memory = await _open(open_memory)
@@ -369,48 +406,43 @@ def test_scope_erased_error_is_not_a_store_error() -> None:
     assert not issubclass(ScopeErasedError, StoreError)
 
 
-async def _residue_time(memory: Engram) -> datetime:
-    [record] = [e for e in await memory.erasures(user_id="frank") if not e.fact_ids]
-    assert record.artifacts["scope_erasure"] == 1
-    return record.erased_at
+async def _guard(memory: Engram) -> ScopeWriteGuard:
+    return await memory.scoped(org_id=FRANK.org_id, user_id=FRANK.user_id).guard()
 
 
 @pytest.mark.parametrize(
-    ("offset", "refused"),
+    ("taken", "refused"),
     [
-        (timedelta(0), True),  # the same instant: refused
-        (-timedelta(microseconds=1), True),
-        (timedelta(microseconds=1), False),
+        ("before the erase", True),
+        ("after the erase", False),
     ],
 )
-async def test_upsert_fact_compares_times_not_strings(
-    open_memory: OpenMemory, offset: timedelta, refused: bool
+async def test_upsert_fact_compares_the_erase_epoch(
+    open_memory: OpenMemory, taken: str, refused: bool
 ) -> None:
     memory = await _open(open_memory)
+    before = await _guard(memory)
     await _erase(memory)
-    at = await _residue_time(memory)
-    # The same instant written with another UTC offset, so the ISO
-    # strings do not sort the way the times do.
-    since = (at + offset).astimezone(timezone(timedelta(hours=-11)))
-    fact = Fact(text="Frank likes tea", scope=FRANK, valid_from=at)
+    guard = before if taken == "before the erase" else await _guard(memory)
+    fact = Fact(text="Frank likes tea", scope=FRANK, valid_from=datetime.now().astimezone())
     if refused:
         with pytest.raises(ScopeErasedError):
-            await memory._store.upsert_fact(fact, not_erased_since=since)
+            await memory._store.upsert_fact(fact, guard=guard)
         assert await memory._store.list_fact_ids(FRANK) == []
     else:
-        await memory._store.upsert_fact(fact, not_erased_since=since)
+        await memory._store.upsert_fact(fact, guard=guard)
         assert await memory._store.list_fact_ids(FRANK) == [fact.id]
 
 
 async def test_only_a_scope_wide_erasure_in_the_same_scope_refuses(open_memory: OpenMemory) -> None:
     memory = await _open(open_memory)
-    since = datetime.now().astimezone()
+    guard = await _guard(memory)
     # A per-fact erase in frank's scope, and a whole-scope erase of bob.
     fact = await memory.record("Frank likes tea", user_id="frank")
     await memory.erase(fact.id, reason="asked", actor="dpo", user_id="frank")
     await memory.erase_user(user_id="bob", reason="gdpr request", actor="dpo")
-    late = Fact(text="Frank likes coffee", scope=FRANK, valid_from=since)
-    await memory._store.upsert_fact(late, not_erased_since=since)
+    late = Fact(text="Frank likes coffee", scope=FRANK, valid_from=datetime.now().astimezone())
+    await memory._store.upsert_fact(late, guard=guard)
     assert await memory._store.list_fact_ids(FRANK) == [late.id]
 
 
@@ -448,17 +480,21 @@ async def test_post_add_check_sees_the_erase_past_an_open_read_snapshot(
         await memory.close()
 
 
-async def test_not_erased_since_must_be_timezone_aware(open_memory: OpenMemory) -> None:
+async def test_guard_must_be_a_scope_write_guard(open_memory: OpenMemory) -> None:
     llm = GatedLLM()
     memory = await _open(open_memory, llm=llm)
-    naive = datetime.now()
+    # A start time, as the wall-clock guard took, is not a guard.
+    started: Any = datetime.now().astimezone()
     fact = Fact(text="Frank likes tea", scope=FRANK, valid_from=datetime.now().astimezone())
-    with pytest.raises(ValueError, match="timezone-aware"):
-        await memory._store.upsert_fact(fact, not_erased_since=naive)
-    with pytest.raises(ValueError, match="timezone-aware"):
-        await memory.record_message("hi", user_id="frank", not_erased_since=naive)
-    with pytest.raises(ValueError, match="timezone-aware"):
-        await memory.extract([_turn()], not_erased_since=naive)
+    with pytest.raises(TypeError, match="ScopeWriteGuard"):
+        await memory._store.upsert_fact(fact, guard=started)
+    with pytest.raises(TypeError, match="ScopeWriteGuard"):
+        await memory._store.upsert_message(_turn(), guard=started)
+    with pytest.raises(TypeError, match="ScopeWriteGuard"):
+        await memory.record_message("hi", user_id="frank", guard=started)
+    with pytest.raises(TypeError, match="ScopeWriteGuard"):
+        await memory.extract([_turn()], guard=started)
     assert llm.calls == 0  # refused before the LLM call, not at the first upsert
     assert await memory._store.list_fact_ids(FRANK) == []
     assert await memory.list_messages("default", user_id="frank") == []
+    assert await memory.list_messages("s", user_id="frank") == []

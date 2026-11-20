@@ -39,7 +39,7 @@ from engram.governance import (
     quotes_any_run,
 )
 from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
-from engram.scope import Scope
+from engram.scope import Scope, ScopeWriteGuard
 from engram.store import _rules, sqlite_migrations
 from engram.store.sqlite_migrations import BASELINE_VERSION, Migration
 
@@ -214,12 +214,6 @@ def _dt(dt: datetime | None) -> str | None:
     return _utc(dt).isoformat() if dt else None
 
 
-def _require_aware(since: datetime | None) -> None:
-    """A naive time would be read as local time, which is wrong for a naive UTC value."""
-    if since is not None and since.tzinfo is None:
-        raise ValueError("not_erased_since must be timezone-aware")
-
-
 def _parse_dt(s: str | None) -> datetime | None:
     if s is None:
         return None
@@ -262,6 +256,17 @@ def _check_event(event: Event) -> None:
 def _check_audit(reason: str, actor: str) -> None:
     check_text("reason", reason, max_bytes=MAX_FACT_TEXT_BYTES)
     check_text("actor", actor, max_bytes=MAX_FACT_TEXT_BYTES)
+
+
+def _check_guard(guard: ScopeWriteGuard | None, scope: Scope) -> None:
+    """Refuse a guard that is not a ScopeWriteGuard, or that is for another scope."""
+    if guard is None:
+        return
+    value: object = guard
+    if not isinstance(value, ScopeWriteGuard):
+        raise TypeError("guard must be a ScopeWriteGuard, from ScopedEngram.guard()")
+    if (value.scope.org_id, value.scope.user_id) != (scope.org_id, scope.user_id):
+        raise ScopeError("the guard is for another scope than this write")
 
 
 class SqliteStore:
@@ -544,7 +549,7 @@ class SqliteStore:
         writer: str | None = None,
         source: str = "upsert",
         derived_from: Iterable[UUID] | None = None,
-        not_erased_since: datetime | None = None,
+        guard: ScopeWriteGuard | None = None,
     ) -> None:
         """Insert or update a fact, its provenance row and its derivation links.
 
@@ -553,25 +558,20 @@ class SqliteStore:
         revoked text hides it. Nothing here touches the revocations table: a
         write cannot lift a tombstone.
 
-        ``not_erased_since`` is when the caller's write started. If the
-        scope's data was erased (`Engram.erase_user`) at or after that time,
-        this raises ScopeErasedError and writes nothing: the fact was derived
-        from data that erase removed. It must be timezone-aware (ValueError).
+        ``guard`` is the scope's erase epoch when the caller's write started
+        (:meth:`scope_guard`). If `erase_scope_residue` has moved the epoch
+        since, this raises ScopeErasedError and writes nothing: the fact was
+        drawn from data that erase removed. A guard for another scope than the
+        fact's raises ScopeError, and anything but a ScopeWriteGuard TypeError.
         """
         self._require_writable()
         _check_fact(fact)
-        _require_aware(not_erased_since)
+        _check_guard(guard, fact.scope)
         sources = list(derived_from or [])
         try:
             async with self._transaction():
-                # Checked inside the transaction, which holds the write lock,
-                # so no erasure can commit between this check and the insert.
-                if not_erased_since is not None and await self._scope_erased_since(
-                    fact.scope, not_erased_since
-                ):
-                    raise ScopeErasedError(
-                        "the scope was erased while this write ran; the fact was not stored"
-                    )
+                if guard is not None:
+                    await self._refuse_if_erased(guard, "the fact")
                 # Checked inside the transaction, so a concurrent erase cannot
                 # remove a source between the check and the insert.
                 if sources:
@@ -680,23 +680,43 @@ class SqliteStore:
             ),
         )
 
-    async def _scope_erased_since(self, scope: Scope, since: datetime) -> bool:
-        """Has a scope-wide erasure record been written in scope at or after ``since``?
+    @staticmethod
+    async def _erase_epoch(db: aiosqlite.Connection, scope: Scope) -> int:
+        """The scope's erase epoch as ``db`` sees it; 0 when it has no row."""
+        async with db.execute(
+            "SELECT erase_epoch FROM scope_state WHERE org_id = ? AND user_id = ?",
+            (scope.org_id, scope.user_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return 0 if row is None else int(row[0])
 
-        Compares parsed times, not the stored strings: a local UTC offset can
-        change between two writes (daylight saving), and then the ISO 8601
-        strings no longer sort in time order.
+    async def scope_guard(self, scope: Scope) -> ScopeWriteGuard:
+        """The scope's erase epoch now, as of the latest commit. For a write that starts now.
+
+        A read: it works on a read-only store too.
         """
-        start = since.astimezone()
         async with self._reading() as db:
-            async with db.execute(
-                """SELECT erased_at FROM erasures
-                    WHERE org_id = ? AND user_id = ?
-                      AND json_extract(artifacts, '$.scope_erasure') = 1""",
-                (scope.org_id, scope.user_id),
-            ) as cur:
-                rows = await cur.fetchall()
-        return any(datetime.fromisoformat(r[0]).astimezone() >= start for r in rows)
+            epoch = await self._erase_epoch(db, scope)
+        return ScopeWriteGuard(scope=scope, erase_epoch=epoch)
+
+    async def _refuse_if_erased(self, guard: ScopeWriteGuard, what: str) -> None:
+        """Raise ScopeErasedError if the scope's erase epoch moved since ``guard``.
+
+        Called inside the write transaction. It holds SQLite's write lock, so
+        no erase can commit between this read and the write's own commit.
+        """
+        if await self._erase_epoch(self._conn, guard.scope) != guard.erase_epoch:
+            raise ScopeErasedError(
+                f"the scope was erased while this write ran; {what} was not stored"
+            )
+
+    async def _bump_erase_epoch(self, scope: Scope) -> None:
+        """Move the scope's erase epoch on by one. No commit: the erase commits it."""
+        await self._conn.execute(
+            """INSERT INTO scope_state (org_id, user_id, erase_epoch) VALUES (?, ?, 1)
+               ON CONFLICT(org_id, user_id) DO UPDATE SET erase_epoch = erase_epoch + 1""",
+            (scope.org_id, scope.user_id),
+        )
 
     async def _message_in_scope(self, message_id: UUID, scope: Scope) -> bool:
         async with self._reading() as db:
@@ -920,23 +940,20 @@ class SqliteStore:
     # ── Messages ─────────────────────────────────────────────────────────
 
     async def upsert_message(
-        self, message: ChatMessage, *, not_erased_since: datetime | None = None
+        self, message: ChatMessage, *, guard: ScopeWriteGuard | None = None
     ) -> None:
         """Insert or update a transcript turn.
 
-        ``not_erased_since`` works as in :meth:`upsert_fact`: if the scope was
-        erased at or after it, raises ScopeErasedError and writes nothing.
+        ``guard`` works as in :meth:`upsert_fact`: if the scope's erase epoch
+        has moved since it was taken, raises ScopeErasedError and writes
+        nothing.
         """
         self._require_writable()
         _check_message(message)
-        _require_aware(not_erased_since)
+        _check_guard(guard, message.scope)
         async with self._transaction():
-            if not_erased_since is not None and await self._scope_erased_since(
-                message.scope, not_erased_since
-            ):
-                raise ScopeErasedError(
-                    "the scope was erased while this write ran; the turn was not stored"
-                )
+            if guard is not None:
+                await self._refuse_if_erased(guard, "the turn")
             await self._check_owner("message", str(message.id), message.scope)
             keep = await self._add_matches(
                 "message", str(message.id), message.content, message.scope
@@ -2053,10 +2070,14 @@ class SqliteStore:
         In the same transaction, writes one erasure record with no fact ids,
         ``reason`` and ``actor`` as given, and the per-table counts in
         ``artifacts`` (``revocations_scrubbed`` counts tombstones cleared).
-        ``artifacts["scope_erasure"] = 1`` marks it as the scope-wide record:
-        ``upsert_fact(not_erased_since=...)`` refuses a write that started
-        before it. Returns it; the caller passes it to :meth:`finalize_erasure`,
-        which keeps the marker.
+        ``artifacts["scope_erasure"] = 1`` marks it as the scope-wide record.
+        Returns it; the caller passes it to :meth:`finalize_erasure`, which
+        keeps the marker.
+
+        Last in that transaction, it moves the scope's erase epoch on by one,
+        so the erase and the epoch commit together or not at all. A write
+        whose `ScopeWriteGuard` was taken before the commit is then refused.
+        A refusal moves nothing.
 
         `fact_entity_refs` rows go through ON DELETE CASCADE (foreign_keys is ON,
         set from schema.sql in `open`).
@@ -2121,6 +2142,7 @@ class SqliteStore:
                         json.dumps(record.guarantees),
                     ),
                 )
+                await self._bump_erase_epoch(scope)
         except aiosqlite.Error as e:
             raise StoreError(f"erase_scope_residue: {e}") from e
         return record

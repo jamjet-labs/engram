@@ -53,10 +53,10 @@ class EmbeddingError(EngramError):
 class ScopeErasedError(EngramError):
     """A write lost a race with ``Engram.erase_user`` on its scope. Nothing was stored.
 
-    Raised by ``SqliteStore.upsert_fact(not_erased_since=...)`` when the
-    scope's data was erased at or after the time the write started. Not a
-    StoreError: the store is fine, and retrying would store the data the
-    erase was asked to remove.
+    Raised by a write given a ``ScopeWriteGuard`` (``guard=...``) when the
+    scope's erase epoch has moved since the guard was taken: an erase of the
+    scope committed after the write started. Not a StoreError: the store is
+    fine, and retrying would store the data the erase was asked to remove.
     """
 
 

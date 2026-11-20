@@ -22,3 +22,4 @@ tests/unit/test_store_legacy_v1.py
 tests/unit/test_engram_legacy_v1.py
 tests/integration/test_erase_race.py
 tests/unit/test_erase_large_id_sets.py
+tests/unit/test_erase_epoch.py

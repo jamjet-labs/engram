@@ -10,7 +10,7 @@ from uuid import UUID
 
 from engram.governance import ErasureRecord, Provenance, Revocation
 from engram.models import ChatMessage, Event, Fact
-from engram.scope import Scope
+from engram.scope import Scope, ScopeWriteGuard
 
 
 @runtime_checkable
@@ -50,13 +50,14 @@ class EngramStore(Protocol):
         writer: str | None = None,
         source: str = "upsert",
         derived_from: Iterable[UUID] | None = None,
-        not_erased_since: datetime | None = None,
+        guard: ScopeWriteGuard | None = None,
     ) -> None:
         """Insert or update a fact, its provenance row and its derivation links.
 
-        With ``not_erased_since`` (timezone-aware), raises ScopeErasedError and
-        writes nothing if `erase_scope_residue` erased the fact's scope at or
-        after that time.
+        With ``guard`` (from `scope_guard`), compares the scope's erase epoch
+        inside the write's transaction: raises ScopeErasedError and writes
+        nothing if it has moved since the guard was taken. A guard for another
+        scope raises ScopeError.
         """
         ...
 
@@ -95,9 +96,9 @@ class EngramStore(Protocol):
 
     @abstractmethod
     async def upsert_message(
-        self, message: ChatMessage, *, not_erased_since: datetime | None = None
+        self, message: ChatMessage, *, guard: ScopeWriteGuard | None = None
     ) -> None:
-        """Write a transcript turn. ``not_erased_since`` works as in `upsert_fact`."""
+        """Write a transcript turn. ``guard`` works as in `upsert_fact`."""
         ...
 
     @abstractmethod
@@ -252,5 +253,13 @@ class EngramStore(Protocol):
 
     @abstractmethod
     async def erase_scope_residue(self, scope: Scope, *, reason: str, actor: str) -> ErasureRecord:
-        """Hard-delete what per-fact erasure leaves in a scope; refuse while facts remain."""
+        """Hard-delete what per-fact erasure leaves in a scope; refuse while facts remain.
+
+        Moves the scope's erase epoch on by one in the same transaction.
+        """
+        ...
+
+    @abstractmethod
+    async def scope_guard(self, scope: Scope) -> ScopeWriteGuard:
+        """The scope's erase epoch as of the latest commit; 0 if it was never erased. A read."""
         ...

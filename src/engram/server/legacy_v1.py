@@ -439,6 +439,11 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         Turns are stamped one microsecond apart from one clock reading, so
         they list in the order sent even when the clock is coarse.
 
+        One `ScopeWriteGuard`, taken before the first turn is stored, goes
+        with every turn and with the extraction. If the user is deleted
+        while the save runs, the turns after that are refused (409), and so
+        is every fact drawn from turns the delete removed.
+
         The facts carry `conversation_id` as their session and no
         `source_message_id`, so the view cannot tell which turn a fact came
         from. Forgetting any of them withholds every turn of the conversation,
@@ -456,6 +461,7 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         except ValueError as e:
             return _error(400, refused_detail(e))
         s = _scope(req.user_id, req.org_id)
+        guard = await engram.scoped(org_id=s.org_id, user_id=s.user_id).guard()
         base = datetime.now().astimezone()
         stored: list[ChatMessage] = []
         try:
@@ -468,7 +474,7 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
                         user_id=s.user_id,
                         org_id=s.org_id,
                         timestamp=base + timedelta(microseconds=i),
-                        not_erased_since=base,
+                        guard=guard,
                     )
                 )
         except ScopeErasedError:
@@ -485,7 +491,7 @@ def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
         try:
             # From before the first turn was stored: an erase that removes the
             # turns before extraction starts must also refuse what it extracts.
-            extracted = await engram.extract(stored, not_erased_since=base)
+            extracted = await engram.extract(stored, guard=guard)
             fact_ids = [str(f.id) for f in extracted]
         except RuntimeError as e:  # no LLM configured: expected, not a fault
             logger.debug("save messages: turns kept, no extraction: %s", e)

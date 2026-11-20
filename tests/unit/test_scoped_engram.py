@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -134,6 +134,7 @@ async def _outcome(call: Callable[[], Awaitable[object]], fact_id: UUID) -> tupl
 # An allowlist: a new public member fails the test until it is added here.
 HANDLE_MEMBERS = {
     "scope",
+    "guard",
     "record",
     "record_message",
     "extract",
@@ -592,6 +593,11 @@ READ_LEAKS: dict[str, Callable[[TwoScopes], tuple[dict[str, Leak], HandleCall]]]
         {"explain": lambda answer: s.their_provenance},
         lambda h: h.explain(s.mine.id),
     ),
+    # Their epoch, handed out as ours: a write would then be checked against Bob's.
+    "scope_guard-guard": lambda s: (
+        {"scope_guard": lambda answer: replace(answer, scope=BOB)},
+        lambda h: h.guard(),
+    ),
 }
 
 
@@ -762,6 +768,7 @@ HANDLE_READS: dict[str, HandleCall] = {
     "list_conversations": lambda h: h.list_conversations(),
     "list_messages": lambda h: h.list_messages("s1"),
     "fact_counts": lambda h: h.fact_counts(),
+    "guard": lambda h: h.guard(),
 }
 
 
