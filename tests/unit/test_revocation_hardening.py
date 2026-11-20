@@ -211,6 +211,18 @@ async def test_erase_scrubs_other_audit_text_that_quotes_the_content() -> None:
         assert "x1234567" not in rev.model_dump_json().lower()
 
 
+async def test_erase_scrubs_a_reinstatement_note_that_quotes_the_content() -> None:
+    async with await Engram.open(":memory:") as memory:
+        f = await memory.record(SECRET, user_id="ops")
+        other = await memory.record("unrelated claim about deploys", user_id="ops")
+        await memory.revoke(other, reason="r", actor="a")
+        await memory.reinstate(other, reason=f"back, {SECRET}", actor="a", user_id="ops")
+        record = await memory.erase(f, reason="request 9", actor="dpo")
+        [rev] = await memory.revocations(user_id="ops", include_reinstated=True)
+        assert rev.reinstate_reason == f"[scrubbed by erasure {record.id}]"
+        assert "x1234567" not in rev.model_dump_json().lower()
+
+
 @pytest.mark.parametrize(
     ("reason", "actor"),
     [("request about passport number is X1234567", "dpo"), ("request 9", f"dpo {SECRET}")],
