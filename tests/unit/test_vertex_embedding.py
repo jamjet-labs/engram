@@ -2,8 +2,9 @@
 
 The JSON files in tests/fixtures/vertex follow the documented shape of
 Vertex AI's predict call for text embeddings and of Google's error body.
-They are written from the documentation, not recorded. scripts/vertex_smoke.py
-checks the answer shape with one real call.
+They are written from the documentation, not recorded, and the answer's
+shape has been checked against a real one. scripts/vertex_smoke.py checks it
+with one real call.
 
 Every embedder here gets fake credentials, an httpx.MockTransport, a sleep
 that records its delays and moves a fake clock, and a fixed random source,
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gzip
 import hashlib
 import inspect
 import json
@@ -45,6 +47,7 @@ from engram.errors import (
     EmbeddingResponseError,
     EmbeddingTimeoutError,
 )
+from scripts.vertex_smoke import KeepAnswer
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "vertex"
 URL = (
@@ -905,6 +908,32 @@ def test_google_auth_requests_go_through_httpx() -> None:
     with httpx.Client(transport=httpx.MockTransport(unreachable)) as client:
         with pytest.raises(google.auth.exceptions.TransportError):
             _auth_request(client)("https://oauth2.googleapis.com/token", method="POST")
+
+
+# ── the smoke script (scripts/vertex_smoke.py) ──────────────────────
+
+
+def gzipped(body: Any) -> httpx.Response:
+    """A 200 as Vertex really sends it: the JSON gzipped, and Content-Encoding says so."""
+    return httpx.Response(
+        200,
+        headers={"content-type": "application/json; charset=UTF-8", "content-encoding": "gzip"},
+        content=gzip.compress(json.dumps(body).encode()),
+    )
+
+
+async def test_the_smoke_script_keeps_a_gzipped_answer_and_hands_it_on(vx: Harness) -> None:
+    served = load("predict_response.json")
+    keep = KeepAnswer(httpx.MockTransport(lambda request: gzipped(served)))
+    e = VertexEmbedding(
+        project="acme-test", dim=DIM, credentials=vx.credentials, transport=keep, max_attempts=1
+    )
+    try:
+        [vector] = await e.embed_documents(["alice prefers espresso"])
+    finally:
+        await e.aclose()
+    assert keep.answer == served
+    assert vector == pytest.approx(unit(served["predictions"][0]["embeddings"]["values"]))
 
 
 # ── the network guard (tests/network_guard.py) ──────────────────────

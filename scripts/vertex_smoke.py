@@ -39,19 +39,26 @@ TEXT = "alice prefers espresso"
 class KeepAnswer(httpx.AsyncBaseTransport):
     """Sends through a real transport and keeps the last answer's JSON."""
 
-    def __init__(self) -> None:
-        self._inner = httpx.AsyncHTTPTransport()
+    def __init__(self, inner: httpx.AsyncBaseTransport | None = None) -> None:
+        self._inner = inner or httpx.AsyncHTTPTransport()
         self.answer: Any = None
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         response = await self._inner.handle_async_request(request)
-        content = await response.aread()
+        content = await response.aread()  # decoded: Vertex sends gzip
         try:
             self.answer = json.loads(content)
         except ValueError:
             self.answer = None
+        # Hand on the decoded body without the headers that describe the
+        # encoded one, or the client decodes it a second time and fails.
+        headers = [
+            (name, value)
+            for name, value in response.headers.multi_items()
+            if name.lower() not in ("content-encoding", "content-length", "transfer-encoding")
+        ]
         return httpx.Response(
-            response.status_code, headers=response.headers, content=content, request=request
+            response.status_code, headers=headers, content=content, request=request
         )
 
     async def aclose(self) -> None:
