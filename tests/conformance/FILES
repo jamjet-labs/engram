@@ -1,0 +1,3 @@
+# Test files that run on every storage backend. One path per line, from the
+# repository root. They open memory only through the open_memory and
+# open_store fixtures; test_harness.py checks this.

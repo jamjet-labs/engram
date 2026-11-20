@@ -85,6 +85,10 @@ pythonpath = ["."]
 addopts = "-ra --strict-markers"
 markers = [
     "slow: marks tests as slow (downloads models, trains, etc.); run with -m slow",
+    "sqlite_only: reads SQLite internals; runs on SQLite backends only",
+    "persistent: needs data kept between opens; skipped on backends that do not keep it (sqlite-memory)",
+    "postgres: talks to a Postgres server",
+    "multiprocess: runs more than one process against one target",
 ]
 
 [tool.ruff]
