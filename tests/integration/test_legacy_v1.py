@@ -521,7 +521,7 @@ def test_turns_of_one_save_keep_their_order_on_a_coarse_clock(
 ) -> None:
     # Every now() returns the same instant. Turns that tie on timestamp are
     # ordered by random id, so the route must give each turn its own time.
-    monkeypatch.setattr("engram.engram.datetime", _FrozenClock)
+    monkeypatch.setattr("engram.scoped.datetime", _FrozenClock)
     monkeypatch.setattr("engram.server.legacy_v1.datetime", _FrozenClock)
     turns = [(role, f"turn {i}") for i, role in enumerate(["user", "assistant"] * 6)]
     _save(client, [{"role": r, "content": c} for r, c in turns])

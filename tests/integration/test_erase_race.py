@@ -194,7 +194,7 @@ async def test_add_extraction_does_not_land_after_delete_user(
 async def test_extract_logs_that_the_scope_was_erased(
     open_memory: OpenMemory, gate: Gate, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level("INFO", logger="engram.engram")
+    caplog.set_level("INFO", logger="engram.scoped")
     memory = await _open(open_memory, llm=GatedLLM(gate))
     msg = _turn()
     task = asyncio.create_task(memory.extract([msg]))

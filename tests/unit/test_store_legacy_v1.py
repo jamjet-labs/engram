@@ -50,7 +50,10 @@ async def test_fact_counts(memory: Engram) -> None:
     await memory.record("one", user_id="alice")
     two = await memory.record("two", user_id="bob")
     await memory.revoke(two.id, reason="test", actor="t", user_id="bob")
-    assert await memory._store.fact_counts() == (2, 1)
+    assert await memory._store.fact_counts(None) == (2, 1)  # every scope
+    assert await memory._store.fact_counts(ALICE) == (1, 1)
+    assert await memory._store.fact_counts(BOB) == (1, 0)
+    assert await memory._store.fact_counts(Scope(org_id="acme", user_id="alice")) == (0, 0)
 
 
 async def test_erase_scope_residue_refuses_while_facts_remain(memory: Engram) -> None:

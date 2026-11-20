@@ -1983,14 +1983,27 @@ class SqliteStore:
                 rows = await cur.fetchall()
         return any(quotes_any_run(value_norm, normalize_text(r[0])) for r in rows)
 
-    async def fact_counts(self) -> tuple[int, int]:
-        """(all facts, visible and not invalidated facts) across every scope."""
+    async def fact_counts(self, scope: Scope | None) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) in ``scope``.
+
+        ``None`` counts every scope, for the v1 stats route until it names one.
+        """
+        args: tuple[str, ...]
+        if scope is None:
+            total_sql = "SELECT COUNT(*) FROM facts"
+            valid_sql = "SELECT COUNT(*) FROM live_facts WHERE invalid_at IS NULL"
+            args = ()
+        else:
+            total_sql = "SELECT COUNT(*) FROM facts WHERE org_id = ? AND user_id = ?"
+            valid_sql = (
+                "SELECT COUNT(*) FROM live_facts"
+                " WHERE invalid_at IS NULL AND org_id = ? AND user_id = ?"
+            )
+            args = (scope.org_id, scope.user_id)
         async with self._reading() as db:
-            async with db.execute("SELECT COUNT(*) FROM facts") as cur:
+            async with db.execute(total_sql, args) as cur:
                 total_row = await cur.fetchone()
-            async with db.execute(
-                "SELECT COUNT(*) FROM live_facts WHERE invalid_at IS NULL"
-            ) as cur:
+            async with db.execute(valid_sql, args) as cur:
                 valid_row = await cur.fetchone()
         if total_row is None or valid_row is None:
             raise StoreError("fact_counts: COUNT returned no row")

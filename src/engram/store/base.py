@@ -200,9 +200,10 @@ class EngramStore(Protocol):
 
     # ── v1 REST support (ids and counts only, no text) ───────────────────
     #
-    # In the form the v1 routes first used. `fact_counts` and
-    # `find_fact_scope` reach every scope; they are to be replaced by scoped
-    # calls, and `fact_row_committed` leaves when stores keep their own vectors.
+    # In the form the v1 routes first used. `find_fact_scope`, and
+    # `fact_counts(None)`, reach every scope; they are to be replaced by
+    # scoped calls, and `fact_row_committed` leaves when stores keep their
+    # own vectors.
 
     @abstractmethod
     async def fact_row_committed(self, fact_id: UUID, scope: Scope) -> bool:
@@ -225,8 +226,11 @@ class EngramStore(Protocol):
         ...
 
     @abstractmethod
-    async def fact_counts(self) -> tuple[int, int]:
-        """(all facts, visible and not invalidated facts) across every scope."""
+    async def fact_counts(self, scope: Scope | None) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) in ``scope``.
+
+        ``None`` counts every scope, for the v1 stats route until it names one.
+        """
         ...
 
     @abstractmethod

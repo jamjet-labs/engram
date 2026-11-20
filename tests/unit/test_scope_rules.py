@@ -174,10 +174,18 @@ async def _strict(
 Ids = dict[str, str]
 RootCall = Callable[[Engram, Ids], Awaitable[object]]
 
+
+async def _scoped(memory: Engram, ids: Ids) -> object:
+    # Engram.scoped is not a coroutine, and it needs both ids: a missing
+    # one is passed as None, the way a caller passes "not given".
+    return memory.scoped(org_id=ids.get("org_id"), user_id=ids.get("user_id"))  # type: ignore[arg-type]
+
+
 # Every public Engram method that takes user_id or org_id, with the other
 # arguments it needs. The test below finds the methods with inspect, so a new
 # one fails until it is listed here.
 ROOT_CALLS: dict[str, RootCall] = {
+    "scoped": _scoped,
     "record": lambda m, ids: m.record(BIKE, **ids),
     "record_message": lambda m, ids: m.record_message("Thanks!", session_id="s1", **ids),
     "recall": lambda m, ids: m.recall("bike", **ids),

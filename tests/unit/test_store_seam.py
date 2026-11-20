@@ -436,7 +436,7 @@ STORE_READS: dict[str, StoreCall] = {
     "find_fact_scope": lambda st, s: st.find_fact_scope(s.kept.id),
     "list_fact_ids": lambda st, s: st.list_fact_ids(ACME_ALICE),
     "fact_text_quoted_by": lambda st, s: st.fact_text_quoted_by(KEPT, ACME_ALICE),
-    "fact_counts": lambda st, s: st.fact_counts(),
+    "fact_counts": lambda st, s: st.fact_counts(ACME_ALICE),
     "list_session_ids": lambda st, s: st.list_session_ids(ACME_ALICE),
     "list_session_messages": lambda st, s: st.list_session_messages("s1", ACME_ALICE),
 }
