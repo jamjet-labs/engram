@@ -131,6 +131,14 @@ def _newer_schema_message(path: str | Path, found: int, target: int) -> str:
     )
 
 
+async def _refuse_if_newer(conn: aiosqlite.Connection, path: str | Path) -> None:
+    """Raise `SchemaVersionError` if the file records a schema above this library's."""
+    found = await _recorded_version(conn)
+    target = sqlite_migrations.target_version()
+    if found is not None and found > target:
+        raise SchemaVersionError(_newer_schema_message(path, found, target))
+
+
 async def _apply_migration(conn: aiosqlite.Connection, migration: Migration) -> None:
     """Run one migration's statements and record its version. No commit.
 
@@ -199,6 +207,7 @@ class SqliteStore:
         read_conn: aiosqlite.Connection | None = None,
         *,
         read_only: bool = False,
+        path: str | Path = ":memory:",
     ) -> None:
         # Writes go through `_conn`, one transaction at a time (see
         # _transaction). Reads go through `_reading()`: a second connection for
@@ -208,6 +217,7 @@ class SqliteStore:
         self._conn = conn
         self._rconn = read_conn
         self._read_only = read_only
+        self._path = path
         self._fts_secure_delete = False
         # One Engram shares its connections across tasks, and SQLite has one
         # transaction per connection. Every write transaction holds this lock,
@@ -226,13 +236,17 @@ class SqliteStore:
         A writable open brings the file to this library's schema in one write
         transaction: it refuses a file from a newer Engram, runs schema.sql,
         then every numbered migration the file lacks
-        (`engram.store.sqlite_migrations`).
+        (`engram.store.sqlite_migrations`). Each later write transaction
+        checks the version again, so if a newer Engram migrates the file while
+        this store is open, its writes raise `SchemaVersionError`.
 
         ``read_only=True`` opens an existing file for reads only. It runs no
         schema statement and writes nothing, so the file must already be at
         this library's schema version (`SchemaVersionError` otherwise). Every
         write method then raises `ReadOnlyStoreError`. ":memory:" cannot be
-        opened read-only.
+        opened read-only. A read-only store checks the version only at open:
+        if a newer Engram migrates the file later, its reads go on through the
+        newer views.
         """
         if read_only:
             return await cls._open_read_only(path)
@@ -273,7 +287,7 @@ class SqliteStore:
             read_conn.row_factory = aiosqlite.Row
             # Fail closed if a write is ever routed to the read connection.
             await read_conn.execute("PRAGMA query_only = ON")
-        store = cls(conn, read_conn)
+        store = cls(conn, read_conn, path=path)
         try:
             store._fts_secure_delete = await store._enable_fts_secure_delete()
             await store._backfill_fact_meta()
@@ -301,7 +315,7 @@ class SqliteStore:
         except BaseException:
             await conn.close()
             raise
-        return cls(conn, read_only=True)
+        return cls(conn, read_only=True, path=path)
 
     @staticmethod
     async def _migrate(conn: aiosqlite.Connection, path: str | Path) -> None:
@@ -339,11 +353,16 @@ class SqliteStore:
 
         BEGIN IMMEDIATE takes SQLite's write lock up front, so reads made at
         the start of the body cannot go stale under another process's write.
+
+        Under that lock it reads the file's schema version again: a newer
+        Engram may have migrated the file since this store opened it, and this
+        library never writes to a schema newer than it knows.
         """
         async with self._write_lock:
             self._lock_owner = asyncio.current_task()
             try:
                 await self._conn.execute("BEGIN IMMEDIATE")
+                await _refuse_if_newer(self._conn, self._path)
                 yield
                 await self._conn.commit()
             except BaseException:
@@ -381,10 +400,7 @@ class SqliteStore:
         Opening recreates the visibility views from this library's schema.sql,
         which would replace a newer version's revocation rules with older ones.
         """
-        found = await _recorded_version(conn)
-        target = sqlite_migrations.target_version()
-        if found is not None and found > target:
-            raise SchemaVersionError(_newer_schema_message(path, found, target))
+        await _refuse_if_newer(conn, path)
 
     @staticmethod
     async def _require_current_schema(conn: aiosqlite.Connection, path: str | Path) -> None:
@@ -790,7 +806,10 @@ class SqliteStore:
                             WHERE id = ?""",
                         [(n, at, fid) for fid, (n, at) in batch.items()],
                     )
-            except aiosqlite.Error:
+            except (aiosqlite.Error, SchemaVersionError):
+                # A newer Engram may have migrated the file since this store
+                # opened it; the counts are advisory, so drop them, never raise
+                # from close().
                 logger.exception("could not record access counts; dropped %d", len(batch))
 
     async def flush_access(self) -> None:

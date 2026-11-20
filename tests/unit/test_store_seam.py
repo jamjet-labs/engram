@@ -732,3 +732,62 @@ async def test_a_new_migration_runs_once_and_older_libraries_then_refuse_the_fil
     monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", MIGRATIONS)
     with pytest.raises(SchemaVersionError, match="newer version of Engram"):
         await SqliteStore.open(old)
+
+
+async def _migrate_with_a_newer_library(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Open the file with one more migration than this library knows, then go back."""
+    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", _probed_migrations())
+    await (await SqliteStore.open(db)).close()
+    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", MIGRATIONS)
+    assert _versions(db) == PROBED_ROWS
+
+
+def _table_rows(db: Path) -> dict[str, list[str]]:
+    """Every row of every table, so a test can tell that nothing was written."""
+    with _ro(db) as conn:
+        names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        return {
+            name: sorted(repr(row) for row in conn.execute(f'SELECT * FROM "{name}"'))
+            for name in names
+        }
+
+
+@pytest.mark.parametrize("method", sorted(STORE_WRITES))
+async def test_an_open_store_stops_writing_once_a_newer_library_migrates_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    db = tmp_path / "e.db"
+    store = await SqliteStore.open(db)
+    try:
+        seeded = await _seed_store(store)
+        await _migrate_with_a_newer_library(db, monkeypatch)
+        before = _table_rows(db)
+        assert before["facts"] and before["revocations"] and before["erasures"]
+
+        with pytest.raises(SchemaVersionError, match="newer version of Engram"):
+            await STORE_WRITES[method](store, seeded)
+        assert _table_rows(db) == before
+    finally:
+        await store.close()
+    assert _versions(db) == PROBED_ROWS
+
+
+async def test_access_counts_are_dropped_once_a_newer_library_migrates_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    db = tmp_path / "e.db"
+    store = await SqliteStore.open(db)
+    try:
+        fact = Fact(text=KEPT, scope=ACME_ALICE, valid_from=_now())
+        await store.upsert_fact(fact)
+        await _migrate_with_a_newer_library(db, monkeypatch)
+        caplog.clear()
+        await store.record_access(fact.id)
+    finally:
+        # Waits for the queued count. A refused count is logged, not raised here.
+        await store.close()
+    with _ro(db) as conn:
+        row = conn.execute("SELECT access_count FROM facts WHERE id = ?", (str(fact.id),))
+        assert row.fetchone() == (0,)
+    assert "could not record access counts; dropped 1" in caplog.text
+    assert "newer version of Engram" in caplog.text
