@@ -37,7 +37,7 @@ from engram.llm.tier import ModelTier
 async def remember(text: str, role: str, user_id: str) -> str:
     """Record a chat turn into Engram. Tagged with role for retrieval-time filtering."""
     async with await Engram.open(":memory:", embedder=SyntheticEmbedding(dim=128)) as memory:
-        fact = await memory.record(text=text, role=role, user_id=user_id)
+        fact = await memory.scoped(org_id="acme", user_id=user_id).record(text, role=role)
         return f"Recorded fact {fact.id} for {user_id}"
 
 
@@ -59,21 +59,19 @@ async def answer_with_memory(question: str, user_id: str) -> str:
     async with await Engram.open(":memory:", embedder=embedder, tier=tier) as memory:
         # Pretend the user has a stored preference. In a real workflow this
         # would already be in Engram's store from prior @durable steps.
-        await memory.record(
-            text="user prefers Netflix stand-up specials, especially storytelling-heavy ones",
+        handle = memory.scoped(org_id="acme", user_id=user_id)
+        await handle.record(
+            "user prefers Netflix stand-up specials, especially storytelling-heavy ones",
             role="user",
-            user_id=user_id,
         )
 
         qt = await classifier.classify(question)
 
         if is_preference_question(question, qt):
-            ctx = await memory.context(
-                query=question, user_id=user_id, role_filter=("user",), token_budget=1500
-            )
+            ctx = await handle.context(question, role_filter=("user",), token_budget=1500)
             reader = Reader(tier.reader, mode="synthesis")
         else:
-            ctx = await memory.context(query=question, user_id=user_id, classifier=classifier)
+            ctx = await handle.context(question, classifier=classifier)
             reader = Reader(tier.reader)
 
         result = await reader.read(question=question, context=ctx)

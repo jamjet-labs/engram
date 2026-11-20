@@ -21,7 +21,6 @@ from engram import (
     Engram,
     Reader,
     RuleBasedClassifier,
-    Scope,
     is_preference_question,
 )
 from engram.embedding.synthetic import SyntheticEmbedding
@@ -65,14 +64,10 @@ async def main() -> None:
     classifier = RuleBasedClassifier()
 
     async with await Engram.open(":memory:", embedder=embedder, tier=tier) as memory:
+        alice = memory.scoped(org_id="acme", user_id="alice")
         # Ingest with role tags. Always tag — retrieval can opt-filter later.
         for turn in CHAT_HISTORY:
-            await memory.record(
-                text=turn["content"],
-                role=turn["role"],
-                user_id="alice",
-                session_id="s1",
-            )
+            await alice.record(turn["content"], role=turn["role"], session_id="s1")
 
         for q in QUESTIONS:
             qt = await classifier.classify(q)
@@ -81,25 +76,16 @@ async def main() -> None:
             print(f"\n[{label}] Q: {q}")
 
             if is_pref:
-                ctx = await memory.context(
-                    query=q,
-                    user_id="alice",
-                    role_filter=("user",),
-                    token_budget=2000,
-                )
+                ctx = await alice.context(q, role_filter=("user",), token_budget=2000)
                 reader = Reader(tier.reader, mode="synthesis")
                 res = await reader.read(question=q, context=ctx)
             else:
-                ctx = await memory.context(
-                    query=q,
-                    user_id="alice",
-                    classifier=classifier,
-                )
+                ctx = await alice.context(q, classifier=classifier)
                 reader = Reader(tier.reader)  # default mode="recall"
                 res = await reader.read(
                     question=q,
                     context=ctx,
-                    scope=Scope(org_id="default", user_id="alice"),
+                    scope=alice.scope,
                 )
 
             print(f"A: {res.answer}")
