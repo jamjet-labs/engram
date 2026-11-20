@@ -134,7 +134,7 @@ curl -sX POST localhost:19090/v1/memory/record \
   -d '{"text": "alice prefers espresso", "user_id": "alice"}'
 ```
 
-Endpoints: `record`, `extract`, `recall`, `search`, `context`, `raw_facts`, sessions, messages, healthz.
+Endpoints: `record`, `extract`, `recall`, `search`, `context`, `raw_facts`, sessions, messages, healthz. The server also serves the v1 routes the Java SDK calls (see [Java and Spring Boot](#java-and-spring-boot)).
 
 ### Run as an MCP server (for Claude Code, Cursor, etc.)
 
@@ -148,6 +148,109 @@ async with mcp.server.stdio.stdio_server() as streams:
 ```
 
 ---
+
+## Java and Spring Boot
+
+The Spring Boot starter (`dev.jamjet:engram-spring-boot-starter`) and the Java SDK (`dev.jamjet:jamjet-sdk`) talk to this server over the v1 REST routes. On every change, CI runs the published Java client against a test server that uses a scripted LLM in place of a real one.
+
+Run the server with a token, as in the [Hosted MCP server quickstart](#quickstart):
+
+```bash
+export ENGRAM_AUTH_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+docker run --rm \
+  -e ENGRAM_AUTH_TOKEN="$ENGRAM_AUTH_TOKEN" \
+  -v engram-data:/data \
+  -p 8765:8765 \
+  ghcr.io/jamjet-labs/engram-py-server:0.3.0
+```
+
+Then point the starter at it. The starter defaults to port 9090, which is where the Rust server listened, so set the base URL:
+
+```yaml
+engram:
+  base-url: http://localhost:8765
+  api-token: ${ENGRAM_TOKEN}
+```
+
+`ENGRAM_TOKEN` must hold the same value as the server's `ENGRAM_AUTH_TOKEN`.
+
+### Fact extraction needs an LLM
+
+The image starts Engram without an LLM, so it does not extract facts, and logs a warning at startup that says so. Without an LLM:
+
+- `POST /v1/memory` (the client's `add`) returns 400.
+- `saveMessages` stores the turns and returns `fact_ids: null`.
+- recall, search and context only find facts written through `POST /v1/memory/record`.
+
+To extract facts, serve Engram from Python with an LLM client from `engram.llm`:
+
+```python
+import asyncio
+import os
+
+import uvicorn
+
+from engram import Engram
+from engram.embedding.openai import OpenAIEmbedding
+from engram.llm.openai import OpenAILLM
+from engram.server.http import build_http_app
+
+
+async def main() -> None:
+    # Both read OPENAI_API_KEY. engram.llm also has AnthropicLLM and OllamaLLM.
+    memory = await Engram.open("./engram.db", llm=OpenAILLM(), embedder=OpenAIEmbedding())
+    app = build_http_app(memory, auth_token=os.environ["ENGRAM_AUTH_TOKEN"])
+    try:
+        await uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=8765)).serve()
+    finally:
+        await memory.close()
+
+
+asyncio.run(main())
+```
+
+### Differences from the Rust server
+
+The routes, status codes and JSON keys follow the Rust v0.5.x server. These differences are deliberate:
+
+- `POST /v1/memory` without `session_id` extracts under a fresh session per call. `timestamp` sets the session date only when it is an ISO 8601 time with a UTC offset, and is ignored otherwise, as in Rust. With no LLM configured, the call returns 400.
+- `top_k` and `max_results` must be 1 to 200. Rust accepted any size.
+- `GET /v1/memory/search` is hybrid recall, not keyword-only, and its hits carry `confidence`.
+- `tier` values are `working`, `episodic`, `semantic` and `archival`.
+- `POST /v1/memory/context` accepts `format` and ignores it, and has no `tier_breakdown`. `token_count` is an estimate of about 4 characters per token.
+- `DELETE /v1/memory/facts/{id}` revokes the fact, which is reversible. An unknown id returns 404 (Rust returned 200), and a `reason` over 1000 characters returns 422.
+- `GET /v1/memory/stats` has no `total_entities` or `total_relationships`.
+- `POST /v1/memory/consolidate` returns 501. The Python engine has no consolidation.
+- `DELETE /v1/memory/users/{id}` hard-erases the user's facts, chat turns, events, entities and relationships, and keeps content-free erasure records. It never returns success unless the erase finished: 409 if the erase is refused, 503 if a fact was written while it ran (calling again finishes it), and 500 for a storage error.
+- A request without `user_id` uses the user `default`. Rust used the whole org there, which this server has no equivalent for.
+- The message routes are scoped to `(org_id, user_id)`. Rust filtered on `org_id` alone.
+- Message `role` must be `user`, `assistant`, `system` or `tool`. Rust accepted any string.
+- Message `metadata` is accepted and not stored, and comes back as `{}`.
+- `seq` is a turn's 0-based position among the conversation's visible turns, oldest first. Rust stored the index within each save call.
+- `GET /v1/memory/messages` lists conversations by first turn. Rust listed them by id.
+- `GET /v1/memory/messages/{id}` for an unknown conversation returns 200 with an empty list.
+- `DELETE /v1/memory/messages/{id}` with an empty `user_id` or `org_id` returns 400 instead of using the `default` scope.
+- A request that fails validation (a missing field, a wrong type, a value out of range) returns 422 with FastAPI's `{"detail": ...}` body. Rust returned 400 with `{"error": ...}`.
+
+The module docstring of `src/engram/server/legacy_v1.py` is the full list.
+
+### Ids in paths
+
+The published Java client puts the conversation id in the message paths with `URLEncoder`, which writes a space as `+` and a `/` as `%2F`. To match it, the message routes read `+` as a space and `%2B` as a plus. Other clients should send a space as `%20` and a plus as `%2B`. Conversation ids may contain `/`.
+
+The client puts the user id in `DELETE /v1/memory/users/{id}` without encoding it. That route refuses any query string with 400, so `deleteUser("bob?x=1")` erases nothing rather than erasing `bob`. The server cannot catch a `#`: the client drops it and the rest of the id before sending, so `deleteUser("bob#1234")` erases `bob`. An id that ends in `?` arrives cut short in the same way. The server also decodes percent escapes in the path, and the client sends `%` as is, so `deleteUser("a%2Fb")` erases the user `a/b`. Keep `?`, `#` and `%` out of user ids when you use this client.
+
+### Forgetting and conversations
+
+The facts the server extracts from a conversation do not record which turn they came from. So forgetting any one of them withholds every turn of that conversation, including turns saved later, until the fact is reinstated. This fails closed. Deleting a conversation and reusing its id after a fact from it was forgotten behaves the same way.
+
+### Large users
+
+Deleting a user with a very large history can take long enough to time out over HTTP. Each call erases more, so repeating the call finishes the job.
+
+### One token, one trust domain
+
+Any token holder can forget a fact by id in any scope. See [Tenancy](#tenancy-one-token-is-one-trust-domain).
 
 ## Revocation, erasure and provenance
 
@@ -179,13 +282,15 @@ Query-time re-extraction and `extract()` drop any fact a tombstone would withhol
 
 **The re-insertion rule.** A write cannot un-revoke. Recording the same claim again stores it but it is born hidden (`record(..., reject_revoked=True)` raises `RevokedContentError` instead). Making the claim visible again takes `Engram.reinstate(fact, actor=..., reason=...)` on the revoked fact itself, which is recorded on the tombstone; reinstating a copy that was born hidden is refused, so a write is never a handle on the original. Reinstating lifts only that fact's own tombstones: anything that also quotes or derives from another fact that is still revoked stays hidden. Matching is on normalized text, not meaning: a paraphrase, a number written differently, or a lookalike letter from another script is a new claim and needs its own revocation or a `derived_from` link.
 
-**What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Revoke, supersede, reinstate and erase are Python API only in this release, because the HTTP server has one shared token and no per-caller identity to record or check. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
+**What is not covered.** Paraphrases, as above, including events whose extracted subject, verb and object reword the claim and carry no `source_fact_ids`. Over HTTP, `DELETE /v1/memory/facts/{id}` revokes a fact and `DELETE /v1/memory/users/{id}` erases everything held for a user. Supersede, reinstate and erasing one fact by id are Python API only in this release. The HTTP server has one shared token and no per-caller identity, so these routes record the server as the actor (`restv1` for forget, `restv1x` and a random token for delete user), not who called. Copies already handed to a caller, an LLM provider or a log are outside the store. A 0.2 library opening the same database file reads the base tables and does not apply the views.
 
 **Older and newer libraries.** 0.2 has no version check, so nothing stops it from opening a 0.3 database and ignoring every tombstone. Keep 0.2 processes away from a file once 0.3 has written to it. From 0.3 on, the database records its schema version (2), and a library refuses to open a file written by a newer schema, before writing anything to it.
 
 **Erasure.** `Engram.erase(fact, actor=..., reason=...)` deletes, in one write transaction held from discovery to commit, the fact; every fact in its scope that equals or quotes it (same matching rule as above), and facts derived from any of them, repeated until nothing new is found; events listing them or quoting an erased text; the transcript turns they cite or that quote an erased text; and the free text of any tombstone or reinstatement note that quotes it. A short text such as a single word only matches on equality, so erasing "Paris" does not delete every turn that mentions Paris. FTS rows go with their base rows. The vector index for the scope is rebuilt without the erased vectors. It returns an `ErasureRecord` with ids, counts, actor and reason, and no content. A reason or actor containing any three-token run of an erased text is rejected; a single distinctive word can still get through, so keep audit fields to ticket numbers and roles.
 
 If the erased fact was revoked, its tombstone keeps the SHA-256 of the normalized text so the claim stays blocked. For a short text that hash can be confirmed by guessing; pass `block_reinsertion=False` to drop it as well, after which the same text can be recorded again.
+
+Erasing a revoked fact by id with `Engram.erase` can make turns of its conversation visible again. The turns that quote it are deleted, but turns that only paraphrase it were withheld by its tombstone and come back. This is a known issue, tracked for a fix.
 
 What the backend can show and what it cannot:
 
@@ -357,8 +462,8 @@ The server returns `MCP-Session-Id` in the response headers; subsequent requests
 
 ### Auth model
 
-- With `$ENGRAM_AUTH_TOKEN` set, every route needs `Authorization: Bearer <token>`: `/mcp`, `/v1/memory/*`, `/v1/sessions/*`, `/docs` and `/openapi.json`. Only `/healthz` is open. Requests without the token get 401.
-- `/healthz` answers GET and HEAD without the token.
+- With `$ENGRAM_AUTH_TOKEN` set, every route needs `Authorization: Bearer <token>`: `/mcp`, `/v1/memory/*`, `/v1/sessions/*`, `/docs` and `/openapi.json`. Only `/healthz` and `/health` are open. Requests without the token get 401.
+- `/healthz` and `/health` answer GET and HEAD without the token.
 - The server **refuses to start** if `$ENGRAM_AUTH_TOKEN` is unset, and says why. On a host other machines can reach it also refuses a token shorter than 16 characters, one that repeats a few characters, or an obvious placeholder such as `changeme` (shorter than 32 gets a warning). To run without a token on purpose:
   - `--no-auth --host 127.0.0.1` (or `::1`) for local use. `localhost` is rejected because `/etc/hosts` can redirect it.
   - `--allow-unauthenticated` (or `ENGRAM_ALLOW_UNAUTHENTICATED=1`) on any host, for example behind a proxy that does its own auth. The server prints a warning at startup.

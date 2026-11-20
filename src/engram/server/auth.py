@@ -1,9 +1,10 @@
 """ASGI guards for the Engram HTTP server: bearer token, Origin and Host checks.
 
-`build_http_app` wraps the whole app, REST routes and `/mcp` alike. Only
-`/healthz` is exempt. One token gates everything the server can reach, so one
-token is one trust domain: whoever holds it can read and write every
-`(org_id, user_id)` scope in that database.
+`build_http_app` wraps the whole app, REST routes and `/mcp` alike. Only the
+health checks (`/healthz`, and `/health` for Rust v0.5.x clients) are exempt.
+One token gates everything the server can reach, so one token is one trust
+domain: whoever holds it can read and write every `(org_id, user_id)` scope in
+that database.
 
 DNS rebinding: a web page can point its own hostname at 127.0.0.1 and then talk
 to a local server. Its cross-origin requests and POSTs carry an `Origin` header

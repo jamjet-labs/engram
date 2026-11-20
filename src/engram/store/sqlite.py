@@ -18,7 +18,13 @@ from uuid import UUID
 
 import aiosqlite
 
-from engram.errors import NotFoundError, ScopeError, StoreError
+from engram.errors import (
+    NotFoundError,
+    ScopeErasedError,
+    ScopeError,
+    ScopeResidueRefusedError,
+    StoreError,
+)
 from engram.governance import (
     ErasureRecord,
     HiddenReason,
@@ -126,6 +132,12 @@ def _ids_json(ids: Collection[str]) -> str:
 
 def _dt(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
+
+
+def _require_aware(since: datetime | None) -> None:
+    """A naive time would be read as local time, which is wrong for a naive UTC value."""
+    if since is not None and since.tzinfo is None:
+        raise ValueError("not_erased_since must be timezone-aware")
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -329,6 +341,7 @@ class SqliteStore:
         writer: str | None = None,
         source: str = "upsert",
         derived_from: Iterable[UUID] | None = None,
+        not_erased_since: datetime | None = None,
     ) -> None:
         """Insert or update a fact, its provenance row and its derivation links.
 
@@ -336,10 +349,24 @@ class SqliteStore:
         The content hash follows the text, so rewriting an active fact into
         revoked text hides it. Nothing here touches the revocations table: a
         write cannot lift a tombstone.
+
+        ``not_erased_since`` is when the caller's write started. If the
+        scope's data was erased (`Engram.erase_user`) at or after that time,
+        this raises ScopeErasedError and writes nothing: the fact was derived
+        from data that erase removed. It must be timezone-aware (ValueError).
         """
+        _require_aware(not_erased_since)
         sources = list(derived_from or [])
         try:
             async with self._transaction():
+                # Checked inside the transaction, which holds the write lock,
+                # so no erasure can commit between this check and the insert.
+                if not_erased_since is not None and await self._scope_erased_since(
+                    fact.scope, not_erased_since
+                ):
+                    raise ScopeErasedError(
+                        "the scope was erased while this write ran; the fact was not stored"
+                    )
                 # Checked inside the transaction, so a concurrent erase cannot
                 # remove a source between the check and the insert.
                 if sources:
@@ -447,6 +474,24 @@ class SqliteStore:
                 _dt(_now()),
             ),
         )
+
+    async def _scope_erased_since(self, scope: Scope, since: datetime) -> bool:
+        """Has a scope-wide erasure record been written in scope at or after ``since``?
+
+        Compares parsed times, not the stored strings: a local UTC offset can
+        change between two writes (daylight saving), and then the ISO 8601
+        strings no longer sort in time order.
+        """
+        start = since.astimezone()
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT erased_at FROM erasures
+                    WHERE org_id = ? AND user_id = ?
+                      AND json_extract(artifacts, '$.scope_erasure') = 1""",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return any(datetime.fromisoformat(r[0]).astimezone() >= start for r in rows)
 
     async def _message_in_scope(self, message_id: UUID, scope: Scope) -> bool:
         async with self._reading() as db:
@@ -663,8 +708,22 @@ class SqliteStore:
 
     # ── Messages ─────────────────────────────────────────────────────────
 
-    async def upsert_message(self, message: ChatMessage) -> None:
+    async def upsert_message(
+        self, message: ChatMessage, *, not_erased_since: datetime | None = None
+    ) -> None:
+        """Insert or update a transcript turn.
+
+        ``not_erased_since`` works as in :meth:`upsert_fact`: if the scope was
+        erased at or after it, raises ScopeErasedError and writes nothing.
+        """
+        _require_aware(not_erased_since)
         async with self._transaction():
+            if not_erased_since is not None and await self._scope_erased_since(
+                message.scope, not_erased_since
+            ):
+                raise ScopeErasedError(
+                    "the scope was erased while this write ran; the turn was not stored"
+                )
             await self._check_owner("message", str(message.id), message.scope)
             keep = await self._add_matches(
                 "message", str(message.id), message.content, message.scope
@@ -851,6 +910,44 @@ class SqliteStore:
                 rows = await cur.fetchall()
             return [self._row_to_message(r) for r in rows]
 
+    async def list_session_ids(self, scope: Scope) -> list[str]:
+        """Sessions with a visible transcript turn in scope, by first turn."""
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT session_id FROM live_messages
+                   WHERE org_id=? AND user_id=?
+                   GROUP BY session_id ORDER BY MIN(timestamp) ASC, session_id ASC""",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
+    async def list_session_messages(
+        self, session_id: str, scope: Scope, *, last_n: int | None = None
+    ) -> list[ChatMessage]:
+        """A session's visible turns, oldest first. For the v1 REST contract.
+
+        ``last_n=None`` returns every visible turn, with no cap. ``last_n=N``
+        returns the newest N, still oldest first. ``last_n`` below 1 is
+        refused. Ties on timestamp are broken by id.
+        """
+        if last_n is not None and not last_n >= 1:
+            raise ValueError("last_n must be at least 1")
+        where = "org_id=? AND user_id=? AND session_id=?"
+        args: tuple[Any, ...] = (scope.org_id, scope.user_id, session_id)
+        if last_n is None:
+            sql = f"SELECT * FROM live_messages WHERE {where} ORDER BY timestamp ASC, id ASC"
+        else:
+            sql = f"""SELECT * FROM (
+                          SELECT * FROM live_messages WHERE {where}
+                           ORDER BY timestamp DESC, id DESC LIMIT ?
+                      ) ORDER BY timestamp ASC, id ASC"""
+            args = (*args, last_n)
+        async with self._reading() as db:
+            async with db.execute(sql, args) as cur:
+                rows = await cur.fetchall()
+        return [self._row_to_message(r) for r in rows]
+
     # ── Governance: provenance, revocation, erasure ──────────────────────
     #
     # Visibility is decided by the `hidden_facts` view (schema.sql). The read
@@ -1016,6 +1113,20 @@ class SqliteStore:
 
     async def fact_exists(self, fact_id: UUID, scope: Scope) -> bool:
         return await self.explain(fact_id, scope) is not None
+
+    async def fact_row_committed(self, fact_id: UUID, scope: Scope) -> bool:
+        """Is the fact's row there as of the latest commit? Returns a bool.
+
+        Reads on the write connection under the write lock. The read
+        connection can hold an older snapshot while another task has a
+        statement open on it, and then still show a fact an erase removed.
+        """
+        async with self._write_lock:
+            async with self._conn.execute(
+                "SELECT 1 FROM facts WHERE id = ? AND org_id = ? AND user_id = ?",
+                (str(fact_id), scope.org_id, scope.user_id),
+            ) as cur:
+                return await cur.fetchone() is not None
 
     async def content_hash_of(self, fact_id: UUID, scope: Scope) -> str | None:
         async with self._reading() as db:
@@ -1486,20 +1597,21 @@ class SqliteStore:
             },
         )
         scrubbed = f"[scrubbed by erasure {record.id}]"
-
-        def ph(n: int) -> str:
-            return ",".join("?" * n)
+        # Each id set is bound as one JSON parameter, not one "?" per id:
+        # SQLite refuses more than 32,766 variables in one statement.
+        in_ids = "IN (SELECT value FROM json_each(?))"
+        ids_json = _ids_json(ids)
 
         # Base rows first. Until they are gone, the side rows below (match
         # rows, content hashes, tombstone text) are what keeps them hidden.
-        await self._conn.execute(f"DELETE FROM facts WHERE id IN ({ph(len(ids))})", ids)
+        await self._conn.execute(f"DELETE FROM facts WHERE id {in_ids}", (ids_json,))
         if message_ids:
             await self._conn.execute(
-                f"DELETE FROM messages WHERE id IN ({ph(len(message_ids))})", tuple(message_ids)
+                f"DELETE FROM messages WHERE id {in_ids}", (_ids_json(message_ids),)
             )
         if event_ids:
             await self._conn.execute(
-                f"DELETE FROM events WHERE id IN ({ph(len(event_ids))})", tuple(event_ids)
+                f"DELETE FROM events WHERE id {in_ids}", (_ids_json(event_ids),)
             )
 
         kept_hashes = 0
@@ -1537,15 +1649,14 @@ class SqliteStore:
         for kind, items in (("fact", ids), ("message", message_ids), ("event", event_ids)):
             if items:
                 await self._conn.execute(
-                    f"DELETE FROM content_matches WHERE kind = ? AND item_id IN ({ph(len(items))})",
-                    (kind, *items),
+                    f"DELETE FROM content_matches WHERE kind = ? AND item_id {in_ids}",
+                    (kind, _ids_json(items)),
                 )
         await self._conn.execute(
-            f"""DELETE FROM fact_derivations
-                 WHERE fact_id IN ({ph(len(ids))}) OR source_fact_id IN ({ph(len(ids))})""",
-            (*ids, *ids),
+            f"DELETE FROM fact_derivations WHERE fact_id {in_ids} OR source_fact_id {in_ids}",
+            (ids_json, ids_json),
         )
-        await self._conn.execute(f"DELETE FROM fact_meta WHERE fact_id IN ({ph(len(ids))})", ids)
+        await self._conn.execute(f"DELETE FROM fact_meta WHERE fact_id {in_ids}", (ids_json,))
         await self._conn.execute(
             """INSERT INTO erasures
                (id, org_id, user_id, fact_ids, actor, reason, erased_at, artifacts, guarantees)
@@ -1620,6 +1731,179 @@ class SqliteStore:
                 )
                 for r in rows
             ]
+
+    # ── v1 REST support (ids and counts only, no text) ───────────────────
+
+    async def find_fact_scope(self, fact_id: UUID) -> Scope | None:
+        """The scope a fact id belongs to, for the v1 forget route.
+
+        The v1 contract names a fact by id alone. One server token is one trust
+        domain, so resolving the scope from the id grants nothing the token did
+        not already allow.
+
+        Not an authorization check: it returns the owner of any fact id in any
+        scope, hidden facts included. Use it only where the caller is already
+        trusted for every scope, as on a one-token server.
+        """
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT org_id, user_id FROM facts WHERE id=?", (str(fact_id),)
+            ) as cur:
+                row = await cur.fetchone()
+        return None if row is None else Scope(org_id=row[0], user_id=row[1])
+
+    async def list_fact_ids(self, scope: Scope) -> list[UUID]:
+        """Every fact id in scope, hidden ones included. For erasure only."""
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT id FROM facts WHERE org_id=? AND user_id=? ORDER BY rowid",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return [UUID(r[0]) for r in rows]
+
+    async def fact_text_quoted_by(self, value: str, scope: Scope) -> bool:
+        """Does ``value`` quote any fact text in scope, hidden facts included?
+
+        The rule :meth:`erase` applies to its reason and actor: any three-token
+        run of a text, or all of a text of three tokens or fewer. Lets
+        `Engram.erase_user` refuse before it deletes anything. Returns a bool,
+        never text.
+        """
+        value_norm = normalize_text(value)
+        async with self._reading() as db:
+            async with db.execute(
+                "SELECT text FROM facts WHERE org_id=? AND user_id=?",
+                (scope.org_id, scope.user_id),
+            ) as cur:
+                rows = await cur.fetchall()
+        return any(quotes_any_run(value_norm, normalize_text(r[0])) for r in rows)
+
+    async def fact_counts(self) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) across every scope."""
+        async with self._reading() as db:
+            async with db.execute("SELECT COUNT(*) FROM facts") as cur:
+                total_row = await cur.fetchone()
+            async with db.execute(
+                "SELECT COUNT(*) FROM live_facts WHERE invalid_at IS NULL"
+            ) as cur:
+                valid_row = await cur.fetchone()
+        if total_row is None or valid_row is None:
+            raise StoreError("fact_counts: COUNT returned no row")
+        return int(total_row[0]), int(valid_row[0])
+
+    async def delete_session_messages(self, session_id: str, scope: Scope) -> int:
+        """Hard-delete one session's transcript in scope. Returns turns removed.
+
+        Facts extracted from these turns stay, as on the Rust server. With
+        foreign keys on, `facts.source_message_id` is ON DELETE SET NULL, so
+        those facts lose their message link. Revocation matches on the removed
+        turns go too. Consequence: a revoked fact from this session no longer
+        links to a message, so rule (c) of the `live_messages` view withholds
+        every turn later recorded under the same session id. That is
+        fail-closed and accepted; reusing the id shows an empty session.
+        """
+        # By predicate, not by a list of ids: a list binds one variable per
+        # turn, and SQLite refuses more than 32,766 in one statement.
+        session = "org_id=? AND user_id=? AND session_id=?"
+        args = (scope.org_id, scope.user_id, session_id)
+        try:
+            async with self._transaction():
+                await self._conn.execute(
+                    f"DELETE FROM content_matches WHERE kind='message' AND item_id IN "
+                    f"(SELECT id FROM messages WHERE {session})",
+                    args,
+                )
+                cur = await self._conn.execute(f"DELETE FROM messages WHERE {session}", args)
+                removed = cur.rowcount
+        except aiosqlite.Error as e:
+            raise StoreError(f"delete_session_messages: {e}") from e
+        return removed
+
+    async def erase_scope_residue(self, scope: Scope, *, reason: str, actor: str) -> ErasureRecord:
+        """Hard-delete what per-fact erasure leaves behind in a scope.
+
+        Called by `Engram.erase_user` after every fact in the scope has been
+        erased: transcript turns, events, entities, relationships and fact_meta
+        rows. Refuses while any fact remains, raising ScopeResidueRefusedError,
+        so it can never stand in for `erase`. Every tombstone in the scope
+        loses its content hash and normalized text, including a hash an earlier
+        ``erase(block_reinsertion=True)`` kept, so the erased texts are no
+        longer blocked from re-insertion. Revocation and erasure rows stay:
+        they are the content-free audit trail.
+
+        In the same transaction, writes one erasure record with no fact ids,
+        ``reason`` and ``actor`` as given, and the per-table counts in
+        ``artifacts`` (``revocations_scrubbed`` counts tombstones cleared).
+        ``artifacts["scope_erasure"] = 1`` marks it as the scope-wide record:
+        ``upsert_fact(not_erased_since=...)`` refuses a write that started
+        before it. Returns it; the caller passes it to :meth:`finalize_erasure`,
+        which keeps the marker.
+
+        `fact_entity_refs` rows go through ON DELETE CASCADE (foreign_keys is ON,
+        set from schema.sql in `open`).
+        """
+        where = "org_id=? AND user_id=?"
+        args = (scope.org_id, scope.user_id)
+        removed: dict[str, int] = {}
+        try:
+            async with self._transaction():
+                async with self._conn.execute(
+                    f"SELECT COUNT(*) FROM facts WHERE {where}", args
+                ) as cur:
+                    row = await cur.fetchone()
+                if row is None:
+                    raise StoreError("erase_scope_residue: COUNT returned no row")
+                if row[0]:
+                    raise ScopeResidueRefusedError(
+                        f"erase_scope_residue: {row[0]} facts remain in scope"
+                    )
+                for kind, table in (("message", "messages"), ("event", "events")):
+                    await self._conn.execute(
+                        f"DELETE FROM content_matches WHERE kind=? AND item_id IN "
+                        f"(SELECT id FROM {table} WHERE {where})",
+                        (kind, *args),
+                    )
+                for table in ("messages", "events", "relationships", "entities", "fact_meta"):
+                    cur2 = await self._conn.execute(f"DELETE FROM {table} WHERE {where}", args)
+                    removed[table] = cur2.rowcount
+                cur2 = await self._conn.execute(
+                    f"""UPDATE revocations SET content_hash = NULL, content_norm = NULL
+                         WHERE {where}
+                           AND (content_hash IS NOT NULL OR content_norm IS NOT NULL)""",
+                    args,
+                )
+                removed["revocations_scrubbed"] = cur2.rowcount
+                removed["scope_erasure"] = 1
+                record = ErasureRecord(
+                    org_id=scope.org_id,
+                    user_id=scope.user_id,
+                    fact_ids=[],
+                    actor=actor,
+                    reason=reason,
+                    erased_at=_now(),
+                    artifacts=removed,
+                )
+                await self._conn.execute(
+                    """INSERT INTO erasures
+                       (id, org_id, user_id, fact_ids, actor, reason, erased_at, artifacts,
+                        guarantees)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (
+                        str(record.id),
+                        record.org_id,
+                        record.user_id,
+                        json.dumps([]),
+                        actor,
+                        reason,
+                        _dt(record.erased_at),
+                        json.dumps(record.artifacts),
+                        json.dumps(record.guarantees),
+                    ),
+                )
+        except aiosqlite.Error as e:
+            raise StoreError(f"erase_scope_residue: {e}") from e
+        return record
 
     # ── Row -> Pydantic ──────────────────────────────────────────────────
 

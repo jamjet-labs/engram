@@ -30,3 +30,22 @@ class ExtractionError(EngramError):
 
 class EmbeddingError(EngramError):
     """Embedding provider failure."""
+
+
+class ScopeErasedError(EngramError):
+    """A write lost a race with ``Engram.erase_user`` on its scope. Nothing was stored.
+
+    Raised by ``SqliteStore.upsert_fact(not_erased_since=...)`` when the
+    scope's data was erased at or after the time the write started. Not a
+    StoreError: the store is fine, and retrying would store the data the
+    erase was asked to remove.
+    """
+
+
+class ScopeResidueRefusedError(StoreError):
+    """``erase_scope_residue`` found facts in the scope, so it deleted nothing.
+
+    A fact was written to the scope while ``Engram.erase_user`` ran. Calling
+    ``erase_user`` again erases it and finishes. Other StoreErrors from
+    ``erase_user`` are storage faults that a retry may not fix.
+    """

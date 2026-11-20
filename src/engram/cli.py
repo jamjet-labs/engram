@@ -11,9 +11,12 @@ Use `--dry-run` in tests to validate flags without actually binding a port.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 import typer
+
+logger = logging.getLogger(__name__)
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 MIN_TOKEN_LEN = 32
@@ -258,6 +261,14 @@ async def serve_engram(
     from engram.server.mcp import build_mcp_server
 
     engram = await Engram.open(path=db_path)
+    if engram._extract is None:
+        logger.warning(
+            "no LLM configured, so fact extraction is off: POST /v1/memory and "
+            "/v1/memory/extract return 400, POST /v1/memory/messages stores the turns with "
+            "fact_ids null, and recall and context only find facts written through "
+            "/v1/memory/record. To extract facts, serve Engram from Python with llm=... "
+            "(see the README)."
+        )
     try:
         mcp_server = build_mcp_server(engram, name="engram")
         fast_app = build_http_app(
