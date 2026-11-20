@@ -10,15 +10,15 @@ import pytest
 from engram import Engram
 from engram.models import Event, Fact
 from engram.scope import Scope
+from tests.conformance.backends import OpenMemory
 
 ALICE = Scope(org_id="default", user_id="alice")
 BOB = Scope(org_id="default", user_id="bob")
 
 
 @pytest.fixture
-async def memory():
-    async with await Engram.open(":memory:") as m:
-        yield m
+async def memory(open_memory: OpenMemory) -> Engram:
+    return await open_memory()
 
 
 async def test_find_fact_scope(memory: Engram) -> None:
@@ -59,6 +59,7 @@ async def test_erase_scope_residue_refuses_while_facts_remain(memory: Engram) ->
         await memory._store.erase_scope_residue(ALICE, reason="test", actor="t")
 
 
+@pytest.mark.sqlite_only
 async def test_erase_scope_residue_refuses_while_only_a_revoked_fact_remains(
     memory: Engram,
 ) -> None:
@@ -99,6 +100,7 @@ async def _count(memory: Engram, table: str, user: str) -> int:
     return int(row[0])
 
 
+@pytest.mark.sqlite_only
 async def test_erase_scope_residue_clears_scope_only(memory: Engram) -> None:
     t = datetime(2026, 11, 10, tzinfo=UTC)
     fact = await memory.record("alice likes tea", user_id="alice")
@@ -157,6 +159,7 @@ async def test_erase_scope_residue_clears_scope_only(memory: Engram) -> None:
     assert row is not None and row[0] == 0
 
 
+@pytest.mark.sqlite_only
 async def test_erase_scope_residue_scrubs_every_tombstone_in_scope(memory: Engram) -> None:
     conn = memory._store._conn
     # A tombstone whose fact is already gone, still carrying its hash and text.

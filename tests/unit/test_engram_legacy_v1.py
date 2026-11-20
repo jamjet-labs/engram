@@ -13,6 +13,7 @@ from engram import Engram
 from engram.errors import ScopeResidueRefusedError, StoreError
 from engram.models import Event
 from engram.scope import Scope
+from tests.conformance.backends import OpenMemory
 
 ALICE = Scope(org_id="default", user_id="alice")
 BOB = Scope(org_id="default", user_id="bob")
@@ -36,9 +37,8 @@ FTS_SHADOW_PREFIXES = ("facts_fts_", "events_fts_")
 
 
 @pytest.fixture
-async def memory():
-    async with await Engram.open(":memory:") as m:
-        yield m
+async def memory(open_memory: OpenMemory) -> Engram:
+    return await open_memory()
 
 
 async def _scalar(db: aiosqlite.Connection, sql: str, args: tuple[Any, ...] = ()) -> int:
@@ -125,6 +125,7 @@ async def test_forget_refuses_a_blank_field_before_looking_up_the_id(
 # ── erase_user ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.sqlite_only
 async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
     tea = await memory.record("alice likes tea", user_id="alice")
     revoked = await memory.record("alice likes jazz music", user_id="alice")
@@ -242,6 +243,7 @@ async def test_erase_user_leaves_no_rows_in_scope(memory: Engram) -> None:
         assert await _scalar(db, "SELECT COUNT(*) FROM fact_entity_refs") == 1
 
 
+@pytest.mark.sqlite_only
 async def test_erase_user_clears_a_hash_an_earlier_erase_kept(memory: Engram) -> None:
     fact = await memory.record("alice likes jazz", user_id="alice")
     await memory.revoke(fact.id, reason="test", actor="t", user_id="alice")
@@ -277,7 +279,8 @@ async def test_erase_user_records_the_residue_it_removes(memory: Engram) -> None
         "revocations_scrubbed": 0,
         "scope_erasure": 1,
     }
-    assert "sqlite_secure_delete" in record.guarantees  # finalized like a per-fact erasure
+    # Finalized like a per-fact erasure: the residue step alone records no guarantees.
+    assert record.guarantees
     assert await memory.list_conversations(user_id="alice") == []
 
 
