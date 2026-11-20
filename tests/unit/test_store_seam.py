@@ -542,11 +542,19 @@ def _names(folder: Path) -> list[str]:
     return sorted(p.name for p in folder.iterdir())
 
 
-def _probe_migration() -> Migration:
-    return Migration(
-        version=BASELINE_VERSION + 1,
-        statements=("CREATE TABLE seam_probe (id INTEGER PRIMARY KEY, note TEXT NOT NULL)",),
-    )
+# A test-only migration goes after the real ones, so these tests stay true as
+# real migrations are added.
+PROBE = SCHEMA_VERSION + 1
+CURRENT_ROWS = list(range(1, SCHEMA_VERSION + 1))  # each version records its own row
+PROBED_ROWS = [*CURRENT_ROWS, PROBE]
+
+
+def _with_probe(*statements: str) -> tuple[Migration, ...]:
+    return (*MIGRATIONS, Migration(version=PROBE, statements=statements))
+
+
+def _probed_migrations() -> tuple[Migration, ...]:
+    return _with_probe("CREATE TABLE seam_probe (id INTEGER PRIMARY KEY, note TEXT NOT NULL)")
 
 
 async def test_read_only_open_runs_no_ddl(tmp_path: Path) -> None:
@@ -568,14 +576,14 @@ async def test_read_only_open_refuses_an_older_schema(
     await _make_file(db)
     before = _snapshot(db)
     # This library now knows one more migration than the file has.
-    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", (_probe_migration(),))
+    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", _probed_migrations())
 
     with pytest.raises(SchemaVersionError, match=r"(?i)open it writable once to upgrade"):
         await SqliteStore.open(db, read_only=True)
     assert _snapshot(db) == before
 
     await (await SqliteStore.open(db)).close()
-    assert _versions(db) == [1, 2, 3]
+    assert _versions(db) == PROBED_ROWS
     await (await SqliteStore.open(db, read_only=True)).close()
 
 
@@ -690,15 +698,12 @@ async def test_a_failing_migration_leaves_the_file_at_the_old_version(
 ) -> None:
     db = tmp_path / "e.db"
     fact = await _make_file(db)
-    broken = Migration(
-        version=BASELINE_VERSION + 1,
-        statements=("CREATE TABLE seam_probe (id INTEGER PRIMARY KEY)", "THIS IS NOT SQL"),
-    )
-    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", (broken,))
+    broken = _with_probe("CREATE TABLE seam_probe (id INTEGER PRIMARY KEY)", "THIS IS NOT SQL")
+    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", broken)
 
-    with pytest.raises(StoreError, match="migration 3"):
+    with pytest.raises(StoreError, match=f"migration {PROBE} failed"):
         await SqliteStore.open(db)
-    assert _versions(db) == [1, 2]
+    assert _versions(db) == CURRENT_ROWS
     assert "seam_probe" not in _tables(db)
 
     monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", MIGRATIONS)
@@ -707,7 +712,7 @@ async def test_a_failing_migration_leaves_the_file_at_the_old_version(
         assert [f.id for f in await store.keyword_search("shed", ACME_ALICE)] == [fact.id]
     finally:
         await store.close()
-    assert _versions(db) == [1, 2]
+    assert _versions(db) == CURRENT_ROWS
 
 
 async def test_a_new_migration_runs_once_and_older_libraries_then_refuse_the_file(
@@ -715,13 +720,13 @@ async def test_a_new_migration_runs_once_and_older_libraries_then_refuse_the_fil
 ) -> None:
     old, fresh = tmp_path / "old.db", tmp_path / "fresh.db"
     await _make_file(old)
-    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", (_probe_migration(),))
+    monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", _probed_migrations())
 
     # The second open neither reruns the migration nor takes its own row as newer.
     for db in (old, fresh, old, fresh):
         await (await SqliteStore.open(db)).close()
     for db in (old, fresh):
-        assert _versions(db) == [1, 2, 3]
+        assert _versions(db) == PROBED_ROWS
         assert "seam_probe" in _tables(db)
 
     monkeypatch.setattr(sqlite_migrations, "MIGRATIONS", MIGRATIONS)
