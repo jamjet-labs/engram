@@ -13,7 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.routing import Route
 
 from engram.engram import Engram
@@ -124,6 +124,19 @@ class _ExtractedFactSummary(BaseModel):
 
 class _ExtractResponse(BaseModel):
     facts: list[_ExtractedFactSummary]
+
+
+def _bad_input(e: ValueError) -> HTTPException:
+    """A 400 for input Engram refuses. The detail names the field and the rule, never the value."""
+    if isinstance(e, ValidationError):
+        # Pydantic's own message quotes the input, so build one without it.
+        detail = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+            for err in e.errors(include_url=False, include_input=False)
+        )
+    else:
+        detail = str(e)
+    return HTTPException(status_code=400, detail=detail)
 
 
 def build_http_app(
@@ -258,6 +271,8 @@ def build_http_app(
             )
         except NotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise _bad_input(e) from e
         return _RecordResponse(fact_id=fact.id, text=fact.text)
 
     @app.post("/v1/memory/search", response_model=_SearchResponse)
@@ -357,6 +372,8 @@ def build_http_app(
             facts = await engram.extract(msgs, session_date=req.session_date, persist=req.persist)
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        except ValueError as e:
+            raise _bad_input(e) from e
         return _ExtractResponse(
             facts=[
                 _ExtractedFactSummary(
@@ -372,14 +389,17 @@ def build_http_app(
 
     @app.post("/v1/sessions/{session_id}/messages")
     async def append_message(session_id: str, req: _MessageRequest) -> dict[str, str]:
-        msg = await engram.record_message(
-            content=req.content,
-            role=req.role,
-            session_id=session_id,
-            user_id=req.user_id,
-            org_id=req.org_id,
-            timestamp=req.timestamp,
-        )
+        try:
+            msg = await engram.record_message(
+                content=req.content,
+                role=req.role,
+                session_id=session_id,
+                user_id=req.user_id,
+                org_id=req.org_id,
+                timestamp=req.timestamp,
+            )
+        except ValueError as e:
+            raise _bad_input(e) from e
         return {"message_id": str(msg.id)}
 
     return app
