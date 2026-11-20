@@ -11,6 +11,8 @@ import hashlib
 
 import numpy as np
 
+from engram.embedding.base import EmbedderIdentity
+
 
 class SyntheticEmbedding:
     """Hash-based pseudo-embeddings. Deterministic; fast; no network."""
@@ -21,6 +23,10 @@ class SyntheticEmbedding:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def identity(self) -> EmbedderIdentity:
+        return EmbedderIdentity("synthetic", "blake2b-v1", self._dim)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._embed_one(t) for t in texts]

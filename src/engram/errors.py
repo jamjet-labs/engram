@@ -50,6 +50,15 @@ class EmbeddingError(EngramError):
     """Embedding provider failure."""
 
 
+class EmbeddingResponseError(EmbeddingError):
+    """The embedder answered, but not with one usable vector per text.
+
+    A wrong count, a wrong length, a NaN or infinite value, or a zero vector.
+    The whole answer is refused, so nothing from it is stored or indexed. The
+    message names the vector's index, never its text.
+    """
+
+
 class ScopeErasedError(EngramError):
     """A write lost a race with ``Engram.erase_user`` on its scope. Nothing was stored.
 

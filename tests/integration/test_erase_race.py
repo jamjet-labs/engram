@@ -1,8 +1,9 @@
 """A write in flight when erase_user runs must not land after the erase.
 
-Each test holds a write at its slow step (the LLM call, the embedding, or
-between two stored turns) with an asyncio.Event, runs a complete erase_user,
-then lets the write finish. Nothing is mocked out of the check itself.
+Each test holds a write at its slow step (the LLM call, the embedding, the
+vector add, or between two stored turns) with an asyncio.Event, runs a
+complete erase_user, then lets the write finish. Nothing is mocked out of the
+check itself.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
@@ -80,7 +82,7 @@ class GatedLLM:
 
 
 class GatedEmbedder(SyntheticEmbedding):
-    """Holds the first embed call (made after the fact is stored) until released."""
+    """Holds the first embed call (made before the fact is stored) until released."""
 
     def __init__(self, gate: Gate) -> None:
         super().__init__(dim=384)
@@ -89,6 +91,17 @@ class GatedEmbedder(SyntheticEmbedding):
     async def embed(self, texts: list[str]) -> list[list[float]]:
         await self.gate.hold()
         return await super().embed(texts)
+
+
+def _hold_vector_add(memory: Engram, gate: Gate, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the first vector add, made after the fact is stored, until released."""
+    add = memory._vec.add
+
+    async def held_add(fact_id: UUID, vector: list[float], scope: Scope) -> None:
+        await gate.hold()
+        await add(fact_id, vector, scope)
+
+    monkeypatch.setattr(memory._vec, "add", held_add)
 
 
 async def _open(
@@ -307,15 +320,41 @@ async def test_concurrent_save_and_delete_user_leave_no_turns(open_memory: OpenM
         assert got.json()["total"] == 0
 
 
-# ── The embedding: record, and the window between upsert and vec.add ────
+# ── The embedding, and the window between upsert and vec.add ────────────
 
 
-async def test_record_erased_before_its_vector_is_added_leaves_no_vector(
+async def test_record_erased_while_it_embeds_stores_nothing(
     open_memory: OpenMemory, gate: Gate
 ) -> None:
     memory = await _open(open_memory, embedder=GatedEmbedder(gate))
     task = asyncio.create_task(memory.record(SECRET, user_id="frank"))
-    await gate.wait_entered()  # the fact is stored; its embedding is in flight
+    await gate.wait_entered()  # the embedding is in flight; nothing is stored yet
+    assert await _erase(memory) == 0
+    gate.release.set()
+    with pytest.raises(ScopeErasedError):
+        await task
+    await _assert_nothing_left(memory)
+
+
+async def test_extract_erased_while_it_embeds_stores_nothing(
+    open_memory: OpenMemory, gate: Gate
+) -> None:
+    memory = await _open(open_memory, llm=GatedLLM(), embedder=GatedEmbedder(gate))
+    task = asyncio.create_task(memory.extract([_turn()]))
+    await gate.wait_entered()
+    assert await _erase(memory) == 0
+    gate.release.set()
+    assert await task == []
+    await _assert_nothing_left(memory)
+
+
+async def test_record_erased_before_its_vector_is_added_leaves_no_vector(
+    open_memory: OpenMemory, gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = await _open(open_memory)
+    _hold_vector_add(memory, gate, monkeypatch)
+    task = asyncio.create_task(memory.record(SECRET, user_id="frank"))
+    await gate.wait_entered()  # the fact is stored; its vector is not in the index yet
     assert await _erase(memory) == 1
     gate.release.set()
     fact = await task
@@ -324,11 +363,11 @@ async def test_record_erased_before_its_vector_is_added_leaves_no_vector(
 
 
 async def test_extract_erased_before_its_vector_is_added_leaves_no_vector(
-    open_memory: OpenMemory, gate: Gate
+    open_memory: OpenMemory, gate: Gate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    memory = await _open(open_memory, llm=GatedLLM(), embedder=GatedEmbedder(gate))
-    msg = _turn()
-    task = asyncio.create_task(memory.extract([msg]))
+    memory = await _open(open_memory, llm=GatedLLM())
+    _hold_vector_add(memory, gate, monkeypatch)
+    task = asyncio.create_task(memory.extract([_turn()]))
     await gate.wait_entered()
     assert await _erase(memory) == 1
     gate.release.set()
@@ -448,13 +487,12 @@ async def test_only_a_scope_wide_erasure_in_the_same_scope_refuses(open_memory: 
 
 @pytest.mark.sqlite_only
 async def test_post_add_check_sees_the_erase_past_an_open_read_snapshot(
-    tmp_path: Path, gate: Gate
+    tmp_path: Path, gate: Gate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An open statement on the read connection pins its snapshot; the check must not use it."""
     # A file, so reads go through the second connection.
-    memory = await Engram.open(
-        tmp_path / "e.db", embedder=GatedEmbedder(gate), allow_default_scope=True
-    )
+    memory = await Engram.open(tmp_path / "e.db", allow_default_scope=True)
+    _hold_vector_add(memory, gate, monkeypatch)
     try:
         gate.armed = False
         await memory.record("Frank likes tea", user_id="frank")

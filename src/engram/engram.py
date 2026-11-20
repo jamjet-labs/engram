@@ -614,11 +614,11 @@ class Engram:
         source_message_id: UUID | None = None,
         reject_revoked: bool = False,
     ) -> Fact:
-        """Record a single fact (no LLM extraction). Embeds + stores in one call.
+        """Record a single fact (no LLM extraction). Embeds, then stores, in one call.
 
-        See `ScopedEngram.record` for session ids, roles and the governance
-        arguments (``actor``, ``derived_from``, ``source_message_id``,
-        ``reject_revoked``).
+        An embedder error stores nothing. See `ScopedEngram.record` for session
+        ids, roles and the governance arguments (``actor``, ``derived_from``,
+        ``source_message_id``, ``reject_revoked``).
         """
         self._require_writable()
         return await self._handle(user_id, org_id).record(

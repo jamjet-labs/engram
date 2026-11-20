@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from engram.embedding.base import EmbedderIdentity
 from engram.errors import EmbeddingError
 
 # Map model name -> default vector dim
@@ -44,6 +45,10 @@ class OpenAIEmbedding:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def identity(self) -> EmbedderIdentity:
+        return EmbedderIdentity("openai", self._model, self._dim)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
