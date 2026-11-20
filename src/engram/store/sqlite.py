@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from collections.abc import AsyncIterator, Collection, Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -144,6 +145,25 @@ async def _refuse_if_newer(conn: aiosqlite.Connection, path: str | Path) -> None
     target = sqlite_migrations.target_version()
     if found is not None and found > target:
         raise SchemaVersionError(_newer_schema_message(path, found, target))
+
+
+async def _run_pragma(conn: aiosqlite.Connection, pragma: str) -> None:
+    """Run one PRAGMA, waiting out another process that holds the file.
+
+    SQLite does not call the busy handler for every lock a PRAGMA needs. The
+    first journal_mode=WAL on a new file fails at once with "database is
+    locked" when another process opens the same file at the same moment. So
+    wait and retry for as long as the busy timeout.
+    """
+    deadline = time.monotonic() + _BUSY_TIMEOUT_S
+    while True:
+        try:
+            await conn.execute(pragma)
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e) or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(0.02)
 
 
 async def _apply_migration(conn: aiosqlite.Connection, migration: Migration) -> None:
@@ -294,10 +314,10 @@ class SqliteStore:
             await cls._refuse_newer_schema(conn, path)
             pragmas, statements = _schema_statements()
             for pragma in pragmas:
-                await conn.execute(pragma)
+                await _run_pragma(conn, pragma)
             # Overwrite freed pages with zeros so deleted content does not linger
             # in the database file (per connection; see erase()).
-            await conn.execute("PRAGMA secure_delete = ON")
+            await _run_pragma(conn, "PRAGMA secure_delete = ON")
             # Check, create and migrate in one write transaction, so a newer
             # library cannot record its version between our check and our
             # views, and a failed migration leaves the file as it was.
