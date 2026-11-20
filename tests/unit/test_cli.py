@@ -348,7 +348,7 @@ async def test_serve_engram_applies_the_cli_rules(monkeypatch):
         await cli.serve_engram(host="127.0.0.1", auth_token="bad token", **base)
 
 
-async def _serve_once(monkeypatch) -> None:
+async def _serve_once(monkeypatch, **kwargs) -> None:
     import uvicorn
 
     import engram.cli as cli
@@ -364,6 +364,7 @@ async def _serve_once(monkeypatch) -> None:
         auth_token=None,
         allow_unauthenticated=True,
         log_level="INFO",
+        **kwargs,
     )
 
 
@@ -381,19 +382,12 @@ async def test_serve_engram_warns_that_extraction_is_off(monkeypatch, caplog):
 
 
 async def test_serve_engram_does_not_warn_when_an_llm_is_set(monkeypatch, caplog):
-    from engram.engram import Engram
     from engram.llm.base import LLMResponse
 
     class AnyLLM:
         async def generate(self, messages, temperature=0.0, max_tokens=None, json_mode=False):
             return LLMResponse(content='{"facts": []}', finish_reason="stop")
 
-    opened = Engram.open
-
-    async def open_with_llm(*args, **kwargs):
-        return await opened(*args, llm=AnyLLM(), **kwargs)
-
-    monkeypatch.setattr(Engram, "open", open_with_llm)
     caplog.set_level(logging.WARNING, logger="engram.cli")
-    await _serve_once(monkeypatch)
+    await _serve_once(monkeypatch, llm=AnyLLM())
     assert _no_llm_warnings(caplog) == []

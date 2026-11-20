@@ -41,6 +41,14 @@ class OpenAIEmbedding:
         self._client: Any = AsyncOpenAI(api_key=key)
         self._model = model
         self._dim = dim if dim is not None else _MODEL_DIMS.get(model, 1536)
+        # Only the text-embedding-3 models can return fewer dimensions.
+        # Without the argument the API answers its full size, which the
+        # vector check would then refuse on every call.
+        self._shorten = dim is not None and model.startswith("text-embedding-3")
+        if dim is not None and not self._shorten and dim != _MODEL_DIMS.get(model, dim):
+            raise EmbeddingError(
+                f"{model} always returns {_MODEL_DIMS[model]} dimensions; dim={dim} is not possible"
+            )
 
     @property
     def dim(self) -> int:
@@ -54,7 +62,12 @@ class OpenAIEmbedding:
         if not texts:
             return []
         try:
-            resp = await self._client.embeddings.create(model=self._model, input=texts)
+            if self._shorten:
+                resp = await self._client.embeddings.create(
+                    model=self._model, input=texts, dimensions=self._dim
+                )
+            else:
+                resp = await self._client.embeddings.create(model=self._model, input=texts)
         except Exception as e:
             raise EmbeddingError(f"openai embeddings error: {e}") from e
         return [list(d.embedding) for d in resp.data]

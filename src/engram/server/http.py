@@ -8,6 +8,7 @@ both shapes.
 
 from __future__ import annotations
 
+import importlib.metadata
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -158,6 +159,11 @@ def _bad_input(e: ValueError) -> HTTPException:
 _OPEN_PATHS = (HEALTHZ_PATH, LEGACY_HEALTH_PATH)
 
 
+def _package_version() -> str:
+    """The installed package's version, for the OpenAPI document."""
+    return importlib.metadata.version("jamjet-engram")
+
+
 def build_http_app(
     engram: Engram,
     *,
@@ -233,7 +239,7 @@ def build_http_app(
             async with manager.run():
                 yield
 
-        app = FastAPI(title="Engram", version="0.3.0", lifespan=lifespan)
+        app = FastAPI(title="Engram", version=_package_version(), lifespan=lifespan)
 
         # Route (not Mount) so that POST /mcp hits the handler without a
         # 307 redirect. Starlette's Mount matches /mcp/ and below, but
@@ -247,7 +253,7 @@ def build_http_app(
 
         app.router.routes.append(Route("/mcp", endpoint=_MCPHandler()))
     else:
-        app = FastAPI(title="Engram", version="0.3.0")
+        app = FastAPI(title="Engram", version=_package_version())
 
     # Middleware added last runs first: Host, Origin, auth, then routing.
     if auth_token is not None:
