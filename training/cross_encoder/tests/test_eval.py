@@ -32,9 +32,12 @@ def test_dcg_first_position_full_weight():
 
 
 @pytest.mark.slow
+@pytest.mark.usefixtures("offline_base_model")
 def test_evaluate_model_smoke(tmp_path):
-    """Smoke test: tiny eval set, verify the helper runs end-to-end without error."""
-    pytest.importorskip("sentence_transformers")
+    """Smoke test: tiny eval set, verify the helper runs end-to-end without error.
+
+    Loads the base model from the local Hugging Face cache, with the hub offline.
+    """
     from training.cross_encoder.eval import evaluate_model
 
     p = tmp_path / "eval.jsonl"

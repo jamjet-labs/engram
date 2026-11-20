@@ -907,7 +907,7 @@ def test_google_auth_requests_go_through_httpx() -> None:
             _auth_request(client)("https://oauth2.googleapis.com/token", method="POST")
 
 
-# ── the network guard (tests/conftest.py) ───────────────────────────
+# ── the network guard (tests/network_guard.py) ──────────────────────
 
 
 class ReachedTheConnectionPool(Exception):

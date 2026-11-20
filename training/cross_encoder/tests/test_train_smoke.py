@@ -2,13 +2,14 @@ import pytest
 
 
 @pytest.mark.slow
+@pytest.mark.usefixtures("offline_base_model")
 def test_train_smoke_runs_without_error(tmp_path):
     """Smoke test: train for 1 epoch on 4 pairs, verify it produces a checkpoint dir.
 
-    Marked @slow because it imports torch + sentence-transformers and downloads
-    the base model on first run. Skipped automatically when the deps aren't installed.
+    Marked @slow because it imports torch + sentence-transformers and trains.
+    It loads the base model from the local Hugging Face cache, with the hub
+    offline, and skips when the deps or the cached model are missing.
     """
-    pytest.importorskip("sentence_transformers")
     from training.cross_encoder.train import train
 
     seed_path = tmp_path / "seed.jsonl"

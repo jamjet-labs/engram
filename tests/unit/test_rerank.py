@@ -2,7 +2,7 @@
 
 Skipped if `sentence-transformers` is not installed (it's an optional dep), or
 if the model is not in the local Hugging Face cache: tests never download it
-(the network guard in tests/conftest.py would refuse), and the hub runs offline.
+(the network guard in tests/network_guard.py would refuse), and the hub runs offline.
 """
 
 from __future__ import annotations
