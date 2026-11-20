@@ -64,7 +64,7 @@ class OneFactLLM:
 
 @pytest_asyncio.fixture
 async def served() -> AsyncIterator[tuple[TestClient, Engram]]:
-    memory = await Engram.open(":memory:", llm=OneFactLLM())
+    memory = await Engram.open(":memory:", llm=OneFactLLM(), allow_default_scope=True)
     client = TestClient(build_http_app(memory, auth_token=TOKEN), base_url="http://127.0.0.1")
     try:
         yield client, memory
@@ -79,7 +79,7 @@ def client(served: tuple[TestClient, Engram]) -> TestClient:
 
 @pytest_asyncio.fixture
 async def no_llm_client() -> AsyncIterator[TestClient]:
-    memory = await Engram.open(":memory:")
+    memory = await Engram.open(":memory:", allow_default_scope=True)
     try:
         yield TestClient(build_http_app(memory, auth_token=TOKEN), base_url="http://127.0.0.1")
     finally:
@@ -136,7 +136,7 @@ def test_health_is_open(client: TestClient) -> None:
 )
 async def test_health_skips_the_origin_and_host_guards(headers: dict[str, str]) -> None:
     # Without a token both guards are on; /health is exempt from them like /healthz.
-    memory = await Engram.open(":memory:")
+    memory = await Engram.open(":memory:", allow_default_scope=True)
     try:
         app = build_http_app(memory, allow_unauthenticated=True)
         c = TestClient(app, base_url="http://127.0.0.1")

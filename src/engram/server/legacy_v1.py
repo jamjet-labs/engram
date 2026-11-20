@@ -21,7 +21,8 @@ Errors
 Scope
 - `org_id` defaults to "default", as in Rust. A missing `user_id` means the
   Python user "default"; Rust used an org-wide scope there, which Python does
-  not have.
+  not have. So the server needs an Engram opened with
+  `allow_default_scope=True`, and refuses to build without one.
 - The message routes are scoped to `(org_id, user_id)`. Rust filtered on
   `org_id` alone.
 
@@ -169,6 +170,20 @@ def _scope(user_id: str | None, org_id: str | None) -> Scope:
     return Scope(org_id=org_id or "default", user_id=user_id or "default")
 
 
+def require_default_scope(engram: Engram) -> None:
+    """Refuse an Engram the server cannot use: its routes read a missing id as "default".
+
+    The Java client sends no org, and often no user, so the server opens
+    Engram with ``allow_default_scope=True``. One opened without it would
+    refuse those requests, so building the server with it is a ValueError.
+    """
+    if not engram.allow_default_scope:
+        raise ValueError(
+            "the server reads a missing user_id or org_id as 'default', so it needs an "
+            "Engram opened with allow_default_scope=True"
+        )
+
+
 def _erase_audit_fields() -> tuple[str, str]:
     """A fresh (reason, actor) for one erase_user call, one random token each.
 
@@ -254,7 +269,11 @@ def _rfc3339(ts: datetime) -> str:
 
 
 def register_legacy_routes(app: FastAPI, engram: Engram) -> None:
-    """Add the Rust v0.5.x routes to ``app``. Call before the native routes."""
+    """Add the Rust v0.5.x routes to ``app``. Call before the native routes.
+
+    ``engram`` must be opened with ``allow_default_scope=True`` (ValueError).
+    """
+    require_default_scope(engram)
 
     @app.api_route(LEGACY_HEALTH_PATH, methods=["GET", "HEAD"], response_model=None)
     async def health(request: Request) -> Response | dict[str, str]:

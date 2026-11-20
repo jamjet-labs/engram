@@ -99,7 +99,7 @@ async def test_transcript_turn_and_event_quoting_b_stay_hidden(open_memory: Open
 async def test_reinstate_repairs_missing_matches_from_older_writes() -> None:
     # A database written before this fix can lack the "C quotes B" row.
     # Reinstating A must re-check C against B before C becomes visible.
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops")
         b = await memory.record(B, user_id="ops")
         c = await memory.record(f"Handover notes: {A} Also, {B}", user_id="ops")
@@ -138,7 +138,7 @@ async def test_c_is_never_visible_inside_the_reinstate_transaction(
 ) -> None:
     # Reads share the connection, so they see uncommitted state. The re-check
     # has to land before the tombstone is lifted, not after.
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops")
         b = await memory.record(B, user_id="ops")
         c = await memory.record(f"Handover notes: {A} Also, {B}", user_id="ops")
@@ -232,7 +232,7 @@ async def _drop_matches(memory: Engram, rev_id: object) -> None:
 async def test_repair_covers_turns_hidden_by_the_session_rule() -> None:
     # A revoked by id with a session and no message link hides that session's
     # turns. Lifting A must re-check them, not just the facts.
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops", session_id="s1")
         b = await memory.record(B, user_id="ops")
         await memory.record_message(f"we said {B}", session_id="s1", user_id="ops")
@@ -245,7 +245,7 @@ async def test_repair_covers_turns_hidden_by_the_session_rule() -> None:
 
 @pytest.mark.sqlite_only
 async def test_repair_covers_events_linked_to_the_reinstated_fact() -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops")
         b = await memory.record(B, user_id="ops")
         event = Event(
@@ -266,7 +266,7 @@ async def test_repair_covers_events_linked_to_the_reinstated_fact() -> None:
 
 @pytest.mark.sqlite_only
 async def test_repair_covers_facts_derived_from_the_reinstated_fact() -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         a = await memory.record(A, user_id="ops")
         b = await memory.record(B, user_id="ops")
         c = await memory.record(f"Ticket 88 says: {B}", user_id="ops", derived_from=[a.id])
@@ -279,7 +279,7 @@ async def test_repair_covers_facts_derived_from_the_reinstated_fact() -> None:
 
 @pytest.mark.sqlite_only
 async def test_repair_covers_turns_cited_by_the_reinstated_fact() -> None:
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         turn = await memory.record_message(f"we said {B}", session_id="s1", user_id="ops")
         a = await memory.record(A, user_id="ops", session_id="s1", source_message_id=turn.id)
         b = await memory.record(B, user_id="ops")

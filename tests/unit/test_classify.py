@@ -106,7 +106,7 @@ async def test_engram_context_uses_classifier_budget() -> None:
     """Engram.context should consult classifier when token_budget is None."""
     from engram import Engram
 
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         # Pile in many short facts so budget actually bounds the result
         for i in range(50):
             await memory.record(text=f"fact {i} about coffee preference", user_id="alice")
@@ -124,7 +124,7 @@ async def test_engram_context_explicit_budget_wins_over_classifier() -> None:
     """If caller supplies token_budget, classifier is bypassed."""
     from engram import Engram
 
-    async with await Engram.open(":memory:") as memory:
+    async with await Engram.open(":memory:", allow_default_scope=True) as memory:
         for i in range(50):
             await memory.record(text=f"fact {i} about coffee", user_id="alice")
         rules = RuleBasedClassifier()

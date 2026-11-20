@@ -28,6 +28,15 @@ class ScopeError(EngramError):
     """Operation crossed a scope boundary that's not permitted."""
 
 
+class ScopeRequiredError(ValueError, EngramError):
+    """A call did not name its scope, or named it with an empty or blank id.
+
+    A missing ``user_id`` or ``org_id``, or the literal ``"default"``, is
+    refused unless the Engram was opened with ``allow_default_scope=True``.
+    An empty or blank id is refused always. Nothing was read or written.
+    """
+
+
 class ValidationError(EngramError):
     """Input failed validation beyond what Pydantic catches (e.g., business rules)."""
 

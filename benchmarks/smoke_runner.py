@@ -302,6 +302,7 @@ async def main() -> None:
             tier=tier,
             reranker=reranker,
             retrieval_config=cfg,
+            allow_default_scope=True,  # questions live in org "default"
         ) as memory:
             if is_pref:
                 # ── Synthesis path ─────────────────────────────────────────

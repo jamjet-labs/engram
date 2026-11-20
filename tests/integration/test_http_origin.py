@@ -49,7 +49,7 @@ MCP_HEADERS = {
 
 async def _engram(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Engram:
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
-    return await Engram.open(path=str(tmp_path / "engram.db"))
+    return await Engram.open(path=str(tmp_path / "engram.db"), allow_default_scope=True)
 
 
 @pytest_asyncio.fixture

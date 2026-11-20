@@ -152,9 +152,15 @@ class _Opener[T: _Closeable]:
 
 
 class OpenMemory(_Opener[Engram]):
-    """The `open_memory` fixture: Engram instances on this test's targets."""
+    """The `open_memory` fixture: Engram instances on this test's targets.
+
+    They open with ``allow_default_scope=True`` unless a test passes False,
+    so tests written for 0.2 keep their meaning (most name a user and leave
+    the org to "default").
+    """
 
     async def _open_at(self, target: str, **kwargs: Any) -> Engram:
+        kwargs.setdefault("allow_default_scope", True)
         return await Engram.open(target, **kwargs)
 
 

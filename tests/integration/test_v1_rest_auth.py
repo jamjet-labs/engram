@@ -52,7 +52,7 @@ async def app(
     request: pytest.FixtureRequest, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[FastAPI]:
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
-    engram = await Engram.open(path=str(tmp_path / "engram.db"))
+    engram = await Engram.open(path=str(tmp_path / "engram.db"), allow_default_scope=True)
     try:
         mcp_server = build_mcp_server(engram, name="t") if request.param == "with_mcp" else None
         yield build_http_app(engram, mcp_server=mcp_server, auth_token=TOKEN)
@@ -111,7 +111,7 @@ async def test_healthz_exemption_is_exact(app: FastAPI) -> None:
 async def test_empty_token_is_refused(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     # An empty string must not quietly mean "no auth".
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
-    engram = await Engram.open(path=str(tmp_path / "engram.db"))
+    engram = await Engram.open(path=str(tmp_path / "engram.db"), allow_default_scope=True)
     try:
         with pytest.raises(ValueError, match="auth_token"):
             build_http_app(engram, auth_token="")
@@ -130,7 +130,7 @@ async def test_token_a_client_cannot_send_is_refused(
     # Whitespace is stripped from header values, and control or non-ASCII
     # characters are not sent by common clients, so such a token never matches.
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
-    engram = await Engram.open(path=str(tmp_path / "engram.db"))
+    engram = await Engram.open(path=str(tmp_path / "engram.db"), allow_default_scope=True)
     try:
         with pytest.raises(ValueError, match="printable ASCII"):
             build_http_app(engram, auth_token=token)

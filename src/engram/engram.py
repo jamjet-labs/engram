@@ -20,7 +20,12 @@ from uuid import UUID, uuid4
 from engram.classify.base import QuestionClassifier, budget_for
 from engram.embedding.base import EmbeddingProvider
 from engram.embedding.synthetic import SyntheticEmbedding
-from engram.errors import NotFoundError, ReadOnlyStoreError, ScopeErasedError
+from engram.errors import (
+    NotFoundError,
+    ReadOnlyStoreError,
+    ScopeErasedError,
+    ScopeRequiredError,
+)
 from engram.extract.event_extractor import EventExtractor
 from engram.extract.pipeline import ExtractionPipeline
 from engram.governance import (
@@ -50,6 +55,20 @@ from engram.vector.hnsw import HnswVectorStore
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_ID = "default"
+
+
+def _check_allow_default_scope(value: object) -> None:
+    # A truthy string such as "false" from a config file must not widen anything.
+    if not isinstance(value, bool):
+        raise TypeError("allow_default_scope must be True or False")
+
+
+def _refuse_blank_ids(user_id: str | None, org_id: str | None) -> None:
+    for name, value in (("org_id", org_id), ("user_id", user_id)):
+        if isinstance(value, str) and not value.strip():
+            raise ScopeRequiredError(f"{name} must not be empty or blank")
+
 
 class Engram:
     """The main embedded-mode Engram client.
@@ -57,8 +76,13 @@ class Engram:
     Open with `Engram.open(path)` and use as an async context manager:
 
         async with await Engram.open("./engram.db") as memory:
-            await memory.record(user_id="alice", text="I prefer espresso.")
-            facts = await memory.recall(user_id="alice", query="coffee preference")
+            await memory.record("I prefer espresso.", org_id="acme", user_id="alice")
+            facts = await memory.recall("coffee preference", org_id="acme", user_id="alice")
+
+    Every method that reads or writes memory names its scope with ``org_id``
+    and ``user_id``. A missing id, or the id ``"default"``, raises
+    ScopeRequiredError unless the Engram was opened with
+    ``allow_default_scope=True``. An empty or blank id always raises.
 
     It works with any store that meets `engram.store.EngramStore`; pass one
     with `Engram.open(store=...)`.
@@ -73,7 +97,11 @@ class Engram:
         extraction: ExtractionPipeline | None = None,
         event_extractor: EventExtractor | None = None,
         tier: ModelTier | None = None,
+        *,
+        allow_default_scope: bool = False,
     ) -> None:
+        _check_allow_default_scope(allow_default_scope)
+        self._allow_default_scope = allow_default_scope
         self._store = store
         self._vec = vector_store
         self._embed = embedder
@@ -99,6 +127,7 @@ class Engram:
         *,
         store: EngramStore | None = None,
         read_only: bool = False,
+        allow_default_scope: bool = False,
     ) -> Engram:
         """Open an Engram instance on a store, with an in-memory HNSW index.
 
@@ -111,6 +140,13 @@ class Engram:
           raises `ReadOnlyStoreError` before any embedder or LLM call. A
           ``store`` passed with ``read_only=True`` must itself be read-only.
 
+        Scopes:
+        - allow_default_scope: False (the default) makes every call name its
+          scope: a missing ``user_id`` or ``org_id``, or the id ``"default"``,
+          raises ScopeRequiredError before anything is read or written. True
+          restores 0.2 behaviour: a missing id means ``"default"``. Either
+          way an empty or blank id raises. Must be True or False (TypeError).
+
         Defaults:
         - embedder: SyntheticEmbedding(dim=384) — deterministic, offline-safe.
           Pass an OllamaEmbedding or OpenAIEmbedding for real semantics.
@@ -120,6 +156,7 @@ class Engram:
           from utility (verifier, decomposer, ReAct brain). When ``tier`` is set
           and ``llm`` is not, ``tier.utility`` is used for extraction/event work.
         """
+        _check_allow_default_scope(allow_default_scope)
         if store is not None:
             if str(path) != ":memory:":
                 raise ValueError("pass a path or a store, not both")
@@ -142,12 +179,53 @@ class Engram:
         effective_llm = llm or (tier.utility if tier else None)
         extraction = ExtractionPipeline(effective_llm) if effective_llm is not None else None
         events = EventExtractor(effective_llm) if effective_llm is not None else None
-        return cls(store, vec, embedder, retriever, extraction, events, tier=tier)
+        return cls(
+            store,
+            vec,
+            embedder,
+            retriever,
+            extraction,
+            events,
+            tier=tier,
+            allow_default_scope=allow_default_scope,
+        )
 
     @property
     def read_only(self) -> bool:
         """True when the store is read-only: every write method raises ReadOnlyStoreError."""
         return self._store.read_only
+
+    @property
+    def allow_default_scope(self) -> bool:
+        """True when a missing id, or the id "default", names the default scope."""
+        return self._allow_default_scope
+
+    def _resolve_scope(self, user_id: str | None, org_id: str | None) -> Scope:
+        """The scope a call names. Every root method resolves its scope here first.
+
+        ``None`` means not given. Not given, or the literal ``"default"``, is
+        refused with ScopeRequiredError unless this Engram was opened with
+        ``allow_default_scope=True``, and then not given means ``"default"``.
+        An empty or blank id is refused always. Any other id that Scope
+        refuses raises ValueError.
+        """
+        _refuse_blank_ids(user_id, org_id)
+        if not self._allow_default_scope:
+            for name, value in (("org_id", org_id), ("user_id", user_id)):
+                if value is None:
+                    raise ScopeRequiredError(
+                        f"{name} is required: name the scope, or open the Engram with "
+                        "allow_default_scope=True to use the default one"
+                    )
+                if value == _DEFAULT_ID:
+                    raise ScopeRequiredError(
+                        f'{name} "default" names the default scope, which needs the Engram '
+                        "opened with allow_default_scope=True"
+                    )
+        return Scope(
+            org_id=_DEFAULT_ID if org_id is None else org_id,
+            user_id=_DEFAULT_ID if user_id is None else user_id,
+        )
 
     def _require_writable(self) -> None:
         # First thing in every write method: before validation, any store
@@ -191,6 +269,7 @@ class Engram:
             raise RuntimeError("event extraction requires an LLM; pass `llm=...` to Engram.open()")
         if not messages:
             return []
+        self._message_scope(messages)
         events = await self._events.extract(messages, session_date=session_date)
         if persist:
             for ev in events:
@@ -200,8 +279,8 @@ class Engram:
     async def search_events(
         self,
         query: str = "",
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         time_start: datetime | None = None,
         time_end: datetime | None = None,
         limit: int = 10,
@@ -209,7 +288,7 @@ class Engram:
         """Phase 11: query the event calendar by FTS + optional time window."""
         return await self._store.search_events(
             query,
-            Scope(org_id=org_id, user_id=user_id),
+            self._resolve_scope(user_id, org_id),
             time_start=time_start,
             time_end=time_end,
             limit=limit,
@@ -219,8 +298,8 @@ class Engram:
         self,
         old_fact_id: UUID,
         new_fact_id: UUID,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         actor: str | None = None,
         reason: str | None = None,
     ) -> Revocation:
@@ -235,7 +314,7 @@ class Engram:
         refused.
         """
         self._require_writable()
-        scope = Scope(org_id=org_id, user_id=user_id)
+        scope = self._resolve_scope(user_id, org_id)
         try:
             rev = await self._store.revoke(
                 old_fact_id,
@@ -255,16 +334,25 @@ class Engram:
         for fid in await self._store.hidden_fact_ids(scope):
             await self._vec.delete(fid, scope)
 
-    @staticmethod
-    def _governed_scope(fact: Fact | UUID, user_id: str | None, org_id: str | None) -> Scope:
-        """Scope for a governance call: the fact's own, or the one passed with an id."""
+    def _governed_scope(self, fact: Fact | UUID, user_id: str | None, org_id: str | None) -> Scope:
+        """Scope for a governance call: the fact's own, or the one passed with an id.
+
+        The rules of `_resolve_scope` hold either way: an empty or blank id is
+        refused, and a fact in the default scope needs allow_default_scope.
+        """
         if isinstance(fact, Fact):
+            _refuse_blank_ids(user_id, org_id)
             if (user_id is not None and user_id != fact.scope.user_id) or (
                 org_id is not None and org_id != fact.scope.org_id
             ):
                 raise ValueError("user_id/org_id do not match the fact's scope")
-            return fact.scope
-        return Scope(org_id=org_id or "default", user_id=user_id or "default")
+            return self._resolve_scope(fact.scope.user_id, fact.scope.org_id)
+        return self._resolve_scope(user_id, org_id)
+
+    def _message_scope(self, messages: list[ChatMessage]) -> Scope:
+        """The scope extraction writes to: the first message's, by the same rules."""
+        first = messages[0].scope
+        return self._resolve_scope(first.user_id, first.org_id)
 
     async def revoke(
         self,
@@ -284,9 +372,9 @@ class Engram:
         use its scope, or an id with ``user_id``/``org_id``.
         """
         self._require_writable()
+        scope = self._governed_scope(fact, user_id, org_id)
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = self._governed_scope(fact, user_id, org_id)
         fact_id = fact.id if isinstance(fact, Fact) else fact
         rev = await self._store.revoke(fact_id, scope, reason=reason, actor=actor)
         await self._drop_hidden_vectors(scope)
@@ -309,9 +397,9 @@ class Engram:
         covers it; check :meth:`explain`.
         """
         self._require_writable()
+        scope = self._governed_scope(fact, user_id, org_id)
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = self._governed_scope(fact, user_id, org_id)
         fact_id = fact.id if isinstance(fact, Fact) else fact
         lifted, visible = await self._store.reinstate(fact_id, scope, reason=reason, actor=actor)
         if visible:
@@ -339,9 +427,9 @@ class Engram:
         erasure for what the backend can and cannot vouch for.
         """
         self._require_writable()
+        scope = self._governed_scope(fact, user_id, org_id)
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = self._governed_scope(fact, user_id, org_id)
         fact_id = fact.id if isinstance(fact, Fact) else fact
         record = await self._store.erase(
             fact_id, scope, reason=reason, actor=actor, block_reinsertion=block_reinsertion
@@ -377,7 +465,12 @@ class Engram:
         return True
 
     async def erase_user(
-        self, *, user_id: str, org_id: str = "default", reason: str, actor: str
+        self,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        reason: str,
+        actor: str,
     ) -> int:
         """Hard-delete everything held for one (org_id, user_id) scope.
 
@@ -407,9 +500,9 @@ class Engram:
         finishes the job. Returns the number of facts erased.
         """
         self._require_writable()
+        scope = self._resolve_scope(user_id, org_id)
         reason = require_text("reason", reason)
         actor = require_text("actor", actor)
-        scope = Scope(org_id=org_id, user_id=user_id)
         for label, value in (("reason", reason), ("actor", actor)):
             if await self._store.fact_text_quoted_by(value, scope):
                 raise ValueError(f"erasure {label} must not quote the content being erased")
@@ -420,8 +513,8 @@ class Engram:
                     fact_id,
                     reason=reason,
                     actor=actor,
-                    user_id=user_id,
-                    org_id=org_id,
+                    user_id=scope.user_id,
+                    org_id=scope.org_id,
                     block_reinsertion=False,
                 )
             except NotFoundError:
@@ -432,13 +525,13 @@ class Engram:
         return erased
 
     async def list_conversations(
-        self, *, user_id: str = "default", org_id: str = "default"
+        self, *, user_id: str | None = None, org_id: str | None = None
     ) -> list[str]:
         """Session ids with a visible transcript turn, by first turn."""
-        return await self._store.list_session_ids(Scope(org_id=org_id, user_id=user_id))
+        return await self._store.list_session_ids(self._resolve_scope(user_id, org_id))
 
     async def delete_conversation(
-        self, session_id: str, *, user_id: str = "default", org_id: str = "default"
+        self, session_id: str, *, user_id: str | None = None, org_id: str | None = None
     ) -> int:
         """Hard-delete one session's transcript. Facts extracted from it stay.
 
@@ -449,7 +542,7 @@ class Engram:
         """
         self._require_writable()
         return await self._store.delete_session_messages(
-            session_id, Scope(org_id=org_id, user_id=user_id)
+            session_id, self._resolve_scope(user_id, org_id)
         )
 
     async def fact_counts(self) -> tuple[int, int]:
@@ -464,8 +557,8 @@ class Engram:
         self,
         session_id: str,
         *,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         last_n: int | None = None,
     ) -> list[ChatMessage]:
         """A session's visible transcript turns, oldest first.
@@ -475,32 +568,35 @@ class Engram:
         ValueError.
         """
         return await self._store.list_session_messages(
-            session_id, Scope(org_id=org_id, user_id=user_id), last_n=last_n
+            session_id, self._resolve_scope(user_id, org_id), last_n=last_n
         )
 
     async def explain(
-        self, fact_id: UUID, user_id: str = "default", org_id: str = "default"
+        self, fact_id: UUID, user_id: str | None = None, org_id: str | None = None
     ) -> Provenance | None:
         """Provenance and revocation status for a fact, visible or not. Never its text."""
-        return await self._store.explain(fact_id, Scope(org_id=org_id, user_id=user_id))
+        return await self._store.explain(fact_id, self._resolve_scope(user_id, org_id))
 
     async def revocations(
-        self, user_id: str = "default", org_id: str = "default", include_reinstated: bool = False
+        self,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        include_reinstated: bool = False,
     ) -> list[Revocation]:
         return await self._store.list_revocations(
-            Scope(org_id=org_id, user_id=user_id), include_reinstated=include_reinstated
+            self._resolve_scope(user_id, org_id), include_reinstated=include_reinstated
         )
 
     async def erasures(
-        self, user_id: str = "default", org_id: str = "default"
+        self, user_id: str | None = None, org_id: str | None = None
     ) -> list[ErasureRecord]:
-        return await self._store.list_erasures(Scope(org_id=org_id, user_id=user_id))
+        return await self._store.list_erasures(self._resolve_scope(user_id, org_id))
 
     async def record(
         self,
         text: str,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         session_id: str | None = None,
         category: str | None = None,
         confidence: float = 1.0,
@@ -538,6 +634,7 @@ class Engram:
         self._require_writable()
         # Before any await: an erase_user that finishes after this refuses the write.
         started = datetime.now().astimezone()
+        scope = self._resolve_scope(user_id, org_id)
         check_text("text", text, max_bytes=MAX_FACT_TEXT_BYTES)
         if session_id is not None:
             check_text("session_id", session_id, max_bytes=MAX_FACT_TEXT_BYTES)
@@ -545,7 +642,6 @@ class Engram:
         if role is not None:
             md["role"] = role
         check_json("metadata", md)
-        scope = Scope(org_id=org_id, user_id=user_id)
         if reject_revoked and await self._store.is_content_revoked(text, scope):
             raise RevokedContentError("text matches revoked content in this scope")
         fact = Fact(
@@ -596,8 +692,8 @@ class Engram:
         content: str,
         role: str = "user",
         session_id: str = "default",
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         timestamp: datetime | None = None,
         not_erased_since: datetime | None = None,
     ) -> ChatMessage:
@@ -607,10 +703,11 @@ class Engram:
         stores nothing if :meth:`erase_user` erased the scope at or after it.
         """
         self._require_writable()
+        scope = self._resolve_scope(user_id, org_id)
         check_text("content", content, max_bytes=MAX_MESSAGE_BYTES, allow_blank=True)
         check_text("session_id", session_id, max_bytes=MAX_FACT_TEXT_BYTES)
         msg = ChatMessage(
-            scope=Scope(org_id=org_id, user_id=user_id),
+            scope=scope,
             session_id=session_id,
             role=role,
             content=content,
@@ -648,7 +745,7 @@ class Engram:
             raise RuntimeError("extraction requires an LLM; pass `llm=...` to Engram.open()")
         if not messages:
             return []
-        scope = messages[0].scope
+        scope = self._message_scope(messages)
         # All input messages share a session — pick the first one's session_id
         sid: str | None = messages[0].session_id if messages else None
         extracted: list[ExtractedFact] = await self._extract.extract(
@@ -712,20 +809,18 @@ class Engram:
     async def recall(
         self,
         query: str,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         top_k: int = 10,
     ) -> list[ScoredFact]:
         """Hybrid (vector + keyword) retrieval, optionally reranked."""
-        return await self._retrieve.search(
-            query, Scope(org_id=org_id, user_id=user_id), top_k=top_k
-        )
+        return await self._retrieve.search(query, self._resolve_scope(user_id, org_id), top_k=top_k)
 
     async def context_entries(
         self,
         query: str,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         decompose: bool = False,
         role_filter: tuple[str, ...] | None = None,
     ) -> list[ScoredFact]:
@@ -733,6 +828,7 @@ class Engram:
 
         Use this when the caller needs to show why a memory went into a prompt.
         """
+        self._resolve_scope(user_id, org_id)  # refuse before the decomposer's LLM call
         candidates: list[ScoredFact]
         if decompose and self._decomposer is not None and should_decompose(query):
             subqueries = await self._decomposer.decompose(query)
@@ -758,8 +854,8 @@ class Engram:
     async def context(
         self,
         query: str,
-        user_id: str = "default",
-        org_id: str = "default",
+        user_id: str | None = None,
+        org_id: str | None = None,
         token_budget: int | None = None,
         chars_per_token: int = 4,
         classifier: QuestionClassifier | None = None,
@@ -784,11 +880,16 @@ class Engram:
         ``fact.metadata["role"]`` is in the tuple. Filter is applied AFTER
         recall but BEFORE the token-budget loop.
         """
+        scope = self._resolve_scope(user_id, org_id)  # before the classifier runs
         if token_budget is None:
             qt = await classifier.classify(query) if classifier is not None else None
             token_budget = budget_for(qt)
         candidates = await self.context_entries(
-            query, user_id=user_id, org_id=org_id, decompose=decompose, role_filter=role_filter
+            query,
+            user_id=scope.user_id,
+            org_id=scope.org_id,
+            decompose=decompose,
+            role_filter=role_filter,
         )
         return "\n".join(context_lines(candidates, token_budget, chars_per_token))
 

@@ -170,7 +170,9 @@ def build_http_app(
     """Build a FastAPI app bound to a single Engram instance.
 
     Args:
-        engram: The Engram instance to serve.
+        engram: The Engram instance to serve. Open it with
+            ``allow_default_scope=True``: the routes read a missing
+            `user_id` or `org_id` as "default".
         mcp_server: Optional MCP `Server` (e.g. from `build_mcp_server`). If
             provided, a Streamable HTTP MCP endpoint is mounted at `/mcp`.
         auth_token: Bearer token required on every route, `/v1/*` and `/mcp`
@@ -196,8 +198,9 @@ def build_http_app(
 
     Raises:
         ValueError: neither `auth_token` nor `allow_unauthenticated=True` was
-            given, `auth_token` is not a usable token, or an allowed origin or
-            host is malformed.
+            given, `auth_token` is not a usable token, an allowed origin or
+            host is malformed, or `engram` was opened without
+            ``allow_default_scope=True``.
     """
     # A truthy string such as "false" from a config file must not open the app.
     if not isinstance(allow_unauthenticated, bool):

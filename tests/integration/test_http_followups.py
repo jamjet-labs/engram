@@ -18,7 +18,7 @@ ALLOWED = "https://app.example.com"
 
 async def _engram(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Engram:
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
-    return await Engram.open(path=str(tmp_path / "engram.db"))
+    return await Engram.open(path=str(tmp_path / "engram.db"), allow_default_scope=True)
 
 
 def _client(app: FastAPI) -> AsyncClient:

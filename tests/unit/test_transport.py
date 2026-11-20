@@ -14,7 +14,7 @@ from engram.server.transport import build_streamable_http_mount
 async def engram_instance(tmp_path, monkeypatch):
     """Create an Engram instance with mock LLM for testing."""
     monkeypatch.setenv("ENGRAM_LLM_PROVIDER", "mock")
-    engram = await Engram.open(path=str(tmp_path / "engram.db"))
+    engram = await Engram.open(path=str(tmp_path / "engram.db"), allow_default_scope=True)
     try:
         yield engram
     finally:

@@ -18,6 +18,7 @@ from uuid import UUID
 
 from engram.engram import Engram
 from engram.retrieve.base import ScoredFact
+from engram.server.legacy_v1 import require_default_scope
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,12 @@ def _with_provenance(sf: ScoredFact) -> str:
 
 
 def build_mcp_server(engram: Engram, name: str = "engram") -> Any:
-    """Build an MCP `Server` exposing memory_* tools, bound to one Engram instance."""
+    """Build an MCP `Server` exposing memory_* tools, bound to one Engram instance.
+
+    A tool call without `user_id` or `org_id` uses "default", so ``engram``
+    must be opened with ``allow_default_scope=True`` (ValueError).
+    """
+    require_default_scope(engram)
     try:
         from mcp.server import Server
         from mcp.types import TextContent, Tool

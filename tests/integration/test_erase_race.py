@@ -420,7 +420,9 @@ async def test_post_add_check_sees_the_erase_past_an_open_read_snapshot(
 ) -> None:
     """An open statement on the read connection pins its snapshot; the check must not use it."""
     # A file, so reads go through the second connection.
-    memory = await Engram.open(tmp_path / "e.db", embedder=GatedEmbedder(gate))
+    memory = await Engram.open(
+        tmp_path / "e.db", embedder=GatedEmbedder(gate), allow_default_scope=True
+    )
     try:
         gate.armed = False
         await memory.record("Frank likes tea", user_id="frank")

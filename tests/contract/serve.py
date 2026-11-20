@@ -48,7 +48,7 @@ async def main() -> None:
     token = os.environ["ENGRAM_AUTH_TOKEN"]
     port = int(os.environ.get("ENGRAM_PORT", "18765"))
     target = os.environ.get("ENGRAM_CONTRACT_TARGET", ":memory:")
-    memory = await Engram.open(target, llm=CountingLLM())
+    memory = await Engram.open(target, llm=CountingLLM(), allow_default_scope=True)
     app = build_http_app(memory, auth_token=token)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
     try:

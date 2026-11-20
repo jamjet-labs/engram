@@ -161,7 +161,7 @@ async def test_vector_index_entries_are_physically_dropped(open_memory: OpenMemo
 @pytest.mark.sqlite_only
 async def test_erased_text_is_gone_from_the_database_files(tmp_path: Path) -> None:
     db = tmp_path / "erase.db"
-    memory = await Engram.open(db)
+    memory = await Engram.open(db, allow_default_scope=True)
     try:
         for i in range(40):
             await memory.record(f"filler fact number {i} about coffee", user_id="alice")
@@ -182,7 +182,7 @@ async def test_erasure_reports_a_blocked_wal_checkpoint_honestly(tmp_path: Path)
     import sqlite3
 
     db = tmp_path / "busy.db"
-    memory = await Engram.open(db)
+    memory = await Engram.open(db, allow_default_scope=True)
     reader = sqlite3.connect(str(db))
     try:
         s = await _seed(memory)

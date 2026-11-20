@@ -14,6 +14,7 @@ from engram.errors import (
     NotFoundError,
     ReadOnlyStoreError,
     SchemaVersionError,
+    ScopeRequiredError,
     StoreError,
 )
 from engram.governance import ErasureRecord, Provenance, Revocation, RevokedContentError
@@ -49,6 +50,7 @@ __all__ = [
     "RuleBasedClassifier",
     "SchemaVersionError",
     "Scope",
+    "ScopeRequiredError",
     "StoreError",
     "Tool",
     "ToolRegistry",
