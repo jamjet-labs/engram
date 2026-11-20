@@ -984,6 +984,39 @@ async def test_forget_with_user_id_cannot_reach_another_user(
     assert [str(rev.fact_id) for rev in await memory.revocations(user_id="bob")] == [fid]
 
 
+@pytest.mark.asyncio
+async def test_forget_with_both_ids_cannot_reach_the_same_user_in_another_org(
+    served: tuple[TestClient, Engram],
+) -> None:
+    # Bob's fact is in the default org, so a user path that drops the org
+    # would find it from any org.
+    client, memory = served
+    fid = _record_in(client, "bob keeps a red bike", user="bob")
+    for params in ({"org_id": "globex", "user_id": "bob"}, {"org_id": "acme", "user_id": "bob"}):
+        r = client.delete(f"/v1/memory/facts/{fid}", params=params, headers=AUTH)
+        assert r.status_code == 404 and r.json() == {"error": f"fact {fid} not found"}, params
+    assert await memory.revocations(user_id="bob") == []
+    assert _hits(client, "red bike", user="bob") == [fid]
+
+
+@pytest.mark.asyncio
+async def test_forget_with_both_ids_revokes_in_the_named_org(
+    served: tuple[TestClient, Engram],
+) -> None:
+    # Alice's fact is in acme only, so a user path that drops the org would
+    # miss it.
+    client, memory = served
+    fid = _record_in(client, "alice keeps a blue kite", user="alice", org="acme")
+    r = client.delete(
+        f"/v1/memory/facts/{fid}", params={"org_id": "acme", "user_id": "alice"}, headers=AUTH
+    )
+    assert r.json() == {"success": True, "deleted_fact_id": fid}
+    assert [
+        str(rev.fact_id) for rev in await memory.revocations(user_id="alice", org_id="acme")
+    ] == [fid]
+    assert _hits(client, "blue kite", user="alice", org="acme") == []
+
+
 async def _seed_counts(client: TestClient, memory: Engram) -> None:
     """default/alice: 2 facts, 1 forgotten. default/bob: 1. acme/alice: 1."""
     _record_in(client, "alice likes tea", user="alice")
