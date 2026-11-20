@@ -12,6 +12,7 @@ from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.temporal import TemporalIntent, detect_temporal_intent
 from engram.scope import Scope
 from engram.store.base import EngramStore
+from engram.validate import MAX_TOP_K, check_limit
 from engram.vector.base import VectorStore
 
 
@@ -48,6 +49,8 @@ class HybridRetriever:
         top_k: int = 10,
         temporal_anchor: datetime | None = None,
     ) -> list[ScoredFact]:
+        if check_limit("top_k", top_k, maximum=MAX_TOP_K) == 0:
+            return []
         if not query.strip():
             return []
         cfg = self._config

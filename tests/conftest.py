@@ -79,12 +79,9 @@ async def open_store(backend: Backend, tmp_path: Path) -> AsyncIterator[OpenStor
 
 
 @pytest_asyncio.fixture
-async def store() -> AsyncIterator[SqliteStore]:
-    s = await SqliteStore.open(":memory:")
-    try:
-        yield s
-    finally:
-        await s.close()
+async def store(open_store: OpenStore) -> SqliteStore:
+    """A store on a fresh target of each backend; `open_store` closes it."""
+    return await open_store()
 
 
 @pytest.fixture

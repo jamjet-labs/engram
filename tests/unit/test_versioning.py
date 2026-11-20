@@ -6,14 +6,13 @@ import os
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from engram import Engram
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.models import Fact, Polarity
 from engram.retrieve.base import RetrievalConfig
 from engram.retrieve.hybrid import HybridRetriever
 from engram.scope import Scope
-from engram.store.sqlite import SqliteStore
 from engram.vector.hnsw import HnswVectorStore
+from tests.conformance.backends import OpenMemory, OpenStore
 
 
 def _now() -> datetime:
@@ -23,20 +22,20 @@ def _now() -> datetime:
 # ── supersede + retrieval filter ────────────────────────────────────
 
 
-async def test_supersede_excludes_old_fact_from_default_recall() -> None:
-    async with await Engram.open(":memory:") as memory:
-        old = await memory.record(text="user has 1250 instagram followers", user_id="alice")
-        new = await memory.record(text="user has 1300 instagram followers", user_id="alice")
-        await memory.supersede(old.id, new.id, user_id="alice")
-        results = await memory.recall(query="instagram followers", user_id="alice")
-        # Old fact should be gone from default results
-        ids = {r.fact.id for r in results}
-        assert new.id in ids
-        assert old.id not in ids
+async def test_supersede_excludes_old_fact_from_default_recall(open_memory: OpenMemory) -> None:
+    memory = await open_memory()
+    old = await memory.record(text="user has 1250 instagram followers", user_id="alice")
+    new = await memory.record(text="user has 1300 instagram followers", user_id="alice")
+    await memory.supersede(old.id, new.id, user_id="alice")
+    results = await memory.recall(query="instagram followers", user_id="alice")
+    # Old fact should be gone from default results
+    ids = {r.fact.id for r in results}
+    assert new.id in ids
+    assert old.id not in ids
 
 
-async def test_supersede_includes_old_fact_when_history_enabled() -> None:
-    fact_store = await SqliteStore.open(":memory:")
+async def test_supersede_includes_old_fact_when_history_enabled(open_store: OpenStore) -> None:
+    fact_store = await open_store()
     embedder = SyntheticEmbedding(dim=64)
     vec = HnswVectorStore(dim=64)
     scope = Scope(org_id="acme", user_id="alice")
@@ -76,59 +75,61 @@ async def test_supersede_includes_old_fact_when_history_enabled() -> None:
     await vec.close()
 
 
-async def test_supersede_raises_for_unknown_fact() -> None:
-    async with await Engram.open(":memory:") as memory:
-        await memory.record(text="present", user_id="alice")
-        try:
-            await memory.supersede(uuid4(), uuid4(), user_id="alice")
-        except ValueError as e:
-            assert "not found" in str(e)
-        else:
-            raise AssertionError("expected ValueError for missing fact")
+async def test_supersede_raises_for_unknown_fact(open_memory: OpenMemory) -> None:
+    memory = await open_memory()
+    await memory.record(text="present", user_id="alice")
+    try:
+        await memory.supersede(uuid4(), uuid4(), user_id="alice")
+    except ValueError as e:
+        assert "not found" in str(e)
+    else:
+        raise AssertionError("expected ValueError for missing fact")
 
 
 # ── Source span round-trip ─────────────────────────────────────────
 
 
-async def test_source_span_roundtrips_through_store() -> None:
+async def test_source_span_roundtrips_through_store(open_memory: OpenMemory) -> None:
     """A fact's source_span (char offsets in original message) survives upsert+get."""
-    async with await Engram.open(":memory:") as memory:
-        # Direct path through the underlying store (record() doesn't expose source_span)
-        scope = Scope(org_id="default", user_id="alice")
-        f = Fact(
-            id=uuid4(),
-            text="user prefers espresso",
-            scope=scope,
-            valid_from=_now(),
-            source_span=(12, 21),
-        )
-        await memory._store.upsert_fact(f)
-        got = await memory._store.get_fact(f.id, scope)
-        assert got is not None
-        assert got.source_span == (12, 21)
+    memory = await open_memory()
+    # Direct path through the underlying store (record() doesn't expose source_span)
+    scope = Scope(org_id="default", user_id="alice")
+    f = Fact(
+        id=uuid4(),
+        text="user prefers espresso",
+        scope=scope,
+        valid_from=_now(),
+        source_span=(12, 21),
+    )
+    await memory._store.upsert_fact(f)
+    got = await memory._store.get_fact(f.id, scope)
+    assert got is not None
+    assert got.source_span == (12, 21)
 
 
-async def test_polarity_persists() -> None:
+async def test_polarity_persists(open_memory: OpenMemory) -> None:
     """A NEGATIVE polarity fact survives the store round-trip."""
-    async with await Engram.open(":memory:") as memory:
-        scope = Scope(org_id="default", user_id="alice")
-        f = Fact(
-            id=uuid4(),
-            text="user does not like decaf",
-            scope=scope,
-            valid_from=_now(),
-            polarity=Polarity.NEGATIVE,
-        )
-        await memory._store.upsert_fact(f)
-        got = await memory._store.get_fact(f.id, scope)
-        assert got is not None
-        assert got.polarity == Polarity.NEGATIVE
+    memory = await open_memory()
+    scope = Scope(org_id="default", user_id="alice")
+    f = Fact(
+        id=uuid4(),
+        text="user does not like decaf",
+        scope=scope,
+        valid_from=_now(),
+        polarity=Polarity.NEGATIVE,
+    )
+    await memory._store.upsert_fact(f)
+    got = await memory._store.get_fact(f.id, scope)
+    assert got is not None
+    assert got.polarity == Polarity.NEGATIVE
 
 
 # ── Determinism: same inputs produce same retrieval ─────────────────
 
 
-async def test_repeated_runs_with_same_seed_produce_identical_top_results() -> None:
+async def test_repeated_runs_with_same_seed_produce_identical_top_results(
+    open_store: OpenStore,
+) -> None:
     """Two HnswVectorStore instances with same seed + same insertion order → same top-K."""
     embedder = SyntheticEmbedding(dim=64)
     scope = Scope(org_id="acme", user_id="alice")
@@ -138,7 +139,7 @@ async def test_repeated_runs_with_same_seed_produce_identical_top_results() -> N
 
     runs = []
     for _ in range(2):
-        fact_store = await SqliteStore.open(":memory:")
+        fact_store = await open_store()
         vec = HnswVectorStore(dim=64, random_seed=42)
         for fid, text, v in zip(ids, texts, vecs, strict=False):
             f = Fact(id=fid, text=text, scope=scope, valid_from=_now())

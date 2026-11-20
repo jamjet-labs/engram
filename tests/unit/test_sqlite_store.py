@@ -2,9 +2,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from engram.models import ChatMessage, Fact
 from engram.scope import Scope
 from engram.store.sqlite import SqliteStore
+from tests.conformance.backends import OpenStore
 
 
 def _now() -> datetime:
@@ -14,12 +17,13 @@ def _now() -> datetime:
 # ── Open / close ─────────────────────────────────────────────────────
 
 
-async def test_open_in_memory_creates_schema() -> None:
-    s = await SqliteStore.open(":memory:")
+async def test_open_in_memory_creates_schema(open_store: OpenStore) -> None:
+    s = await open_store()
     assert s is not None
     await s.close()
 
 
+@pytest.mark.sqlite_only
 async def test_open_file_path(tmp_path: Path) -> None:
     db = tmp_path / "engram.db"
     s = await SqliteStore.open(str(db))
@@ -27,6 +31,7 @@ async def test_open_file_path(tmp_path: Path) -> None:
     assert db.exists()
 
 
+@pytest.mark.sqlite_only
 async def test_async_context_manager(tmp_path: Path) -> None:
     db = tmp_path / "engram.db"
     async with await SqliteStore.open(str(db)) as s:

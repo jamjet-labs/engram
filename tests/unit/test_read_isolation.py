@@ -24,6 +24,7 @@ import pytest
 from engram import Engram
 from engram.models import Event
 from engram.scope import Scope
+from tests.conformance.backends import OpenMemory
 
 OPS = Scope(org_id="default", user_id="ops")
 A = "The vault code for building seven is four four one two."
@@ -35,83 +36,82 @@ def _target(kind: str, tmp_path: Path) -> str:
     return ":memory:" if kind == "memory" else str(tmp_path / "e.db")
 
 
-@pytest.mark.parametrize("kind", ["memory", "file"])
 async def test_recall_never_returns_writes_that_are_about_to_be_hidden(
-    kind: str, tmp_path: Path
+    open_memory: OpenMemory,
 ) -> None:
-    async with await Engram.open(_target(kind, tmp_path)) as memory:
-        a = await memory.record(A, user_id="ops")
-        b = await memory.record(B, user_id="ops")
-        old = await memory.record(f"Old handover: {B}", user_id="ops")
-        await memory.revoke(a, reason="r", actor="s")
-        await memory.revoke(b, reason="r", actor="s")
+    memory = await open_memory()
+    a = await memory.record(A, user_id="ops")
+    b = await memory.record(B, user_id="ops")
+    old = await memory.record(f"Old handover: {B}", user_id="ops")
+    await memory.revoke(a, reason="r", actor="s")
+    await memory.revoke(b, reason="r", actor="s")
 
-        leaks: list[str] = []
-        stop = False
+    leaks: list[str] = []
+    stop = False
 
-        async def reader() -> None:
-            while not stop:
-                for query in ("purple elephant", "zebrafish", "old handover"):
-                    for hit in await memory.recall(query, user_id="ops", top_k=50):
-                        text = hit.fact.text
-                        if "purple elephant" in text or text.startswith("Zebrafish"):
-                            leaks.append(text[:40])
-                await asyncio.sleep(0)
+    async def reader() -> None:
+        while not stop:
+            for query in ("purple elephant", "zebrafish", "old handover"):
+                for hit in await memory.recall(query, user_id="ops", top_k=50):
+                    text = hit.fact.text
+                    if "purple elephant" in text or text.startswith("Zebrafish"):
+                        leaks.append(text[:40])
+            await asyncio.sleep(0)
 
-        readers = [asyncio.create_task(reader()) for _ in range(3)]
-        try:
-            for i in range(WRITES):
-                await memory.record(f"New handover {i}: {B}", user_id="ops")
-                await memory.record(
-                    f"Zebrafish summary {i} of the building code",
-                    user_id="ops",
-                    derived_from=[a.id],
-                )
-                await memory._store.upsert_fact(
-                    old.model_copy(update={"confidence": 0.5 + (i % 5) / 10}), source="update"
-                )
-        finally:
-            stop = True
-            await asyncio.gather(*readers)
-        assert leaks == [], f"{len(leaks)} leaked reads, e.g. {leaks[:3]}"
+    readers = [asyncio.create_task(reader()) for _ in range(3)]
+    try:
+        for i in range(WRITES):
+            await memory.record(f"New handover {i}: {B}", user_id="ops")
+            await memory.record(
+                f"Zebrafish summary {i} of the building code",
+                user_id="ops",
+                derived_from=[a.id],
+            )
+            await memory._store.upsert_fact(
+                old.model_copy(update={"confidence": 0.5 + (i % 5) / 10}), source="update"
+            )
+    finally:
+        stop = True
+        await asyncio.gather(*readers)
+    assert leaks == [], f"{len(leaks)} leaked reads, e.g. {leaks[:3]}"
 
 
-@pytest.mark.parametrize("kind", ["memory", "file"])
 async def test_search_events_never_returns_an_event_before_its_match_row(
-    kind: str, tmp_path: Path
+    open_memory: OpenMemory,
 ) -> None:
-    async with await Engram.open(_target(kind, tmp_path)) as memory:
-        b = await memory.record(B, user_id="ops")
-        await memory.revoke(b, reason="r", actor="s")
-        leaks = 0
-        stop = False
+    memory = await open_memory()
+    b = await memory.record(B, user_id="ops")
+    await memory.revoke(b, reason="r", actor="s")
+    leaks = 0
+    stop = False
 
-        async def reader() -> None:
-            nonlocal leaks
-            while not stop:
-                events = await memory.search_events("purple elephant", user_id="ops", limit=50)
-                leaks += sum(1 for e in events if "purple elephant" in " ".join(e.aliases))
-                await asyncio.sleep(0)
+    async def reader() -> None:
+        nonlocal leaks
+        while not stop:
+            events = await memory.search_events("purple elephant", user_id="ops", limit=50)
+            leaks += sum(1 for e in events if "purple elephant" in " ".join(e.aliases))
+            await asyncio.sleep(0)
 
-        readers = [asyncio.create_task(reader()) for _ in range(2)]
-        try:
-            for i in range(WRITES):
-                await memory._store.upsert_event(
-                    Event(
-                        scope=OPS,
-                        subject_canonical="ops",
-                        verb="noted",
-                        object_canonical=f"handover {i}",
-                        aliases=[B],
-                        time_start=datetime(2026, 3, 1, tzinfo=UTC),
-                    )
+    readers = [asyncio.create_task(reader()) for _ in range(2)]
+    try:
+        for i in range(WRITES):
+            await memory._store.upsert_event(
+                Event(
+                    scope=OPS,
+                    subject_canonical="ops",
+                    verb="noted",
+                    object_canonical=f"handover {i}",
+                    aliases=[B],
+                    time_start=datetime(2026, 3, 1, tzinfo=UTC),
                 )
-        finally:
-            stop = True
-            await asyncio.gather(*readers)
-        assert leaks == 0
+            )
+    finally:
+        stop = True
+        await asyncio.gather(*readers)
+    assert leaks == 0
 
 
+@pytest.mark.sqlite_only
 @pytest.mark.parametrize("kind", ["memory", "file"])
 async def test_recall_during_erase_never_returns_the_erased_text(kind: str, tmp_path: Path) -> None:
     # Deterministic: after every DELETE or revocation scrub inside erase(), a
@@ -154,6 +154,7 @@ async def test_recall_during_erase_never_returns_the_erased_text(kind: str, tmp_
         assert leaked == []
 
 
+@pytest.mark.sqlite_only
 async def test_recall_does_not_wait_for_a_long_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -241,6 +242,7 @@ class _SameTxReader:
         self.conn.executemany = self.real_many  # type: ignore[method-assign]
 
 
+@pytest.mark.sqlite_only
 async def test_upserts_never_expose_revoked_text_inside_their_transaction() -> None:
     async with await Engram.open(":memory:") as memory:
         a = await memory.record(A, user_id="ops")
@@ -271,6 +273,7 @@ async def test_upserts_never_expose_revoked_text_inside_their_transaction() -> N
         assert derived.seen == []
 
 
+@pytest.mark.sqlite_only
 async def test_erase_never_exposes_erased_text_inside_its_transaction() -> None:
     async with await Engram.open(":memory:") as memory:
         text = "Patient 7 diagnosis is acute myeloid leukemia stage two"
@@ -283,6 +286,7 @@ async def test_erase_never_exposes_erased_text_inside_its_transaction() -> None:
         assert reader.seen == []
 
 
+@pytest.mark.sqlite_only
 async def test_the_read_connection_refuses_writes(tmp_path: Path) -> None:
     import aiosqlite
 
@@ -292,6 +296,7 @@ async def test_the_read_connection_refuses_writes(tmp_path: Path) -> None:
             await memory._store._rconn.execute("DELETE FROM revocations")
 
 
+@pytest.mark.sqlite_only
 @pytest.mark.parametrize("kind", ["memory", "file"])
 async def test_reads_never_see_a_write_that_is_later_rolled_back(
     kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

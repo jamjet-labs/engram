@@ -14,6 +14,7 @@ from engram.retrieve.hybrid import HybridRetriever
 from engram.scope import Scope
 from engram.store.sqlite import SqliteStore
 from engram.vector.hnsw import HnswVectorStore
+from tests.conformance.backends import OpenStore
 
 
 def _now() -> datetime:
@@ -21,9 +22,11 @@ def _now() -> datetime:
 
 
 @pytest_asyncio.fixture
-async def setup() -> tuple[SqliteStore, HnswVectorStore, SyntheticEmbedding, Scope]:
+async def setup(
+    open_store: OpenStore,
+) -> tuple[SqliteStore, HnswVectorStore, SyntheticEmbedding, Scope]:
     """3 sessions x 3 facts each, with Session A heavily about coffee."""
-    store = await SqliteStore.open(":memory:")
+    store = await open_store()
     embedder = SyntheticEmbedding(dim=64)
     vec = HnswVectorStore(dim=64)
     scope = Scope(org_id="acme", user_id="alice")
@@ -127,10 +130,10 @@ async def test_two_stage_off_returns_global_pool(
 
 
 async def test_two_stage_falls_through_when_session_id_missing(
-    setup: tuple[SqliteStore, HnswVectorStore, SyntheticEmbedding, Scope],
+    setup: tuple[SqliteStore, HnswVectorStore, SyntheticEmbedding, Scope], open_store: OpenStore
 ) -> None:
     """If facts don't have session_id, two-stage should not block retrieval."""
-    store = await SqliteStore.open(":memory:")
+    store = await open_store()
     embedder = SyntheticEmbedding(dim=64)
     vec = HnswVectorStore(dim=64)
     scope = Scope(org_id="acme", user_id="alice")

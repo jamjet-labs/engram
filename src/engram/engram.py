@@ -39,6 +39,12 @@ from engram.retrieve.rrf import reciprocal_rank_fusion
 from engram.scope import Scope
 from engram.store.base import EngramStore
 from engram.store.open import open_store
+from engram.validate import (
+    MAX_FACT_TEXT_BYTES,
+    MAX_MESSAGE_BYTES,
+    check_json,
+    check_text,
+)
 from engram.vector.hnsw import HnswVectorStore
 
 
@@ -397,12 +403,16 @@ class Engram:
           cannot un-revoke). ``reject_revoked=True`` raises instead.
         """
         self._require_writable()
-        scope = Scope(org_id=org_id, user_id=user_id)
-        if reject_revoked and await self._store.is_content_revoked(text, scope):
-            raise RevokedContentError("text matches revoked content in this scope")
+        check_text("text", text, max_bytes=MAX_FACT_TEXT_BYTES)
+        if session_id is not None:
+            check_text("session_id", session_id, max_bytes=MAX_FACT_TEXT_BYTES)
         md = dict(metadata or {})
         if role is not None:
             md["role"] = role
+        check_json("metadata", md)
+        scope = Scope(org_id=org_id, user_id=user_id)
+        if reject_revoked and await self._store.is_content_revoked(text, scope):
+            raise RevokedContentError("text matches revoked content in this scope")
         fact = Fact(
             text=text,
             scope=scope,
@@ -435,6 +445,8 @@ class Engram:
     ) -> ChatMessage:
         """Record a raw chat turn (no extraction)."""
         self._require_writable()
+        check_text("content", content, max_bytes=MAX_MESSAGE_BYTES, allow_blank=True)
+        check_text("session_id", session_id, max_bytes=MAX_FACT_TEXT_BYTES)
         msg = ChatMessage(
             scope=Scope(org_id=org_id, user_id=user_id),
             session_id=session_id,

@@ -9,7 +9,7 @@ import re
 import sqlite3
 from collections.abc import AsyncIterator, Collection, Iterable, Sequence
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from types import TracebackType
@@ -42,6 +42,14 @@ from engram.store.sqlite_migrations import BASELINE_VERSION, Migration
 # Re-exported for callers that read the version from here. The store itself
 # calls sqlite_migrations.target_version() at open time.
 from engram.store.sqlite_migrations import SCHEMA_VERSION as SCHEMA_VERSION
+from engram.validate import (
+    MAX_FACT_TEXT_BYTES,
+    MAX_MESSAGE_BYTES,
+    MAX_STORE_LIMIT,
+    check_json,
+    check_limit,
+    check_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,14 +182,57 @@ def _ids_json(ids: Collection[str]) -> str:
     return json.dumps(sorted(ids))
 
 
+def _utc(dt: datetime) -> datetime:
+    """A naive time is read as UTC, so every stored time names one instant."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
 def _dt(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt else None
+    return _utc(dt).isoformat() if dt else None
 
 
 def _parse_dt(s: str | None) -> datetime | None:
     if s is None:
         return None
-    return datetime.fromisoformat(s)
+    return _parse_required_dt(s)
+
+
+def _parse_required_dt(s: str) -> datetime:
+    return _utc(datetime.fromisoformat(s))
+
+
+def _check_fact(fact: Fact) -> None:
+    """Refuse a fact the stores cannot hold alike. Blank text is the facade's to refuse."""
+    check_text("text", fact.text, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True)
+    if fact.session_id is not None:
+        check_text("session_id", fact.session_id, max_bytes=MAX_FACT_TEXT_BYTES)
+    for name, value in (("category", fact.category), ("source_event_id", fact.source_event_id)):
+        if value is not None:
+            check_text(name, value, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True)
+    check_json("metadata", fact.metadata)
+
+
+def _check_message(message: ChatMessage) -> None:
+    check_text("content", message.content, max_bytes=MAX_MESSAGE_BYTES, allow_blank=True)
+    check_text("session_id", message.session_id, max_bytes=MAX_FACT_TEXT_BYTES)
+    check_json("metadata", message.metadata)
+
+
+def _check_event(event: Event) -> None:
+    for name, value in (
+        ("subject_canonical", event.subject_canonical),
+        ("verb", event.verb),
+        ("object_canonical", event.object_canonical),
+    ):
+        check_text(name, value, max_bytes=MAX_FACT_TEXT_BYTES)
+    for alias in event.aliases:
+        check_text("alias", alias, max_bytes=MAX_FACT_TEXT_BYTES)
+    check_json("metadata", event.metadata)
+
+
+def _check_audit(reason: str, actor: str) -> None:
+    check_text("reason", reason, max_bytes=MAX_FACT_TEXT_BYTES)
+    check_text("actor", actor, max_bytes=MAX_FACT_TEXT_BYTES)
 
 
 class SqliteStore:
@@ -473,6 +524,7 @@ class SqliteStore:
         write cannot lift a tombstone.
         """
         self._require_writable()
+        _check_fact(fact)
         sources = list(derived_from or [])
         try:
             async with self._transaction():
@@ -677,6 +729,8 @@ class SqliteStore:
     async def list_facts_by_session(
         self, session_id: str, scope: Scope, limit: int = 100
     ) -> list[Fact]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             async with db.execute(
                 """SELECT * FROM live_facts
@@ -688,6 +742,8 @@ class SqliteStore:
             return [self._row_to_fact(r) for r in rows]
 
     async def keyword_search(self, query: str, scope: Scope, limit: int = 30) -> list[Fact]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             sanitized = self._sanitize_fts(query)
             if not sanitized:
@@ -722,6 +778,8 @@ class SqliteStore:
         the FTS5 virtual table — joining or CTE-wrapping breaks it. So we do
         FTS5 + scoring in one query, then aggregate in Python.
         """
+        if check_limit("top_sessions", top_sessions, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             sanitized = self._sanitize_fts(query)
             if not sanitized:
@@ -801,6 +859,7 @@ class SqliteStore:
 
     async def upsert_message(self, message: ChatMessage) -> None:
         self._require_writable()
+        _check_message(message)
         async with self._transaction():
             await self._check_owner("message", str(message.id), message.scope)
             keep = await self._add_matches(
@@ -836,6 +895,7 @@ class SqliteStore:
 
     async def upsert_event(self, event: Event) -> None:
         self._require_writable()
+        _check_event(event)
         try:
             async with self._transaction():
                 await self._check_owner("event", str(event.id), event.scope)
@@ -896,6 +956,8 @@ class SqliteStore:
         time_end: datetime | None = None,
         limit: int = 10,
     ) -> list[Event]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             sanitized = self._sanitize_fts(query) if query else ""
             try:
@@ -966,7 +1028,7 @@ class SqliteStore:
             subject_canonical=row["subject_canonical"],
             verb=row["verb"],
             object_canonical=row["object_canonical"],
-            time_start=datetime.fromisoformat(row["time_start"]),
+            time_start=_parse_required_dt(row["time_start"]),
             time_end=_parse_dt(row["time_end"]),
             confidence=row["confidence"],
             aliases=json.loads(row["aliases"]) if row["aliases"] else [],
@@ -979,6 +1041,8 @@ class SqliteStore:
     async def list_messages(
         self, session_id: str, scope: Scope, limit: int = 1000
     ) -> list[ChatMessage]:
+        if check_limit("limit", limit, maximum=MAX_STORE_LIMIT) == 0:
+            return []
         async with self._reading() as db:
             async with db.execute(
                 """SELECT * FROM live_messages
@@ -1213,6 +1277,7 @@ class SqliteStore:
         replacement than the one recorded is refused.
         """
         self._require_writable()
+        _check_audit(reason, actor)
         try:
             async with self._transaction():
                 fact = await self._governance_fact(fact_id, scope)
@@ -1421,6 +1486,7 @@ class SqliteStore:
         write of revoked text from being a handle to un-revoke the original.
         """
         self._require_writable()
+        _check_audit(reason, actor)
         try:
             async with self._transaction():
                 if await self._governance_fact(fact_id, scope) is None:
@@ -1495,7 +1561,7 @@ class SqliteStore:
             fact_id=UUID(row["fact_id"]),
             reason=row["reason"],
             actor=row["actor"],
-            revoked_at=datetime.fromisoformat(row["revoked_at"]),
+            revoked_at=_parse_required_dt(row["revoked_at"]),
             replaced_by=UUID(row["replaced_by"]) if row["replaced_by"] else None,
             reinstated_at=_parse_dt(row["reinstated_at"]),
             reinstated_by=row["reinstated_by"],
@@ -1534,6 +1600,7 @@ class SqliteStore:
         and then calls :meth:`finalize_erasure`.
         """
         self._require_writable()
+        _check_audit(reason, actor)
         try:
             async with self._transaction():
                 record = await self._erase_in_tx(
@@ -1734,7 +1801,7 @@ class SqliteStore:
                     fact_ids=[UUID(i) for i in json.loads(r["fact_ids"])],
                     actor=r["actor"],
                     reason=r["reason"],
-                    erased_at=datetime.fromisoformat(r["erased_at"]),
+                    erased_at=_parse_required_dt(r["erased_at"]),
                     artifacts=json.loads(r["artifacts"]),
                     guarantees=json.loads(r["guarantees"]),
                 )
@@ -1753,7 +1820,7 @@ class SqliteStore:
             id=UUID(row["id"]),
             text=row["text"],
             scope=scope,
-            valid_from=datetime.fromisoformat(row["valid_from"]),
+            valid_from=_parse_required_dt(row["valid_from"]),
             invalid_at=_parse_dt(row["invalid_at"]),
             confidence=row["confidence"],
             category=row["category"],
@@ -1780,6 +1847,6 @@ class SqliteStore:
             session_id=row["session_id"],
             role=row["role"],
             content=row["content"],
-            timestamp=datetime.fromisoformat(row["timestamp"]),
+            timestamp=_parse_required_dt(row["timestamp"]),
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
         )

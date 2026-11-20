@@ -4,7 +4,6 @@ from uuid import uuid4
 
 import pytest
 
-from engram import Engram
 from engram.models import Event
 from engram.scope import Scope
 from engram.solve.temporal import (
@@ -18,6 +17,7 @@ from engram.tools.dates import AddDaysTool, DaysBetweenTool
 from engram.tools.search_events import SearchEventsTool
 from engram.tools.search_facts import SearchFactsTool
 from engram.tools.solve_temporal import SolveTemporalTool
+from tests.conformance.backends import OpenMemory
 
 # ── Tool protocol + ToolRegistry ────────────────────────────────────────────
 
@@ -126,47 +126,47 @@ async def test_days_between_negative_when_reversed():
 
 
 @pytest.mark.asyncio
-async def test_search_facts_tool(monkeypatch):
+async def test_search_facts_tool(monkeypatch, open_memory: OpenMemory):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    async with await Engram.open(":memory:") as memory:
-        await memory.record(text="I love espresso", user_id="alice")
-        scope = Scope(org_id="default", user_id="alice")
-        res = await SearchFactsTool(engram=memory, scope=scope)(query="coffee preference", top_k=3)
-        assert "espresso" in res.content.lower()
+    memory = await open_memory()
+    await memory.record(text="I love espresso", user_id="alice")
+    scope = Scope(org_id="default", user_id="alice")
+    res = await SearchFactsTool(engram=memory, scope=scope)(query="coffee preference", top_k=3)
+    assert "espresso" in res.content.lower()
 
 
 @pytest.mark.asyncio
-async def test_search_facts_empty(monkeypatch):
+async def test_search_facts_empty(monkeypatch, open_memory: OpenMemory):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    async with await Engram.open(":memory:") as memory:
-        scope = Scope(org_id="default", user_id="alice")
-        res = await SearchFactsTool(engram=memory, scope=scope)(query="anything")
-        assert "(no facts found)" in res.content
+    memory = await open_memory()
+    scope = Scope(org_id="default", user_id="alice")
+    res = await SearchFactsTool(engram=memory, scope=scope)(query="anything")
+    assert "(no facts found)" in res.content
 
 
 # ── search_events ───────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_search_events_tool(monkeypatch):
+async def test_search_events_tool(monkeypatch, open_memory: OpenMemory):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        await memory._store.upsert_event(
-            Event(
-                id=uuid4(),
-                scope=scope,
-                subject_canonical="user",
-                verb="run",
-                object_canonical="marathon",
-                time_start=datetime(2024, 5, 1, tzinfo=UTC),
-                time_end=None,
-                confidence=1.0,
-                aliases=["ran a marathon"],
-            )
+    memory = await open_memory()
+    await memory._store.upsert_event(
+        Event(
+            id=uuid4(),
+            scope=scope,
+            subject_canonical="user",
+            verb="run",
+            object_canonical="marathon",
+            time_start=datetime(2024, 5, 1, tzinfo=UTC),
+            time_end=None,
+            confidence=1.0,
+            aliases=["ran a marathon"],
         )
-        res = await SearchEventsTool(engram=memory, scope=scope)(query="marathon")
-        assert "marathon" in res.content.lower()
+    )
+    res = await SearchEventsTool(engram=memory, scope=scope)(query="marathon")
+    assert "marathon" in res.content.lower()
 
 
 # ── solve_temporal ──────────────────────────────────────────────────────────
@@ -197,25 +197,25 @@ async def test_solve_temporal_tool_unparseable_returns_message():
 
 
 @pytest.mark.asyncio
-async def test_count_between_tool(monkeypatch):
+async def test_count_between_tool(monkeypatch, open_memory: OpenMemory):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     scope = Scope(org_id="default", user_id="alice")
-    async with await Engram.open(":memory:") as memory:
-        for m in (3, 5, 7):
-            await memory._store.upsert_event(
-                Event(
-                    id=uuid4(),
-                    scope=scope,
-                    subject_canonical="user",
-                    verb="run",
-                    object_canonical="marathon",
-                    time_start=datetime(2024, m, 1, tzinfo=UTC),
-                    time_end=None,
-                    confidence=1.0,
-                    aliases=[],
-                )
+    memory = await open_memory()
+    for m in (3, 5, 7):
+        await memory._store.upsert_event(
+            Event(
+                id=uuid4(),
+                scope=scope,
+                subject_canonical="user",
+                verb="run",
+                object_canonical="marathon",
+                time_start=datetime(2024, m, 1, tzinfo=UTC),
+                time_end=None,
+                confidence=1.0,
+                aliases=[],
             )
-        res = await CountBetweenTool(engram=memory, scope=scope)(
-            start="2024-01-01", end="2024-12-31", verb="run"
         )
-        assert res.content == "3"
+    res = await CountBetweenTool(engram=memory, scope=scope)(
+        start="2024-01-01", end="2024-12-31", verb="run"
+    )
+    assert res.content == "3"

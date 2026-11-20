@@ -1,3 +1,20 @@
 # Test files that run on every storage backend. One path per line, from the
 # repository root. They open memory only through the open_memory and
 # open_store fixtures; test_harness.py checks this.
+tests/conformance/test_store_contract.py
+tests/unit/test_revocation.py
+tests/unit/test_revocation_hardening.py
+tests/unit/test_provenance.py
+tests/unit/test_erasure.py
+tests/unit/test_versioning.py
+tests/unit/test_events.py
+tests/unit/test_read_isolation.py
+tests/unit/test_reinstate_rematch.py
+tests/unit/test_two_stage.py
+tests/unit/test_retrieve.py
+tests/unit/test_engram_record_role.py
+tests/unit/test_engram_context_role_filter.py
+tests/unit/test_temporal_solver.py
+tests/unit/test_tools.py
+tests/unit/test_sqlite_store.py
+tests/property/test_store_props.py
