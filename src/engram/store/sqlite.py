@@ -18,7 +18,13 @@ from uuid import UUID
 
 import aiosqlite
 
-from engram.errors import NotFoundError, ScopeError, StoreError
+from engram.errors import (
+    NotFoundError,
+    ReadOnlyStoreError,
+    SchemaVersionError,
+    ScopeError,
+    StoreError,
+)
 from engram.governance import (
     ErasureRecord,
     HiddenReason,
@@ -31,15 +37,24 @@ from engram.governance import (
 )
 from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
 from engram.scope import Scope
+from engram.store import sqlite_migrations
+from engram.store.sqlite_migrations import BASELINE_VERSION, Migration
+
+# Re-exported for callers that read the version from here. The store itself
+# calls sqlite_migrations.target_version() at open time.
+from engram.store.sqlite_migrations import SCHEMA_VERSION as SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
 
 _FTS_TABLES = ("facts_fts", "events_fts")
-# Bumped when a release changes what the schema means, not only its shape.
-# 1: 0.1/0.2. 2: 0.3 revocation views and side tables. A library refuses a
-# database whose recorded version is higher than this, before writing to it.
-# 0.2 never reads this table, so it cannot be stopped from opening a 0.3 file.
-SCHEMA_VERSION = 2
+# Schema versions: 1 is 0.1/0.2, 2 is 0.3's revocation views and side tables
+# (schema.sql), and each later one is a numbered migration. A library refuses
+# a database whose recorded version is higher than its own, before writing to
+# it. 0.2 never reads this table, so it cannot be stopped from opening a 0.3 file.
+
+# How long a connection waits for another connection's lock before it fails,
+# so a second process waits out a migration or a long write instead of erroring.
+_BUSY_TIMEOUT_S = 30.0
 
 _INSERT_MATCH = (
     "INSERT OR IGNORE INTO content_matches (kind, item_id, revocation_id) VALUES (?,?,?)"
@@ -84,6 +99,47 @@ def _is_private_memory(path: str | Path) -> bool:
     """True for databases a second connection cannot open (in-memory, temporary)."""
     text = str(path)
     return text in ("", ":memory:") or "mode=memory" in text
+
+
+def _read_only_uri(path: str | Path) -> str:
+    """A ``file:`` URI with ``mode=ro`` for an existing database file.
+
+    In this mode SQLite itself refuses every write, and a missing file is an
+    error rather than a new empty database. ``as_uri`` escapes ``?``, ``#``
+    and ``%`` in the path.
+    """
+    return Path(path).absolute().as_uri() + "?mode=ro"
+
+
+async def _recorded_version(conn: aiosqlite.Connection) -> int | None:
+    """The highest schema version the database records; None if it records none."""
+    async with conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+    ) as cur:
+        if await cur.fetchone() is None:
+            return None
+    async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
+        row = await cur.fetchone()
+    return None if row is None or row[0] is None else int(row[0])
+
+
+def _newer_schema_message(path: str | Path, found: int, target: int) -> str:
+    return (
+        f"database {path} was written by a newer version of Engram "
+        f"(schema {found}; this version supports up to {target}). "
+        "Upgrade jamjet-engram to open it. Nothing was written."
+    )
+
+
+async def _apply_migration(conn: aiosqlite.Connection, migration: Migration) -> None:
+    """Run one migration's statements and record its version. No commit.
+
+    Called inside the open's write transaction, so a failure part way
+    leaves nothing of it behind.
+    """
+    for stmt in migration.statements:
+        await conn.execute(stmt)
+    await conn.execute("INSERT INTO schema_version (version) VALUES (?)", (migration.version,))
 
 
 async def _shielded_rollback(conn: aiosqlite.Connection) -> None:
@@ -138,14 +194,20 @@ class SqliteStore:
     """Async SQLite + FTS5 store. Open with `await SqliteStore.open(path)`."""
 
     def __init__(
-        self, conn: aiosqlite.Connection, read_conn: aiosqlite.Connection | None = None
+        self,
+        conn: aiosqlite.Connection,
+        read_conn: aiosqlite.Connection | None = None,
+        *,
+        read_only: bool = False,
     ) -> None:
         # Writes go through `_conn`, one transaction at a time (see
         # _transaction). Reads go through `_reading()`: a second connection for
         # file databases, which in WAL mode only ever sees committed data, or,
         # for an in-memory database, the write connection under the same lock.
+        # A read-only store has the one connection, opened read-only.
         self._conn = conn
         self._rconn = read_conn
+        self._read_only = read_only
         self._fts_secure_delete = False
         # One Engram shares its connections across tasks, and SQLite has one
         # transaction per connection. Every write transaction holds this lock,
@@ -158,8 +220,23 @@ class SqliteStore:
         self._access_task: asyncio.Task[None] | None = None
 
     @classmethod
-    async def open(cls, path: str | Path) -> SqliteStore:
-        conn = await aiosqlite.connect(str(path))
+    async def open(cls, path: str | Path, *, read_only: bool = False) -> SqliteStore:
+        """Open, or create, the store at ``path``: a file, or ":memory:".
+
+        A writable open brings the file to this library's schema in one write
+        transaction: it refuses a file from a newer Engram, runs schema.sql,
+        then every numbered migration the file lacks
+        (`engram.store.sqlite_migrations`).
+
+        ``read_only=True`` opens an existing file for reads only. It runs no
+        schema statement and writes nothing, so the file must already be at
+        this library's schema version (`SchemaVersionError` otherwise). Every
+        write method then raises `ReadOnlyStoreError`. ":memory:" cannot be
+        opened read-only.
+        """
+        if read_only:
+            return await cls._open_read_only(path)
+        conn = await aiosqlite.connect(str(path), timeout=_BUSY_TIMEOUT_S)
         conn.row_factory = aiosqlite.Row
         try:
             # Cheap early exit before even the PRAGMAs touch the file.
@@ -170,8 +247,9 @@ class SqliteStore:
             # Overwrite freed pages with zeros so deleted content does not linger
             # in the database file (per connection; see erase()).
             await conn.execute("PRAGMA secure_delete = ON")
-            # Check and create in one write transaction, so a newer library
-            # cannot record its version between our check and our views.
+            # Check, create and migrate in one write transaction, so a newer
+            # library cannot record its version between our check and our
+            # views, and a failed migration leaves the file as it was.
             await conn.execute("BEGIN IMMEDIATE")
             try:
                 await cls._refuse_newer_schema(conn, path)
@@ -179,8 +257,9 @@ class SqliteStore:
                     await conn.execute(stmt)
                 await conn.execute(
                     "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
-                    (SCHEMA_VERSION,),
+                    (BASELINE_VERSION,),
                 )
+                await cls._migrate(conn, path)
                 await conn.commit()
             except BaseException:
                 await _shielded_rollback(conn)
@@ -190,7 +269,7 @@ class SqliteStore:
             raise
         read_conn: aiosqlite.Connection | None = None
         if not _is_private_memory(path):
-            read_conn = await aiosqlite.connect(str(path))
+            read_conn = await aiosqlite.connect(str(path), timeout=_BUSY_TIMEOUT_S)
             read_conn.row_factory = aiosqlite.Row
             # Fail closed if a write is ever routed to the read connection.
             await read_conn.execute("PRAGMA query_only = ON")
@@ -202,6 +281,51 @@ class SqliteStore:
             await store.close()
             raise
         return store
+
+    @classmethod
+    async def _open_read_only(cls, path: str | Path) -> SqliteStore:
+        if _is_private_memory(path):
+            raise ValueError("an in-memory database cannot be opened read-only: it starts empty")
+        try:
+            conn = await aiosqlite.connect(_read_only_uri(path), uri=True, timeout=_BUSY_TIMEOUT_S)
+        except aiosqlite.Error as e:
+            raise StoreError(f"cannot open {path} read-only: {e}") from e
+        conn.row_factory = aiosqlite.Row
+        try:
+            await conn.execute("PRAGMA query_only = ON")
+            await cls._require_current_schema(conn, path)
+        except aiosqlite.Error as e:
+            # For example a WAL file whose -shm cannot be created next to it.
+            await conn.close()
+            raise StoreError(f"cannot open {path} read-only: {e}") from e
+        except BaseException:
+            await conn.close()
+            raise
+        return cls(conn, read_only=True)
+
+    @staticmethod
+    async def _migrate(conn: aiosqlite.Connection, path: str | Path) -> None:
+        """Apply, in order, each migration above the file's version. No commit."""
+        found = await _recorded_version(conn)
+        start = BASELINE_VERSION if found is None else found
+        for migration in sqlite_migrations.pending(start):
+            try:
+                await _apply_migration(conn, migration)
+            except aiosqlite.Error as e:
+                raise StoreError(
+                    f"schema migration {migration.version} failed on {path}: {e}. "
+                    "The open was rolled back; the file keeps its old schema."
+                ) from e
+
+    @property
+    def read_only(self) -> bool:
+        """True when opened with ``read_only=True``: every write is refused."""
+        return self._read_only
+
+    def _require_writable(self) -> None:
+        """Raise before a write method reads or writes anything on a read-only store."""
+        if self._read_only:
+            raise ReadOnlyStoreError("this store was opened read-only; writes are refused")
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -257,19 +381,28 @@ class SqliteStore:
         Opening recreates the visibility views from this library's schema.sql,
         which would replace a newer version's revocation rules with older ones.
         """
-        async with conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
-        ) as cur:
-            if await cur.fetchone() is None:
-                return
-        async with conn.execute("SELECT MAX(version) FROM schema_version") as cur:
-            row = await cur.fetchone()
-        found = row[0] if row is not None else None
-        if found is not None and int(found) > SCHEMA_VERSION:
-            raise StoreError(
-                f"database {path} was written by a newer version of Engram "
-                f"(schema {found}; this version supports up to {SCHEMA_VERSION}). "
-                "Upgrade jamjet-engram to open it. Nothing was written."
+        found = await _recorded_version(conn)
+        target = sqlite_migrations.target_version()
+        if found is not None and found > target:
+            raise SchemaVersionError(_newer_schema_message(path, found, target))
+
+    @staticmethod
+    async def _require_current_schema(conn: aiosqlite.Connection, path: str | Path) -> None:
+        """Raise unless the database is at exactly this library's schema version.
+
+        A read-only open cannot upgrade a file, and must not read one whose
+        visibility rules are newer than its own.
+        """
+        found = await _recorded_version(conn)
+        target = sqlite_migrations.target_version()
+        if found is not None and found > target:
+            raise SchemaVersionError(_newer_schema_message(path, found, target))
+        if found != target:
+            shown = "none" if found is None else str(found)
+            raise SchemaVersionError(
+                f"database {path} is at schema {shown}; this version of Engram reads "
+                f"schema {target}. Open it writable once to upgrade it, then open it "
+                "read-only. Nothing was written."
             )
 
     async def _enable_fts_secure_delete(self) -> bool:
@@ -337,6 +470,7 @@ class SqliteStore:
         revoked text hides it. Nothing here touches the revocations table: a
         write cannot lift a tombstone.
         """
+        self._require_writable()
         sources = list(derived_from or [])
         try:
             async with self._transaction():
@@ -634,8 +768,11 @@ class SqliteStore:
         """Count a read of this fact. Applied shortly after, in its own transaction.
 
         Queued so a recall() never waits behind a long write; call
-        flush_access() when the counts must be on disk now.
+        flush_access() when the counts must be on disk now. Does nothing on a
+        read-only store.
         """
+        if self._read_only:
+            return
         key = str(fact_id)
         count, _ = self._pending_access.get(key, (0, None))
         self._pending_access[key] = (count + 1, _dt(datetime.now().astimezone()))
@@ -664,6 +801,7 @@ class SqliteStore:
     # ── Messages ─────────────────────────────────────────────────────────
 
     async def upsert_message(self, message: ChatMessage) -> None:
+        self._require_writable()
         async with self._transaction():
             await self._check_owner("message", str(message.id), message.scope)
             keep = await self._add_matches(
@@ -698,6 +836,7 @@ class SqliteStore:
     # ── Events (Phase 11) ────────────────────────────────────────────────
 
     async def upsert_event(self, event: Event) -> None:
+        self._require_writable()
         try:
             async with self._transaction():
                 await self._check_owner("event", str(event.id), event.scope)
@@ -1074,6 +1213,7 @@ class SqliteStore:
         already revoked without one attaches the replacement; a different
         replacement than the one recorded is refused.
         """
+        self._require_writable()
         try:
             async with self._transaction():
                 fact = await self._governance_fact(fact_id, scope)
@@ -1281,6 +1421,7 @@ class SqliteStore:
         the revoked fact named in ``explain().hidden_by`` instead. That keeps a
         write of revoked text from being a handle to un-revoke the original.
         """
+        self._require_writable()
         try:
             async with self._transaction():
                 if await self._governance_fact(fact_id, scope) is None:
@@ -1393,6 +1534,7 @@ class SqliteStore:
         run of an erased text. The caller (``Engram.erase``) drops the vectors
         and then calls :meth:`finalize_erasure`.
         """
+        self._require_writable()
         try:
             async with self._transaction():
                 record = await self._erase_in_tx(
@@ -1568,6 +1710,7 @@ class SqliteStore:
         self, record: ErasureRecord, extra_artifacts: dict[str, int], extra: dict[str, Any]
     ) -> ErasureRecord:
         """Record what else was removed, then flush the WAL so old pages leave the -wal file."""
+        self._require_writable()
         async with self._conn.execute("PRAGMA secure_delete") as cur:
             row = await cur.fetchone()
         secure = bool(row and row[0])
@@ -1594,6 +1737,8 @@ class SqliteStore:
 
     async def checkpoint(self) -> bool:
         """Checkpoint and truncate the WAL. True unless a reader blocked it."""
+        # A read-only connection reports a checkpoint it cannot do as done.
+        self._require_writable()
         # Under the write lock: a checkpoint cannot run inside a transaction.
         async with self._write_lock, self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)") as cur:
             row = await cur.fetchone()

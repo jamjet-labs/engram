@@ -12,6 +12,14 @@ class StoreError(EngramError):
     """Storage backend failure (SQLite, vector index, etc.)."""
 
 
+class ReadOnlyStoreError(StoreError):
+    """A write was asked of a store opened read-only. Nothing was written."""
+
+
+class SchemaVersionError(StoreError):
+    """The database's schema version is not one this library can open in this mode."""
+
+
 class NotFoundError(EngramError):
     """Requested resource (fact, session, entity) does not exist."""
 
