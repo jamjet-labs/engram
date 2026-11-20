@@ -1,0 +1,12 @@
+{
+  "instances": [
+    {
+      "content": "alice prefers espresso",
+      "task_type": "RETRIEVAL_DOCUMENT"
+    }
+  ],
+  "parameters": {
+    "outputDimensionality": 768,
+    "autoTruncate": false
+  }
+}

@@ -1,4 +1,12 @@
-"""Embedding providers — turn text into vectors."""
+"""Embedding providers: turn text into vectors.
+
+`OllamaEmbedding` and `SyntheticEmbedding` are here. Providers with their own
+dependencies are imported from their modules, so importing this package does
+not load them:
+
+- ``engram.embedding.openai.OpenAIEmbedding``
+- ``engram.embedding.vertex.VertexEmbedding`` (``pip install 'jamjet-engram[vertex]'``)
+"""
 
 from engram.embedding.base import (
     EmbedderIdentity,

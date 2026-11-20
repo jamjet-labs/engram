@@ -20,7 +20,7 @@ class EmbedderIdentity:
     records and checks.
     """
 
-    provider: str  # "openai", "ollama", "synthetic", or "<module>.<Class>" for others
+    provider: str  # "vertex", "openai", "ollama", "synthetic", or "<module>.<Class>" for others
     model: str
     dim: int
 

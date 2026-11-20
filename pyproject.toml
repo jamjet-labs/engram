@@ -52,6 +52,9 @@ dev = [
 rerank = [
     "sentence-transformers>=3",
 ]
+vertex = [
+    "google-auth>=2.30,<3",
+]
 training = [
     "sentence-transformers>=3",
     "torch>=2.0",

@@ -59,6 +59,27 @@ class EmbeddingResponseError(EmbeddingError):
     """
 
 
+class EmbeddingAuthError(EmbeddingError):
+    """The embedding service refused the credentials, or none could be found or refreshed.
+
+    Trying again with the same credentials will not help. Nothing was embedded.
+    """
+
+
+class EmbeddingQuotaError(EmbeddingError):
+    """The embedding service kept answering 429 (quota or rate limit) until the retries ran out.
+
+    Nothing was embedded. Try again later, or ask for more quota.
+    """
+
+
+class EmbeddingTimeoutError(EmbeddingError):
+    """No usable answer came before the retries or the deadline ran out.
+
+    Timeouts, lost connections and 5xx answers end here. Nothing was embedded.
+    """
+
+
 class ScopeErasedError(EngramError):
     """A write lost a race with ``Engram.erase_user`` on its scope. Nothing was stored.
 
