@@ -137,6 +137,24 @@ def test_docker_cmd_without_token_fails_fast(monkeypatch):
     assert "ENGRAM_AUTH_TOKEN" in (result.stderr + result.output)
 
 
+def test_docker_image_installs_the_vertex_extra_and_copies_no_credentials():
+    # `--embedder vertex:<model>` works in the image. Its credentials come
+    # from the environment at run time, so the image copies in only the source.
+    import re
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    dockerfile = (root / "Dockerfile").read_text()
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    assert "vertex" in pyproject["project"]["optional-dependencies"]
+    installed = re.findall(r"pip install --no-cache-dir '\.\[([a-z,]+)\]'", dockerfile)
+    assert installed and "vertex" in installed[0].split(","), installed
+    copied = re.findall(r"^COPY (.+) \S+$", dockerfile, re.MULTILINE)
+    assert copied == ["pyproject.toml README.md", "src"]
+    assert not re.findall(r"^(?:ENV|ARG) .*GOOGLE.*$", dockerfile, re.MULTILINE)
+
+
 def test_bad_allowed_origin_refuses(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "x" * 40)

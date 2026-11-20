@@ -200,7 +200,7 @@ engram-server --embedder vertex:gemini-embedding-001 --vertex-project my-project
 
 Keys are read only from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. There is no flag for a key. A bad value or a missing key exits with code 2 before the server starts, and `--dry-run` checks them without a network call.
 
-The database records which embedder wrote its vectors. Starting with another one is refused, naming both, so two embedders never mix. `--on-embedder-change switch` records the new one; the old vectors do not compare with it, so embed again after. The Docker image starts with the defaults, so pass these as arguments or variables.
+The database records which embedder wrote its vectors. Starting with another one is refused, naming both, so two embedders never mix. `--on-embedder-change switch` records the new one; the old vectors do not compare with it, so embed again after. The Docker image starts with the defaults, so pass these as arguments or variables. The image includes the Vertex embedder's dependencies. Its credentials still come from the environment at run time (application default credentials, or a mounted workload identity file named by `GOOGLE_APPLICATION_CREDENTIALS`), never from the image.
 
 ### Fact extraction needs an LLM
 

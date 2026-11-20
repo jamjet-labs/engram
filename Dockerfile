@@ -17,9 +17,10 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-# Install the package itself.
+# Install the package itself, with the vertex extra (google-auth) so the
+# vertex embedder works in the image. No credentials go into the image.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir '.[vertex]'
 
 # Persistent volume for the SQLite DB.
 RUN mkdir -p /data && chown engram:engram /data
@@ -41,6 +42,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 # name the proxy forwards, or every proxied request gets 421.
 # The embedder and the LLM are options too: add --embedder and --llm after the
 # command (or set ENGRAM_EMBEDDER and ENGRAM_LLM). The defaults are a synthetic
-# embedder and no LLM, which is for trying the server out. The vertex embedder
-# needs the extra: pip install 'jamjet-engram[vertex]'.
+# embedder and no LLM, which is for trying the server out. The vertex embedder's
+# dependencies are installed. Its credentials come from the environment at run
+# time: application default credentials (the platform's service account) or a
+# mounted workload identity file named by GOOGLE_APPLICATION_CREDENTIALS.
 CMD ["engram-server", "--transport", "http", "--host", "0.0.0.0", "--port", "8765"]
