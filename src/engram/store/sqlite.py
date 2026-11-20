@@ -33,11 +33,10 @@ from engram.governance import (
     content_hash,
     normalize_text,
     quotes,
-    quotes_any_run,
 )
 from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
 from engram.scope import Scope
-from engram.store import sqlite_migrations
+from engram.store import _rules, sqlite_migrations
 from engram.store.sqlite_migrations import BASELINE_VERSION, Migration
 
 # Re-exported for callers that read the version from here. The store itself
@@ -168,19 +167,6 @@ async def _shielded_rollback(conn: aiosqlite.Connection) -> None:
         await asyncio.shield(future)
     except Exception:
         pass  # already logged by log_failure
-
-
-def _quote_rows(
-    items: Sequence[tuple[str, str, str]], revoked: Sequence[tuple[str, str]]
-) -> list[tuple[str, str, str]]:
-    """(kind, item_id, revocation_id) for every item whose text quotes a revoked text."""
-    rows: list[tuple[str, str, str]] = []
-    for kind, item_id, text in items:
-        norm = normalize_text(text)
-        rows.extend(
-            (kind, item_id, rev_id) for rev_id, rev_norm in revoked if quotes(norm, rev_norm)
-        )
-    return rows
 
 
 def _ids_json(ids: Collection[str]) -> str:
@@ -651,12 +637,6 @@ class SqliteStore:
             (kind, item_id, _ids_json(keep)),
         )
 
-    @staticmethod
-    def _event_text(event: Event) -> str:
-        return " ".join(
-            [event.subject_canonical, event.verb, event.object_canonical, *event.aliases]
-        )
-
     async def derivation_targets_in_scope(self, ids: Iterable[UUID], scope: Scope) -> set[UUID]:
         """Which of ``ids`` exist in ``scope`` (visible or not). Returns ids only."""
         async with self._reading() as db:
@@ -860,7 +840,7 @@ class SqliteStore:
             async with self._transaction():
                 await self._check_owner("event", str(event.id), event.scope)
                 keep = await self._add_matches(
-                    "event", str(event.id), self._event_text(event), event.scope
+                    "event", str(event.id), _rules.event_text(event), event.scope
                 )
                 cur = await self._conn.execute(
                     """INSERT INTO events (
@@ -1355,12 +1335,12 @@ class SqliteStore:
             async with self._conn.execute(sql if ids is None else sql + only, params) as cur:
                 for r in await cur.fetchall():
                     if kind == "event":
-                        items.append((kind, r["id"], self._event_text(self._row_to_event(r))))
+                        items.append((kind, r["id"], _rules.event_text(self._row_to_event(r))))
                     else:
                         items.append((kind, r["id"], r["body"]))
         # Normalizing and matching a whole scope is CPU work (about a second at
         # 20k facts); run it in a thread so the event loop keeps serving reads.
-        rows = await asyncio.to_thread(_quote_rows, items, list(revoked))
+        rows = await asyncio.to_thread(_rules.quote_rows, items, list(revoked))
         if rows:
             await self._conn.executemany(_INSERT_MATCH, rows)
 
@@ -1578,7 +1558,7 @@ class SqliteStore:
         async with self._conn.execute(
             "SELECT id, text, source_message_id FROM facts WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            facts = {
+            facts: dict[str, _rules.FactRow] = {
                 r["id"]: (r["text"], normalize_text(r["text"]), r["source_message_id"])
                 for r in await cur.fetchall()
             }
@@ -1589,49 +1569,29 @@ class SqliteStore:
             for r in await cur.fetchall():
                 children.setdefault(r["source_fact_id"], []).append(r["fact_id"])
 
-        erased: set[str] = set()
-        frontier = [str(fact_id)]
-        while frontier:
-            fid = frontier.pop()
-            if fid in erased or fid not in facts:
-                continue
-            erased.add(fid)
-            norm = facts[fid][1]
-            frontier.extend(c for c in children.get(fid, []) if c not in erased)
-            if norm:
-                frontier.extend(
-                    other
-                    for other, (_, other_norm, _) in facts.items()
-                    if other not in erased and quotes(other_norm, norm)
-                )
-
-        norms = {facts[f][1] for f in erased} - {""}
-        for label, value in (("reason", reason), ("actor", actor)):
-            value_norm = normalize_text(value)
-            if any(quotes_any_run(value_norm, n) for n in norms):
-                raise ValueError(f"erasure {label} must not quote the content being erased")
-
+        erased = _rules.erase_closure(facts, children, str(fact_id))
+        norms, hashes = _rules.erased_norms_and_hashes(erased, facts)
+        _rules.refuse_quoting_audit_fields(reason, actor, norms)
         ids = sorted(erased)
-        hashes = {content_hash(facts[f][0]) for f in erased if facts[f][1]}
 
-        message_ids = {facts[f][2] for f in erased if facts[f][2]}
         async with self._conn.execute(
             "SELECT id, content FROM messages WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            for r in await cur.fetchall():
-                content_norm = normalize_text(r["content"])
-                if any(quotes(content_norm, n) for n in norms):
-                    message_ids.add(r["id"])
-        event_ids: set[str] = set()
+            message_ids = _rules.messages_to_erase(
+                erased, facts, [(r["id"], r["content"]) for r in await cur.fetchall()], norms
+            )
         async with self._conn.execute(
             "SELECT * FROM events WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            for r in await cur.fetchall():
-                ev = self._row_to_event(r)
-                linked = any(str(s) in erased for s in ev.source_fact_ids)
-                ev_norm = normalize_text(self._event_text(ev))
-                if linked or any(quotes(ev_norm, n) for n in norms):
-                    event_ids.add(r["id"])
+            events = [(r["id"], self._row_to_event(r)) for r in await cur.fetchall()]
+        event_ids = _rules.events_to_erase(
+            erased,
+            [
+                (row_id, [str(s) for s in ev.source_fact_ids], _rules.event_text(ev))
+                for row_id, ev in events
+            ],
+            norms,
+        )
 
         record = ErasureRecord(
             org_id=scope.org_id,
@@ -1663,37 +1623,33 @@ class SqliteStore:
                 f"DELETE FROM events WHERE id IN ({ph(len(event_ids))})", tuple(event_ids)
             )
 
-        kept_hashes = 0
         async with self._conn.execute(
             "SELECT * FROM revocations WHERE org_id = ? AND user_id = ?", sc
         ) as cur:
-            revs = await cur.fetchall()
-        for r in revs:
-            names_content = r["fact_id"] in erased or (
-                r["content_hash"] is not None and r["content_hash"] in hashes
-            )
-            reason_quotes = any(
-                quotes_any_run(normalize_text(r["reason"]), n)
-                or quotes_any_run(normalize_text(r["reinstate_reason"] or ""), n)
-                for n in norms
-            )
-            if not (names_content or reason_quotes):
-                continue
-            keep_hash = names_content and block_reinsertion and r["content_hash"] is not None
-            kept_hashes += int(keep_hash)
+            revs = [dict(r) for r in await cur.fetchall()]
+        scrubs = _rules.revocations_to_scrub(
+            revs, erased, hashes, norms, block_reinsertion=block_reinsertion
+        )
+        for s in scrubs:
             await self._conn.execute(
                 """UPDATE revocations
-                      SET reason = ?,
-                          reinstate_reason = CASE WHEN reinstate_reason IS NULL
-                                                  THEN NULL ELSE ? END,
+                      SET reason = CASE WHEN ? THEN ? ELSE reason END,
+                          reinstate_reason = CASE WHEN ? AND reinstate_reason IS NOT NULL
+                                                  THEN ? ELSE reinstate_reason END,
                           content_norm = CASE WHEN ? THEN NULL ELSE content_norm END,
-                          content_hash = CASE WHEN ? THEN content_hash ELSE
-                                              CASE WHEN ? THEN NULL ELSE content_hash END
-                                         END
+                          content_hash = CASE WHEN ? THEN NULL ELSE content_hash END
                     WHERE id = ?""",
-                (scrubbed, scrubbed, names_content, keep_hash, names_content, r["id"]),
+                (
+                    s.scrub_text,
+                    scrubbed,
+                    s.scrub_text,
+                    scrubbed,
+                    s.clear_norm,
+                    s.drop_hash,
+                    s.revocation_id,
+                ),
             )
-        record.guarantees["reinsertion_hashes_kept"] = kept_hashes
+        record.guarantees["reinsertion_hashes_kept"] = sum(s.keep_hash for s in scrubs)
 
         for kind, items in (("fact", ids), ("message", message_ids), ("event", event_ids)):
             if items:
