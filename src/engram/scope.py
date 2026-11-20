@@ -42,6 +42,26 @@ class Scope(BaseModel):
         return hash((self.org_id, self.user_id))
 
 
+def is_refused(org_id: str, user_id: str) -> bool:
+    """True when Scope refuses this pair of ids."""
+    try:
+        Scope(org_id=org_id, user_id=user_id)
+    except ValueError:
+        return True
+    return False
+
+
+def stored_scope(org_id: str, user_id: str) -> Scope:
+    """The Scope of a row a store read back, built without the id checks.
+
+    For stores. Every store read names its scope, so a row it returns is in
+    a scope its caller named. A row written before ids were checked (0.2
+    took ids such as ``"alice "`` and ``"a\\x00b"``) reads back with its ids
+    as stored. Only `Engram.erase_refused_scope` names such a scope.
+    """
+    return Scope.model_construct(org_id=org_id, user_id=user_id)
+
+
 @dataclass(frozen=True, slots=True)
 class ScopeWriteGuard:
     """The erase epoch a write saw when it started, for one scope.

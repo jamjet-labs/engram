@@ -39,7 +39,7 @@ from engram.governance import (
     quotes_any_run,
 )
 from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
-from engram.scope import Scope, ScopeWriteGuard
+from engram.scope import Scope, ScopeWriteGuard, is_refused, stored_scope
 from engram.store import _rules, sqlite_migrations
 from engram.store.sqlite_migrations import BASELINE_VERSION, Migration
 
@@ -1126,7 +1126,7 @@ class SqliteStore:
     def _row_to_event(row: aiosqlite.Row) -> Event:
         return Event(
             id=UUID(row["id"]),
-            scope=Scope(org_id=row["org_id"], user_id=row["user_id"]),
+            scope=stored_scope(row["org_id"], row["user_id"]),
             subject_canonical=row["subject_canonical"],
             verb=row["verb"],
             object_canonical=row["object_canonical"],
@@ -2036,6 +2036,29 @@ class SqliteStore:
             raise StoreError("fact_counts: COUNT returned no row")
         return int(total_row[0]), int(valid_row[0])
 
+    async def refused_scopes(self) -> list[tuple[str, str]]:
+        """(org_id, user_id) of each scope that holds memory under ids Scope refuses.
+
+        For `Engram.refused_scopes`. Such rows were written before ids were
+        checked: 0.2 took any id of 1 to 128 characters. Memory here is what
+        erasing the scope removes: facts, fact_meta rows, transcript turns,
+        events, entities, relationships, and tombstones that still hold a
+        content hash or text. Ids only, sorted. It reads the ids of every row.
+        """
+        async with self._reading() as db:
+            async with db.execute(
+                """SELECT org_id, user_id FROM facts
+                   UNION SELECT org_id, user_id FROM fact_meta
+                   UNION SELECT org_id, user_id FROM messages
+                   UNION SELECT org_id, user_id FROM events
+                   UNION SELECT org_id, user_id FROM entities
+                   UNION SELECT org_id, user_id FROM relationships
+                   UNION SELECT org_id, user_id FROM revocations
+                          WHERE content_hash IS NOT NULL OR content_norm IS NOT NULL"""
+            ) as cur:
+                rows = await cur.fetchall()
+        return sorted((r[0], r[1]) for r in rows if is_refused(r[0], r[1]))
+
     async def delete_session_messages(self, session_id: str, scope: Scope) -> int:
         """Hard-delete one session's transcript in scope. Returns turns removed.
 
@@ -2158,10 +2181,13 @@ class SqliteStore:
         return record
 
     # ── Row -> Pydantic ──────────────────────────────────────────────────
+    #
+    # A row's scope is read as stored (`stored_scope`): every read names its
+    # scope, so the ids already match one the caller named.
 
     @staticmethod
     def _row_to_fact(row: aiosqlite.Row) -> Fact:
-        scope = Scope(org_id=row["org_id"], user_id=row["user_id"])
+        scope = stored_scope(row["org_id"], row["user_id"])
         sp_s = row["source_span_start"]
         sp_e = row["source_span_end"]
         source_span: tuple[int, int] | None = (sp_s, sp_e) if sp_s is not None else None
@@ -2192,7 +2218,7 @@ class SqliteStore:
     def _row_to_message(row: aiosqlite.Row) -> ChatMessage:
         return ChatMessage(
             id=UUID(row["id"]),
-            scope=Scope(org_id=row["org_id"], user_id=row["user_id"]),
+            scope=stored_scope(row["org_id"], row["user_id"]),
             session_id=row["session_id"],
             role=row["role"],
             content=row["content"],

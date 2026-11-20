@@ -205,8 +205,9 @@ class EngramStore(Protocol):
     #
     # `find_fact_owner_in_org` and `fact_counts_in_org` read every user of
     # the one org they are given, for the root calls named for that
-    # (`Engram.forget_in_org`, `Engram.fact_counts_in_org`). Nothing here
-    # reads more than one org. `fact_row_committed` leaves when stores keep
+    # (`Engram.forget_in_org`, `Engram.fact_counts_in_org`). Nothing else
+    # here reads more than one org; `refused_scopes` lists ids of scopes no
+    # other call can name. `fact_row_committed` leaves when stores keep
     # their own vectors.
 
     @abstractmethod
@@ -241,6 +242,17 @@ class EngramStore(Protocol):
     @abstractmethod
     async def fact_counts_in_org(self, org_id: str) -> tuple[int, int]:
         """(all facts, visible and not invalidated facts) of every user in ``org_id``."""
+        ...
+
+    @abstractmethod
+    async def refused_scopes(self) -> list[tuple[str, str]]:
+        """(org_id, user_id) of each scope holding memory under ids Scope refuses, sorted.
+
+        Rows written before ids were checked. Ids only. Memory is what
+        `Engram.erase_refused_scope` removes, so a scope left with only its
+        audit rows is not listed. A store reads such rows back with
+        `engram.scope.stored_scope`.
+        """
         ...
 
     @abstractmethod

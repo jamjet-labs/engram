@@ -241,6 +241,9 @@ ENGRAM_WRITES: dict[str, EngramCall] = {
         s.kept.id, org_id=WHO["org_id"], reason="wrong", actor="test"
     ),
     "erase_user": lambda m, s: m.erase_user(reason="asked to", actor="test", **WHO),
+    "erase_refused_scope": lambda m, s: m.erase_refused_scope(
+        org_id=WHO["org_id"], user_id="alice ", reason="asked to", actor="test"
+    ),
     "delete_conversation": lambda m, s: m.delete_conversation("s1", **WHO),
 }
 
@@ -258,6 +261,7 @@ ENGRAM_READS: dict[str, EngramCall] = {
     "list_conversations": lambda m, s: m.list_conversations(**WHO),
     "list_messages": lambda m, s: m.list_messages("s1", **WHO),
     "fact_counts_in_org": lambda m, s: m.fact_counts_in_org(org_id=WHO["org_id"]),
+    "refused_scopes": lambda m, s: m.refused_scopes(),
 }
 
 ENGRAM_LIFECYCLE = {"open", "close"}
@@ -440,6 +444,7 @@ STORE_READS: dict[str, StoreCall] = {
     "fact_text_quoted_by": lambda st, s: st.fact_text_quoted_by(KEPT, ACME_ALICE),
     "fact_counts": lambda st, s: st.fact_counts(ACME_ALICE),
     "fact_counts_in_org": lambda st, s: st.fact_counts_in_org("acme"),
+    "refused_scopes": lambda st, s: st.refused_scopes(),
     "list_session_ids": lambda st, s: st.list_session_ids(ACME_ALICE),
     "list_session_messages": lambda st, s: st.list_session_messages("s1", ACME_ALICE),
     "scope_guard": lambda st, s: st.scope_guard(ACME_ALICE),

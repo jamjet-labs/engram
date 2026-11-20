@@ -231,14 +231,24 @@ def _methods_that_take_an_org() -> list[str]:
     return _methods_taking({"org_id"})
 
 
+# Calls that take ids exactly as a store holds them, and act only on a scope
+# these rules refuse (memory written before ids were checked). They refuse
+# every pair of ids the rules accept, so they never reach a scope ROOT_CALLS
+# can. test_refused_scopes.py holds their rules.
+STORED_ID_CALLS = {"erase_refused_scope"}
+
+
 def test_root_call_table_lists_exactly_the_methods_that_take_a_scope() -> None:
-    assert set(ROOT_CALLS) == set(_methods_that_take_a_scope())
+    assert set(ROOT_CALLS) | STORED_ID_CALLS == set(_methods_that_take_a_scope())
+    assert set(ROOT_CALLS) & STORED_ID_CALLS == set()
     assert set(ORG_CALLS) == set(_methods_that_take_an_org())
     # Nothing names a user without its org.
     assert _methods_taking({"user_id"}) == []
 
 
-@pytest.mark.parametrize("method", _methods_that_take_a_scope())
+@pytest.mark.parametrize(
+    "method", [m for m in _methods_that_take_a_scope() if m not in STORED_ID_CALLS]
+)
 @pytest.mark.parametrize(
     "given",
     [{}, {"user_id": "alice"}, {"org_id": "acme"}],

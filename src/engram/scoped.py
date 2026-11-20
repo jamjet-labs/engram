@@ -130,6 +130,18 @@ class ScopedEngram:
         self._engram = engram
         self._scope = engram._resolve_scope(user_id, org_id)
 
+    @classmethod
+    def _on_stored_scope(cls, engram: Engram, scope: Scope) -> ScopedEngram:
+        """A handle on a scope as a store holds it, its ids not checked again.
+
+        For `Engram.erase_refused_scope` only, which checks the ids itself and
+        never hands the handle out.
+        """
+        handle = cls.__new__(cls)
+        handle._engram = engram
+        handle._scope = scope
+        return handle
+
     @property
     def scope(self) -> Scope:
         """The scope every call on this handle reads and writes."""

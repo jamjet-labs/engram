@@ -39,7 +39,7 @@ from engram.models import ChatMessage, Event, Fact, MemoryTier, Polarity
 from engram.read.decomposer import QueryDecomposer
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.hybrid import HybridRetriever
-from engram.scope import Scope, ScopeWriteGuard
+from engram.scope import Scope, ScopeWriteGuard, is_refused, stored_scope
 from engram.scoped import ScopedEngram, _event_extraction, _extraction
 from engram.scoped import context_lines as context_lines
 from engram.store.base import EngramStore
@@ -47,6 +47,7 @@ from engram.store.open import open_store
 from engram.vector.hnsw import HnswVectorStore
 
 _DEFAULT_ID = "default"
+_MAX_ID_LENGTH = 128  # Scope's limit, and 0.2's
 
 
 def _check_allow_default_scope(value: object) -> None:
@@ -92,7 +93,9 @@ class Engram:
     ``allow_default_scope=True``. An id that is not a string, or is empty or
     blank, always raises. Two methods name an org alone and reach each of its
     users, `forget_in_org` and `fact_counts_in_org`; the same rules hold for
-    their ``org_id``. No method reaches more than one org.
+    their ``org_id``. No method reaches more than one org, except
+    `refused_scopes`. It lists, ids only, the scopes stored under ids these
+    rules refuse, for `erase_refused_scope`.
 
     To hand code one scope and nothing else, give it ``memory.scoped(org_id=...,
     user_id=...)``: a `ScopedEngram` whose methods take no scope.
@@ -485,10 +488,56 @@ class Engram:
 
         The right-to-erasure path. Returns the number of facts erased. See
         `ScopedEngram.erase_all` for what goes, what stays as the audit trail,
-        and what to do when it raises.
+        and what to do when it raises. A scope stored under ids the scope
+        rules now refuse is erased with `erase_refused_scope`.
         """
         self._require_writable()
         return await self._handle(user_id, org_id).erase_all(reason=reason, actor=actor)
+
+    async def refused_scopes(self) -> list[tuple[str, str]]:
+        """(org_id, user_id) of each scope that holds memory under ids the scope rules refuse.
+
+        0.2 took any id of 1 to 128 characters, so a database it wrote can
+        hold memory under an id such as ``"alice "`` or ``"a\\x00b"``. No call
+        that names a scope accepts such an id, so none can read or erase that
+        memory. This lists those scopes, sorted, in every org; erase each with
+        `erase_refused_scope`. Ids only. It reads the ids of every row, so run
+        it once after an upgrade, not on each request.
+        """
+        return await self._store.refused_scopes()
+
+    async def erase_refused_scope(
+        self, *, org_id: str, user_id: str, reason: str, actor: str
+    ) -> int:
+        """Hard-delete a scope stored under ids the scope rules refuse.
+
+        Takes the ids exactly as `refused_scopes` returns them and erases the
+        scope as `erase_user` does (see `ScopedEngram.erase_all`), audit trail
+        included. Returns the number of facts erased. Calling it again is safe.
+
+        Ids the rules accept raise ValueError before anything is read: erase
+        those with `erase_user`, which keeps the default-scope rule. An id
+        that is not a plain string, or is empty, raises ScopeRequiredError.
+        One over 128 characters or with a lone surrogate raises ValueError;
+        no store holds such an id.
+        """
+        self._require_writable()
+        ids: tuple[tuple[str, object], ...] = (("org_id", org_id), ("user_id", user_id))
+        for name, value in ids:
+            if type(value) is not str:
+                raise ScopeRequiredError(f"{name} must be a string, as stored")
+            if not value:
+                raise ScopeRequiredError(f"{name} must not be empty")
+            if len(value) > _MAX_ID_LENGTH:
+                raise ValueError(f"{name} is over {_MAX_ID_LENGTH} characters; no store holds it")
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(f"{name} holds a lone surrogate; no store holds it") from None
+        if not is_refused(org_id, user_id):
+            raise ValueError("the scope rules accept these ids; erase this scope with erase_user")
+        handle = ScopedEngram._on_stored_scope(self, stored_scope(org_id, user_id))
+        return await handle.erase_all(reason=reason, actor=actor)
 
     async def list_conversations(
         self, *, user_id: str | None = None, org_id: str | None = None
