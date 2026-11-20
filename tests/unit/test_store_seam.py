@@ -237,6 +237,9 @@ ENGRAM_WRITES: dict[str, EngramCall] = {
     # Without the check this would embed the facts it brings back.
     "reinstate": lambda m, s: m.reinstate(s.revoked, reason="it was right", actor="test"),
     "erase": lambda m, s: m.erase(s.kept, reason="asked to", actor="test"),
+    "forget": lambda m, s: m.forget(s.kept.id, reason="wrong", actor="test"),
+    "erase_user": lambda m, s: m.erase_user(reason="asked to", actor="test", **WHO),
+    "delete_conversation": lambda m, s: m.delete_conversation("s1", **WHO),
 }
 
 # extract and extract_events with persist=False store nothing, so they are reads.
@@ -250,6 +253,9 @@ ENGRAM_READS: dict[str, EngramCall] = {
     "erasures": lambda m, s: m.erasures(**WHO),
     "extract": lambda m, s: m.extract([_message()], persist=False),
     "extract_events": lambda m, s: m.extract_events([_message()], persist=False),
+    "list_conversations": lambda m, s: m.list_conversations(**WHO),
+    "list_messages": lambda m, s: m.list_messages("s1", **WHO),
+    "fact_counts": lambda m, s: m.fact_counts(),
 }
 
 ENGRAM_LIFECYCLE = {"open", "close"}
@@ -402,6 +408,10 @@ STORE_WRITES: dict[str, StoreCall] = {
     ),
     "erase": lambda st, s: st.erase(s.kept.id, ACME_ALICE, reason="asked to", actor="test"),
     "finalize_erasure": lambda st, s: st.finalize_erasure(_seeded_erasure(s), {"vectors": 0}, {}),
+    "delete_session_messages": lambda st, s: st.delete_session_messages("s1", ACME_ALICE),
+    "erase_scope_residue": lambda st, s: st.erase_scope_residue(
+        ACME_ALICE, reason="asked to", actor="test"
+    ),
 }
 
 STORE_READS: dict[str, StoreCall] = {
@@ -422,6 +432,13 @@ STORE_READS: dict[str, StoreCall] = {
     "list_revocations": lambda st, s: st.list_revocations(ACME_ALICE),
     "list_erasures": lambda st, s: st.list_erasures(ACME_ALICE),
     "hidden_fact_ids": lambda st, s: st.hidden_fact_ids(ACME_ALICE),
+    "fact_row_committed": lambda st, s: st.fact_row_committed(s.kept.id, ACME_ALICE),
+    "find_fact_scope": lambda st, s: st.find_fact_scope(s.kept.id),
+    "list_fact_ids": lambda st, s: st.list_fact_ids(ACME_ALICE),
+    "fact_text_quoted_by": lambda st, s: st.fact_text_quoted_by(KEPT, ACME_ALICE),
+    "fact_counts": lambda st, s: st.fact_counts(),
+    "list_session_ids": lambda st, s: st.list_session_ids(ACME_ALICE),
+    "list_session_messages": lambda st, s: st.list_session_messages("s1", ACME_ALICE),
 }
 
 # Accepted on a read-only store, and write nothing there.

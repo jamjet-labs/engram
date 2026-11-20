@@ -133,3 +133,25 @@ jobs:
 
       - name: mypy --strict on stub
         run: /tmp/downstream-venv/bin/mypy --strict /tmp/downstream_stub.py
+
+  java-contract:
+    # Runs the published jamjet-sdk EngramClient (what engram-spring-boot-starter
+    # users have) against this server. Keeps the v1 REST contract honest.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+      - name: Sync deps
+        run: uv sync --all-extras
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Java client contract
+        run: scripts/java-contract.sh

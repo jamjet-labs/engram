@@ -50,7 +50,15 @@ class EngramStore(Protocol):
         writer: str | None = None,
         source: str = "upsert",
         derived_from: Iterable[UUID] | None = None,
-    ) -> None: ...
+        not_erased_since: datetime | None = None,
+    ) -> None:
+        """Insert or update a fact, its provenance row and its derivation links.
+
+        With ``not_erased_since`` (timezone-aware), raises ScopeErasedError and
+        writes nothing if `erase_scope_residue` erased the fact's scope at or
+        after that time.
+        """
+        ...
 
     @abstractmethod
     async def get_fact(self, fact_id: UUID, scope: Scope) -> Fact | None: ...
@@ -86,7 +94,11 @@ class EngramStore(Protocol):
     # ── Messages and events ──────────────────────────────────────────────
 
     @abstractmethod
-    async def upsert_message(self, message: ChatMessage) -> None: ...
+    async def upsert_message(
+        self, message: ChatMessage, *, not_erased_since: datetime | None = None
+    ) -> None:
+        """Write a transcript turn. ``not_erased_since`` works as in `upsert_fact`."""
+        ...
 
     @abstractmethod
     async def list_messages(
@@ -185,3 +197,56 @@ class EngramStore(Protocol):
 
     @abstractmethod
     async def list_erasures(self, scope: Scope) -> list[ErasureRecord]: ...
+
+    # ── v1 REST support (ids and counts only, no text) ───────────────────
+    #
+    # In the form the v1 routes first used. `fact_counts` and
+    # `find_fact_scope` reach every scope; they are to be replaced by scoped
+    # calls, and `fact_row_committed` leaves when stores keep their own vectors.
+
+    @abstractmethod
+    async def fact_row_committed(self, fact_id: UUID, scope: Scope) -> bool:
+        """Is the fact's row there as of the latest commit? A bool, never text."""
+        ...
+
+    @abstractmethod
+    async def find_fact_scope(self, fact_id: UUID) -> Scope | None:
+        """The scope a fact id belongs to, in any scope. Not an authorization check."""
+        ...
+
+    @abstractmethod
+    async def list_fact_ids(self, scope: Scope) -> list[UUID]:
+        """Every fact id in scope, hidden ones included. For erasure only."""
+        ...
+
+    @abstractmethod
+    async def fact_text_quoted_by(self, value: str, scope: Scope) -> bool:
+        """Does ``value`` quote any fact text in scope, hidden facts included? A bool."""
+        ...
+
+    @abstractmethod
+    async def fact_counts(self) -> tuple[int, int]:
+        """(all facts, visible and not invalidated facts) across every scope."""
+        ...
+
+    @abstractmethod
+    async def list_session_ids(self, scope: Scope) -> list[str]:
+        """Sessions with a visible transcript turn in scope, by first turn."""
+        ...
+
+    @abstractmethod
+    async def list_session_messages(
+        self, session_id: str, scope: Scope, *, last_n: int | None = None
+    ) -> list[ChatMessage]:
+        """A session's visible turns, oldest first; the newest ``last_n`` when given."""
+        ...
+
+    @abstractmethod
+    async def delete_session_messages(self, session_id: str, scope: Scope) -> int:
+        """Hard-delete one session's transcript in scope. Returns turns removed."""
+        ...
+
+    @abstractmethod
+    async def erase_scope_residue(self, scope: Scope, *, reason: str, actor: str) -> ErasureRecord:
+        """Hard-delete what per-fact erasure leaves in a scope; refuse while facts remain."""
+        ...

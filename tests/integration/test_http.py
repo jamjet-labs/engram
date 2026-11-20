@@ -231,3 +231,51 @@ async def test_extract_whose_fact_text_is_refused_is_400() -> None:
         )
     assert r.status_code == 400
     assert r.json()["detail"].startswith("text")
+
+
+# The v1 routes the Java SDK calls answer refused input with 400 too.
+
+
+@pytest.mark.parametrize(
+    ("turns", "conversation_id", "field"),
+    [
+        (["hello", "a\x00b"], "c1", "content"),
+        (["hello", "x" * 1_048_577], "c1", "content"),
+        (["hello"], " ", "conversation_id"),
+    ],
+    ids=["nul-in-the-second-turn", "turn-over-1-mib", "blank-conversation-id"],
+)
+async def test_v1_save_messages_of_refused_input_is_400_and_stores_nothing(
+    turns: list[str], conversation_id: str, field: str
+) -> None:
+    async with _asgi_client() as client:
+        r = await client.post(
+            "/v1/memory/messages",
+            json={
+                "conversation_id": conversation_id,
+                "messages": [{"role": "user", "content": t} for t in turns],
+            },
+        )
+        assert r.status_code == 400
+        assert r.json()["error"].startswith(field)
+        listed = await client.get("/v1/memory/messages")
+    assert listed.json()["conversation_ids"] == []
+
+
+async def test_v1_add_whose_fact_text_is_refused_is_400() -> None:
+    reply = json.dumps({"facts": [{"text": "a\u0000b", "confidence": 0.9}]})
+    async with _asgi_client(llm=_StubLLM(reply)) as client:
+        r = await client.post("/v1/memory", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 400
+    assert r.json()["error"].startswith("text")
+
+
+async def test_v1_forget_with_a_refused_reason_is_400_and_revokes_nothing() -> None:
+    async with _asgi_client() as client:
+        made = await client.post("/v1/memory/record", json={"text": "Alice keeps a red bike."})
+        fact_id = made.json()["fact_id"]
+        r = await client.request("DELETE", f"/v1/memory/facts/{fact_id}", json={"reason": "a\x00b"})
+        assert r.status_code == 400
+        assert r.json()["error"].startswith("reason")
+        found = await client.get("/v1/memory/search", params={"q": "red bike"})
+    assert [hit["fact_id"] for hit in found.json()["results"]] == [fact_id]

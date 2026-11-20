@@ -179,6 +179,19 @@ async def test_nul_in_a_reason_or_actor_is_refused_and_nothing_changes(
     assert await store.list_erasures(ACME_ALICE) == []
 
 
+@pytest.mark.parametrize("field", ["reason", "actor"])
+async def test_nul_in_a_scope_erasure_reason_or_actor_is_refused_and_nothing_changes(
+    open_store: OpenStore, field: str
+) -> None:
+    store = await open_store()
+    await store.upsert_message(_message())
+    kwargs = {"reason": "a request", "actor": "a reviewer", field: "bad\x00value"}
+    with pytest.raises(ValueError, match=field):
+        await store.erase_scope_residue(ACME_ALICE, **kwargs)
+    assert len(await store.list_messages("s1", ACME_ALICE)) == 1
+    assert await store.list_erasures(ACME_ALICE) == []
+
+
 def _text_of_bytes(size: int) -> str:
     # A 2-byte character ends the text, so a text one byte over the limit
     # puts that character across the boundary.
