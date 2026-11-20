@@ -415,6 +415,92 @@ async def test_revoke_reinstate_explain_and_erase_user_refuse_an_empty_scope(
     assert await memory.erasures() == []
 
 
+# ── Ids that are not plain strings ─────────────────────────────────────
+
+
+NOT_STRING_IDS = [
+    pytest.param({"user_id": b"default", "org_id": b"default"}, id="bytes-default"),
+    pytest.param({"user_id": "alice", "org_id": bytearray(b"default")}, id="bytearray-default-org"),
+    pytest.param({"user_id": bytearray(b"default"), "org_id": "acme"}, id="bytearray-default-user"),
+    pytest.param({"user_id": b" ", "org_id": "acme"}, id="bytes-blank-user"),
+]
+
+
+@pytest.mark.parametrize("given", NOT_STRING_IDS)
+async def test_an_id_that_is_not_a_string_is_refused(given: dict[str, Any]) -> None:
+    # Scope decodes bytes to str, so b"default" would name the default scope
+    # after the checks on the raw value had passed.
+    embedder, llm = SpyEmbedder(), SpyLLM()
+    strict, store = await _strict(embedder, llm)
+    try:
+        refused: list[str] = []
+        for name, call in ROOT_CALLS.items():
+            try:
+                await call(strict, given)
+            except ScopeRequiredError as e:
+                assert "must be a string" in str(e)
+                refused.append(name)
+        assert refused == list(ROOT_CALLS)
+
+        # The same for ids given alongside a Fact.
+        acme_alice = Scope(org_id="acme", user_id="alice")
+        fact = Fact(text=BIKE, scope=acme_alice, valid_from=datetime.now(UTC))
+        governed: dict[str, Callable[[], Awaitable[object]]] = {
+            "revoke": lambda: strict.revoke(fact, reason="wrong", actor="test", **given),
+            "reinstate": lambda: strict.reinstate(fact, reason="right", actor="test", **given),
+            "erase": lambda: strict.erase(fact, reason="asked to", actor="test", **given),
+        }
+        refused = []
+        for name, gcall in governed.items():
+            try:
+                await gcall()
+            except ScopeRequiredError as e:
+                assert "must be a string" in str(e)
+                refused.append(name)
+        assert refused == list(governed)
+        assert store.calls == []
+        assert embedder.calls == []
+        assert llm.calls == 0
+    finally:
+        await strict.close()
+
+    # The switch does not change the rule.
+    async with await Engram.open(":memory:", allow_default_scope=True) as allowed:
+        with pytest.raises(ScopeRequiredError, match="must be a string"):
+            await allowed.record(BIKE, **given)
+
+
+class _NeverEqualStr(str):
+    """Compares unequal to everything. Scope still stores it as a plain str."""
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+    def __hash__(self) -> int:
+        return str.__hash__(self)
+
+
+@pytest.mark.parametrize("field", FIELDS)
+async def test_default_is_judged_on_the_id_the_scope_stores(field: str) -> None:
+    embedder = SpyEmbedder()
+    strict, store = await _strict(embedder)
+    given: dict[str, Any] = {"org_id": "acme", "user_id": "alice"}
+    given[field] = _NeverEqualStr("default")
+    try:
+        refused: list[str] = []
+        for name, call in ROOT_CALLS.items():
+            try:
+                await call(strict, given)
+            except ScopeRequiredError as e:
+                assert '"default" names the default scope' in str(e)
+                refused.append(name)
+        assert refused == list(ROOT_CALLS)
+        assert store.calls == []
+        assert embedder.calls == []
+    finally:
+        await strict.close()
+
+
 # ── The server keeps its contract ──────────────────────────────────────
 
 

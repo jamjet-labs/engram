@@ -29,11 +29,12 @@ class ScopeError(EngramError):
 
 
 class ScopeRequiredError(ValueError, EngramError):
-    """A call did not name its scope, or named it with an empty or blank id.
+    """A call did not name its scope, or named it with an id it cannot use.
 
     A missing ``user_id`` or ``org_id``, or the literal ``"default"``, is
     refused unless the Engram was opened with ``allow_default_scope=True``.
-    An empty or blank id is refused always. Nothing was read or written.
+    An id that is not a string, or is empty or blank, is refused always.
+    Nothing was read or written.
     """
 
 

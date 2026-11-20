@@ -64,9 +64,15 @@ def _check_allow_default_scope(value: object) -> None:
         raise TypeError("allow_default_scope must be True or False")
 
 
-def _refuse_blank_ids(user_id: str | None, org_id: str | None) -> None:
+def _check_given_ids(user_id: str | None, org_id: str | None) -> None:
+    # Only a str or None. Scope decodes bytes to str, so a bytes id would pass
+    # these checks and then name a scope they never saw.
     for name, value in (("org_id", org_id), ("user_id", user_id)):
-        if isinstance(value, str) and not value.strip():
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ScopeRequiredError(f"{name} must be a string")
+        if not value.strip():
             raise ScopeRequiredError(f"{name} must not be empty or blank")
 
 
@@ -82,7 +88,8 @@ class Engram:
     Every method that reads or writes memory names its scope with ``org_id``
     and ``user_id``. A missing id, or the id ``"default"``, raises
     ScopeRequiredError unless the Engram was opened with
-    ``allow_default_scope=True``. An empty or blank id always raises.
+    ``allow_default_scope=True``. An id that is not a string, or is empty or
+    blank, always raises.
 
     It works with any store that meets `engram.store.EngramStore`; pass one
     with `Engram.open(store=...)`.
@@ -206,10 +213,10 @@ class Engram:
         ``None`` means not given. Not given, or the literal ``"default"``, is
         refused with ScopeRequiredError unless this Engram was opened with
         ``allow_default_scope=True``, and then not given means ``"default"``.
-        An empty or blank id is refused always. Any other id that Scope
-        refuses raises ValueError.
+        An id that is not a string, or is empty or blank, is refused always.
+        Any other id that Scope refuses raises ValueError.
         """
-        _refuse_blank_ids(user_id, org_id)
+        _check_given_ids(user_id, org_id)
         if not self._allow_default_scope:
             for name, value in (("org_id", org_id), ("user_id", user_id)):
                 if value is None:
@@ -217,15 +224,20 @@ class Engram:
                         f"{name} is required: name the scope, or open the Engram with "
                         "allow_default_scope=True to use the default one"
                     )
+        scope = Scope(
+            org_id=_DEFAULT_ID if org_id is None else org_id,
+            user_id=_DEFAULT_ID if user_id is None else user_id,
+        )
+        if not self._allow_default_scope:
+            # Read from the Scope, not the arguments: a str subclass can
+            # compare unequal to "default" and still be stored as it.
+            for name, value in (("org_id", scope.org_id), ("user_id", scope.user_id)):
                 if value == _DEFAULT_ID:
                     raise ScopeRequiredError(
                         f'{name} "default" names the default scope, which needs the Engram '
                         "opened with allow_default_scope=True"
                     )
-        return Scope(
-            org_id=_DEFAULT_ID if org_id is None else org_id,
-            user_id=_DEFAULT_ID if user_id is None else user_id,
-        )
+        return scope
 
     def _require_writable(self) -> None:
         # First thing in every write method: before validation, any store
@@ -337,11 +349,12 @@ class Engram:
     def _governed_scope(self, fact: Fact | UUID, user_id: str | None, org_id: str | None) -> Scope:
         """Scope for a governance call: the fact's own, or the one passed with an id.
 
-        The rules of `_resolve_scope` hold either way: an empty or blank id is
-        refused, and a fact in the default scope needs allow_default_scope.
+        The rules of `_resolve_scope` hold either way: an id that is not a
+        string, or is empty or blank, is refused, and a fact in the default
+        scope needs allow_default_scope.
         """
         if isinstance(fact, Fact):
-            _refuse_blank_ids(user_id, org_id)
+            _check_given_ids(user_id, org_id)
             if (user_id is not None and user_id != fact.scope.user_id) or (
                 org_id is not None and org_id != fact.scope.org_id
             ):
