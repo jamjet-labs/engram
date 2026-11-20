@@ -272,7 +272,7 @@ async def test_solve_returns_none_when_count_is_zero(monkeypatch, open_memory: O
         dates=[datetime(2023, 1, 1, tzinfo=UTC)],
     )
     s = TemporalSolver(store=memory._store, llm=AsyncMock())
-    # Count for "run marathon" — no matches exist.
+    # Count for "run marathon": no matches exist.
     q = TemporalQuery(op="count", verb="run", object="marathon")
     assert await s.solve(q, scope) is None
 
