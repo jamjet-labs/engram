@@ -38,6 +38,15 @@ MIGRATIONS: tuple[Migration, ...] = (
             )""",
         ),
     ),
+    # Settings of the database as a whole, one row per key. Key "embedder"
+    # holds the EmbedderIdentity key of the embedder its vectors come from;
+    # Engram.open records it and refuses another (`set_embedder_key`).
+    Migration(
+        version=4,
+        statements=(
+            "CREATE TABLE engram_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)",
+        ),
+    ),
 )
 
 SCHEMA_VERSION = BASELINE_VERSION + len(MIGRATIONS)

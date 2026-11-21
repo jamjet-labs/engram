@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 403,
+    "message": "Permission denied on the model.",
+    "status": "PERMISSION_DENIED"
+  }
+}

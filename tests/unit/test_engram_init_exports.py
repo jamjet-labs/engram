@@ -7,6 +7,13 @@ def test_top_level_exports_resolve():
     """All documented top-level exports must be importable from `engram`."""
     from engram import (
         ChatMessage,
+        EmbedderIdentity,
+        EmbedderMismatchError,
+        EmbeddingAuthError,
+        EmbeddingError,
+        EmbeddingQuotaError,
+        EmbeddingResponseError,
+        EmbeddingTimeoutError,
         Engram,
         EngramError,
         ExtractionError,
@@ -37,6 +44,13 @@ def test_top_level_exports_resolve():
     # Smoke check: each is non-None
     for name in (
         ChatMessage,
+        EmbedderIdentity,
+        EmbedderMismatchError,
+        EmbeddingAuthError,
+        EmbeddingError,
+        EmbeddingQuotaError,
+        EmbeddingResponseError,
+        EmbeddingTimeoutError,
         Engram,
         EngramError,
         ExtractionError,
@@ -72,6 +86,13 @@ def test_top_level_all_lists_exported_names():
 
     expected = {
         "ChatMessage",
+        "EmbedderIdentity",
+        "EmbedderMismatchError",
+        "EmbeddingAuthError",
+        "EmbeddingError",
+        "EmbeddingQuotaError",
+        "EmbeddingResponseError",
+        "EmbeddingTimeoutError",
         "Engram",
         "EngramError",
         "ErasureRecord",
@@ -104,3 +125,11 @@ def test_top_level_all_lists_exported_names():
     }
     actual = set(engram.__all__)
     assert expected == actual, f"diff: {expected ^ actual}"
+
+
+def test_vertex_embedding_stays_out_of_the_top_level():
+    """VertexEmbedding needs the vertex extra, so it is imported from its module."""
+    import engram
+
+    assert "VertexEmbedding" not in engram.__all__
+    assert not hasattr(engram, "VertexEmbedding")

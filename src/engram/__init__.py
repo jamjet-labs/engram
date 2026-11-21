@@ -7,8 +7,15 @@ library callers should import.
 
 from engram.classify.base import QuestionType
 from engram.classify.rules import RuleBasedClassifier
+from engram.embedding.base import EmbedderIdentity
 from engram.engram import Engram
 from engram.errors import (
+    EmbedderMismatchError,
+    EmbeddingAuthError,
+    EmbeddingError,
+    EmbeddingQuotaError,
+    EmbeddingResponseError,
+    EmbeddingTimeoutError,
     EngramError,
     ExtractionError,
     NotFoundError,
@@ -29,6 +36,13 @@ from engram.tools.base import Tool, ToolRegistry, ToolResult
 
 __all__ = [
     "ChatMessage",
+    "EmbedderIdentity",
+    "EmbedderMismatchError",
+    "EmbeddingAuthError",
+    "EmbeddingError",
+    "EmbeddingQuotaError",
+    "EmbeddingResponseError",
+    "EmbeddingTimeoutError",
     "Engram",
     "EngramError",
     "ErasureRecord",

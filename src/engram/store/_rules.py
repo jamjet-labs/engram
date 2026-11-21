@@ -1,9 +1,10 @@
-"""The erase and revocation rules, written once for every store.
+"""The erase, revocation and embedder rules, written once for every store.
 
 Each function here is pure: it takes rows a store has already read and says
 what to delete, refuse or scrub. The store does the reading and the writing
 in its own transaction. Keeping the rules here means two stores cannot drift
-apart on what an erase removes or what a tombstone keeps.
+apart on what an erase removes, what a tombstone keeps, or which embedder
+key they accept.
 
 Text comparison is :func:`engram.governance.quotes` (equality, or whole-token
 containment of a long enough text) and, for audit fields,
@@ -16,11 +17,35 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from engram.errors import EmbedderMismatchError
 from engram.governance import content_hash, normalize_text, quotes, quotes_any_run
 from engram.models import Event
 
 FactRow = tuple[str, str, str | None]
 """(text, normalized text, source_message_id) for one fact in scope."""
+
+EMBEDDER_META_KEY = "embedder"
+"""The engram_meta key whose value is the recorded embedder's `EmbedderIdentity.key`."""
+
+
+def check_embedder_key(recorded: str | None, key: str, *, replace: bool) -> bool:
+    """Check ``key`` against the one a store records. True when the store must write it.
+
+    No key recorded: True. The same key: False. Another key: True with
+    ``replace``, else EmbedderMismatchError naming both keys. Keys compare
+    whole, so another model or another vector size is another embedder.
+    """
+    if recorded is None:
+        return True
+    if recorded == key:
+        return False
+    if replace:
+        return True
+    raise EmbedderMismatchError(
+        f"the database records embedder {recorded!r}, not {key!r}. Vectors from two "
+        "embedders do not compare, so nothing was written. To change embedders, "
+        "open with on_embedder_change='switch', then run engram-admin reembed."
+    )
 
 
 def erase_closure(

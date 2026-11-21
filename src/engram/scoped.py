@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from engram.classify.base import budget_for
+from engram.embedding.base import embed_documents
 from engram.errors import NotFoundError, ScopeErasedError, ScopeError
 from engram.governance import (
     ErasureRecord,
@@ -230,7 +231,11 @@ class ScopedEngram:
         source_message_id: UUID | None = None,
         reject_revoked: bool = False,
     ) -> Fact:
-        """Record a single fact (no LLM extraction). Embeds + stores in one call.
+        """Record a single fact (no LLM extraction). Embeds, then stores, in one call.
+
+        The text is embedded (`embed_documents`) before anything is written,
+        so an embedder error, or a bad vector (EmbeddingResponseError), raises
+        and stores nothing.
 
         Pass `session_id` to enable Phase 9 two-stage retrieval: facts in the
         same session can then be retrieved together via session-first ranking.
@@ -280,6 +285,9 @@ class ScopedEngram:
             metadata=md,
             source_message_id=source_message_id,
         )
+        # Before the write: a failed embedding stores nothing. After the
+        # guard: an erase that commits while the embedder runs refuses it.
+        [vec] = await embed_documents(engram._embed, [text])
         try:
             await store.upsert_fact(
                 fact,
@@ -292,7 +300,6 @@ class ScopedEngram:
             logger.info("record: the scope was erased while the write ran; nothing stored")
             raise
         if await store.provenance([fact.id], scope):
-            [vec] = await engram._embed.embed([text])
             await self._add_vector(fact.id, vec)
         return fact
 
@@ -341,6 +348,13 @@ class ScopedEngram:
         `Engram.open(llm=...)`. With ``persist=False`` nothing is stored, so it
         also works read-only.
 
+        Every fact's text and category are checked as the store checks them
+        before the embedder is called, so a fact the store would refuse
+        raises ValueError and stores none of them. The facts are then
+        embedded together (`embed_documents`) before the first is written, so
+        an embedder error, or a bad vector (EmbeddingResponseError), raises
+        and stores none of them.
+
         If :meth:`erase_all` erases the scope while this runs, the facts not
         yet stored are dropped, and the result lists only those stored before
         the erase. ``guard`` says when the write started; without one, this
@@ -364,8 +378,17 @@ class ScopedEngram:
         extracted: list[ExtractedFact] = await pipeline.extract(messages, session_date=session_date)
         out: list[Fact] = []
         if persist:
+            # The store's text checks, run on every fact before the embedder:
+            # model text the store would refuse never reaches the provider,
+            # and the facts ahead of it are not stored.
             for ef in extracted:
-                fact = Fact(
+                check_text("text", ef.text, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True)
+                if ef.category is not None:
+                    check_text(
+                        "category", ef.category, max_bytes=MAX_FACT_TEXT_BYTES, allow_blank=True
+                    )
+            facts = [
+                Fact(
                     id=uuid4(),
                     text=ef.text,
                     scope=scope,
@@ -377,6 +400,11 @@ class ScopedEngram:
                     event_date=ef.event_date,
                     mention_date=ef.mention_date,
                 )
+                for ef in extracted
+            ]
+            # One call, before the first write: a failed embedding stores none.
+            vectors = await embed_documents(engram._embed, [f.text for f in facts])
+            for fact, vec in zip(facts, vectors, strict=True):
                 try:
                     await store.upsert_fact(fact, writer=actor, source="extract", guard=guard)
                 except ScopeErasedError:
@@ -389,7 +417,6 @@ class ScopedEngram:
                     break
                 if not await store.provenance([fact.id], scope):
                     continue  # stored, but born withheld: matches revoked content
-                [vec] = await engram._embed.embed([ef.text])
                 if not await self._add_vector(fact.id, vec):
                     continue  # erased between the upsert and the vector add
                 out.append(fact)
@@ -537,7 +564,10 @@ class ScopedEngram:
         _only_in(self._scope, lifted)
         _only_in(self._scope, visible)
         if visible:
-            vecs = await engram._embed.embed([f.text for f in visible])
+            # Checked before any reaches the index. The tombstones are lifted
+            # already: on an embedder error the facts are visible, found by
+            # keyword search, with no vector.
+            vecs = await embed_documents(engram._embed, [f.text for f in visible])
             for f, v in zip(visible, vecs, strict=True):
                 await engram._vec.add(f.id, v, self._scope)
         return lifted

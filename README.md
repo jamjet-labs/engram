@@ -179,15 +179,38 @@ engram:
 
 `ENGRAM_TOKEN` must hold the same value as the server's `ENGRAM_AUTH_TOKEN`.
 
+### Choosing the embedder and the LLM
+
+The server starts with a synthetic embedder and no LLM. That is fine to try it out, but recall then matches on shared words only, and the server logs that. Choose both with flags (or the environment variables):
+
+| Flag | Env | Values |
+|---|---|---|
+| `--embedder` | `ENGRAM_EMBEDDER` | `synthetic[:<dim>]` (default), `ollama:<model>`, `openai:<model>`, `vertex:<model>` |
+| `--embedder-dim` | | vector size; each embedder has its own default (768 for ollama and vertex) |
+| `--vertex-project` | `GOOGLE_CLOUD_PROJECT` | required for `vertex:`; credentials are application default credentials, fetched on first use |
+| `--vertex-location` | `ENGRAM_VERTEX_LOCATION` | default `us-central1` |
+| `--on-embedder-change` | | `refuse` (default) or `switch` |
+| `--llm` | `ENGRAM_LLM` | `none` (default), `openai:<model>`, `anthropic:<model>`, `ollama:<model>` |
+
+```bash
+pip install 'jamjet-engram[vertex]'
+engram-server --embedder vertex:gemini-embedding-001 --vertex-project my-project \
+  --llm anthropic:claude-haiku-4-5
+```
+
+Keys are read only from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. There is no flag for a key. A bad value or a missing key exits with code 2 before the server starts, and `--dry-run` checks them without a network call.
+
+The database records which embedder wrote its vectors. Starting with another one is refused, naming both, so two embedders never mix. `--on-embedder-change switch` records the new one; the old vectors do not compare with it, so embed again after. The Docker image starts with the defaults, so pass these as arguments or variables. The image includes the Vertex embedder's dependencies. Its credentials still come from the environment at run time (application default credentials, or a mounted workload identity file named by `GOOGLE_APPLICATION_CREDENTIALS`), never from the image.
+
 ### Fact extraction needs an LLM
 
-The image starts Engram without an LLM, so it does not extract facts, and logs a warning at startup that says so. Without an LLM:
+Without `--llm`, Engram does not extract facts, and logs a warning at startup that says so. Without an LLM:
 
 - `POST /v1/memory` (the client's `add`) returns 400.
 - `saveMessages` stores the turns and returns `fact_ids: null`.
 - recall, search and context only find facts written through `POST /v1/memory/record`.
 
-To extract facts, serve Engram from Python with an LLM client from `engram.llm`:
+Start the server with `--llm`, or serve it from Python with any `LLMClient` from `engram.llm`:
 
 ```python
 import asyncio

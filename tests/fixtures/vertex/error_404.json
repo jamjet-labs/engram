@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 404,
+    "message": "Publisher model not found.",
+    "status": "NOT_FOUND"
+  }
+}

@@ -29,6 +29,7 @@ from uuid import UUID
 import pytest
 
 from engram import Engram
+from engram.embedding.base import EmbedderIdentity
 from engram.embedding.synthetic import SyntheticEmbedding
 from engram.errors import ReadOnlyStoreError, SchemaVersionError, StoreError
 from engram.governance import ErasureRecord, Provenance, Revocation
@@ -99,6 +100,11 @@ class SpyEmbedder:
     @property
     def dim(self) -> int:
         return self._inner.dim
+
+    @property
+    def identity(self) -> EmbedderIdentity:
+        # The synthetic one's, so it opens files the default embedder wrote.
+        return self._inner.identity
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(list(texts))
@@ -338,9 +344,9 @@ async def test_the_facade_refuses_a_write_before_any_store_or_model_call(
     store = ClaimsReadOnly(await open_store())
     assert isinstance(store, EngramStore)
     seeded = await _seed_store(store)
-    store.calls.clear()
     embedder, llm = SpyEmbedder(), SpyLLM()
     memory = await Engram.open(store=store, embedder=embedder, llm=llm, read_only=True)
+    store.calls.clear()  # the open reads the embedder key; the write must call nothing
 
     with pytest.raises(ReadOnlyStoreError):
         await ENGRAM_WRITES[method](memory, seeded)
@@ -418,6 +424,7 @@ STORE_WRITES: dict[str, StoreCall] = {
     "erase_scope_residue": lambda st, s: st.erase_scope_residue(
         ACME_ALICE, reason="asked to", actor="test"
     ),
+    "set_embedder_key": lambda st, s: st.set_embedder_key("test/other/8", replace=True),
 }
 
 STORE_READS: dict[str, StoreCall] = {
@@ -448,6 +455,7 @@ STORE_READS: dict[str, StoreCall] = {
     "list_session_ids": lambda st, s: st.list_session_ids(ACME_ALICE),
     "list_session_messages": lambda st, s: st.list_session_messages("s1", ACME_ALICE),
     "scope_guard": lambda st, s: st.scope_guard(ACME_ALICE),
+    "embedder_key": lambda st, s: st.embedder_key(),
 }
 
 # Accepted on a read-only store, and write nothing there.

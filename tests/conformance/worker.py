@@ -1,10 +1,12 @@
 """One Engram process for the multi-process tests.
 
-    python -m tests.conformance.worker --target <path> [--crash-at <label>]
+    python -m tests.conformance.worker --target <path> [--embedder synthetic:<dim>]
+                                       [--crash-at <label>]
 
-Run from the repository root. The worker prints {"ready": true} once its
-imports are done, then reads one JSON command per line on stdin and answers
-each with one JSON line:
+Run from the repository root. --embedder picks the embedder the Engram opens
+with (default: Engram's own, synthetic at 384 dimensions). The worker prints
+{"ready": true} once its imports are done, then reads one JSON command per
+line on stdin and answers each with one JSON line:
 
     {"ok": true, "t0": <time.monotonic()>, "t1": <time.monotonic()>, "result": ...}
     {"ok": false, "error": "<exception class name>", "message": "<text>"}
@@ -48,6 +50,8 @@ from typing import Any
 from uuid import UUID
 
 from engram import Engram
+from engram.embedding import SyntheticEmbedding
+from engram.embedding.base import EmbeddingProvider
 from engram.store import sqlite as sqlite_mod
 from engram.store import sqlite_migrations
 from engram.store.sqlite import SqliteStore
@@ -112,14 +116,25 @@ def install_crash(label: str) -> None:
         raise SystemExit(f"unknown crash label {label!r}; known: {', '.join(CRASH_LABELS)}")
 
 
+def make_embedder(spec: str) -> EmbeddingProvider:
+    """The embedder an --embedder value names. Only ``synthetic:<dim>`` today."""
+    scheme, _, dim = spec.partition(":")
+    if scheme != "synthetic" or not dim.isdigit():
+        raise SystemExit(f"unknown embedder {spec!r}; known: synthetic:<dim>")
+    return SyntheticEmbedding(dim=int(dim))
+
+
 class Worker:
-    def __init__(self, target: str) -> None:
+    def __init__(self, target: str, embedder: EmbeddingProvider | None = None) -> None:
         self.target = target
+        self.embedder = embedder
         self.engram: Engram | None = None
 
     async def _engram(self, read_only: bool = False) -> Engram:
         if self.engram is None:
-            self.engram = await Engram.open(self.target, read_only=read_only)
+            self.engram = await Engram.open(
+                self.target, embedder=self.embedder, read_only=read_only
+            )
         return self.engram
 
     async def run(self, cmd: dict[str, Any]) -> Any:
@@ -170,11 +185,13 @@ class Worker:
 async def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
+    parser.add_argument("--embedder")
     parser.add_argument("--crash-at", choices=CRASH_LABELS)
     args = parser.parse_args(argv)
     if args.crash_at:
         install_crash(args.crash_at)
-    worker = Worker(args.target)
+    embedder = make_embedder(args.embedder) if args.embedder else None
+    worker = Worker(args.target, embedder)
     print(json.dumps({"ready": True}), flush=True)
     queued: list[dict[str, Any]] = []
     started = False

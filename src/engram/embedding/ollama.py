@@ -6,6 +6,7 @@ import asyncio
 
 import httpx
 
+from engram.embedding.base import EmbedderIdentity
 from engram.errors import EmbeddingError
 
 
@@ -30,6 +31,10 @@ class OllamaEmbedding:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def identity(self) -> EmbedderIdentity:
+        return EmbedderIdentity("ollama", self._model, self._dim)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:

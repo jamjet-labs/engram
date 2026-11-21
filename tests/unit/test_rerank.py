@@ -1,6 +1,8 @@
 """Cross-encoder reranker tests.
 
-Skipped if `sentence-transformers` is not installed (it's an optional dep).
+Skipped if `sentence-transformers` is not installed (it's an optional dep), or
+if the model is not in the local Hugging Face cache: tests never download it
+(the network guard in tests/network_guard.py would refuse), and the hub runs offline.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ from engram.models import Fact
 from engram.retrieve.base import ScoredFact
 from engram.scope import Scope
 
+MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
 
 def _have_st() -> bool:
     try:
@@ -22,6 +26,29 @@ def _have_st() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _have_model() -> bool:
+    if not _have_st():
+        return False
+    from huggingface_hub import try_to_load_from_cache
+
+    return isinstance(try_to_load_from_cache(MODEL, "config.json"), str)
+
+
+needs_model = pytest.mark.skipif(
+    not _have_model(),
+    reason=f"sentence-transformers or {MODEL} in the local Hugging Face cache is missing",
+)
+
+
+@pytest.fixture(autouse=True)
+def _hub_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Load the model from the local cache, with no request to the hub."""
+    if _have_st():
+        import huggingface_hub.constants
+
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
 
 
 def _now() -> datetime:
@@ -40,7 +67,7 @@ def _mk(text: str, score: float = 0.5) -> ScoredFact:
     )
 
 
-@pytest.mark.skipif(not _have_st(), reason="sentence-transformers not installed")
+@needs_model
 async def test_cross_encoder_rerank_promotes_relevant_above_topical_neighbor() -> None:
     from engram.retrieve.rerank import CrossEncoderReranker
 
@@ -53,7 +80,7 @@ async def test_cross_encoder_rerank_promotes_relevant_above_topical_neighbor() -
     assert "paris" in out[0].fact.text.lower()
 
 
-@pytest.mark.skipif(not _have_st(), reason="sentence-transformers not installed")
+@needs_model
 async def test_cross_encoder_empty_input() -> None:
     from engram.retrieve.rerank import CrossEncoderReranker
 
@@ -62,7 +89,7 @@ async def test_cross_encoder_empty_input() -> None:
     assert out == []
 
 
-@pytest.mark.skipif(not _have_st(), reason="sentence-transformers not installed")
+@needs_model
 async def test_cross_encoder_top_k_truncates() -> None:
     from engram.retrieve.rerank import CrossEncoderReranker
 
@@ -72,7 +99,7 @@ async def test_cross_encoder_top_k_truncates() -> None:
     assert len(out) == 2
 
 
-@pytest.mark.skipif(not _have_st(), reason="sentence-transformers not installed")
+@needs_model
 async def test_cross_encoder_writes_rerank_score() -> None:
     from engram.retrieve.rerank import CrossEncoderReranker
 

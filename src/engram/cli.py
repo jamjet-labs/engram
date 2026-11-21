@@ -13,8 +13,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import TYPE_CHECKING, Literal
 
 import typer
+
+if TYPE_CHECKING:
+    from engram.embedding.base import EmbeddingProvider
+    from engram.llm.base import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,10 @@ ALLOWED_ORIGINS_ENV = "ENGRAM_ALLOWED_ORIGINS"
 ALLOWED_HOSTS_ENV = "ENGRAM_ALLOWED_HOSTS"
 _YES = frozenset({"1", "true", "yes", "on"})
 _TOKEN_HINT = "python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+
+EMBEDDER_SCHEMES = "synthetic[:<dim>], ollama:<model>, openai:<model> or vertex:<model>"
+LLM_SCHEMES = "none, openai:<model>, anthropic:<model> or ollama:<model>"
+DEFAULT_VERTEX_LOCATION = "us-central1"
 
 app = typer.Typer(add_completion=False, help="Engram MCP HTTP server")
 
@@ -75,6 +84,111 @@ def _flag_and_env(flag_values: list[str] | None, env_name: str) -> list[str]:
     return raw + [v for v in os.environ.get(env_name, "").split(",") if v.strip()]
 
 
+def _checked_policy(value: str) -> Literal["refuse", "switch"]:
+    return "switch" if value == "switch" else "refuse"
+
+
+def _split_spec(spec: str, what: str, schemes: str) -> tuple[str, str | None]:
+    """``scheme[:value]`` as (scheme, value or None). ValueError if it is empty."""
+    scheme, sep, value = spec.strip().partition(":")
+    scheme = scheme.lower()
+    if not scheme:
+        raise ValueError(f"{what} is empty; use {schemes}")
+    return scheme, (value.strip() if sep else None)
+
+
+def _whole_dim(what: str, text: str | int) -> int:
+    try:
+        dim = int(text)
+    except ValueError:
+        dim = 0
+    if dim < 1:
+        raise ValueError(f"{what} must be a whole number of 1 or more, not {text!r:.40}")
+    return dim
+
+
+def build_embedder(
+    spec: str,
+    *,
+    dim: int | None = None,
+    vertex_project: str | None = None,
+    vertex_location: str = DEFAULT_VERTEX_LOCATION,
+) -> EmbeddingProvider:
+    """Make the embedder a ``--embedder`` value names. Makes no network call.
+
+    ``synthetic[:<dim>]``, ``ollama:<model>``, ``openai:<model>`` or
+    ``vertex:<model>``. ``dim`` is ``--embedder-dim``; without it each provider
+    uses its own size. Raises ValueError for a value it cannot use, and the
+    provider's own error (an `EmbeddingError`) for a missing package, key or
+    project.
+    """
+    scheme, value = _split_spec(spec, "--embedder", EMBEDDER_SCHEMES)
+    if dim is not None:
+        dim = _whole_dim("--embedder-dim", dim)
+    if scheme == "synthetic":
+        from engram.embedding.synthetic import SyntheticEmbedding
+
+        if value:
+            inline = _whole_dim("synthetic:<dim>", value)
+            if dim is not None and dim != inline:
+                raise ValueError(
+                    f"--embedder synthetic:{inline} and --embedder-dim {dim} disagree; give one"
+                )
+            dim = inline
+        return SyntheticEmbedding(dim=dim or 384)
+    if scheme not in ("ollama", "openai", "vertex"):
+        raise ValueError(f"unknown embedder {spec!r:.80}; use {EMBEDDER_SCHEMES}")
+    if not value:
+        raise ValueError(f"--embedder {scheme} needs a model: {scheme}:<model>")
+    if scheme == "ollama":
+        from engram.embedding.ollama import OllamaEmbedding
+
+        return OllamaEmbedding(model=value, dim=dim or 768)
+    if scheme == "openai":
+        from engram.embedding.openai import OpenAIEmbedding
+
+        return OpenAIEmbedding(model=value, dim=dim)
+    from engram.embedding.vertex import VertexEmbedding
+
+    if not vertex_project:
+        # Left out, the project comes from application default credentials,
+        # which is a credentials lookup: ask for it up front instead.
+        raise ValueError(
+            "--embedder vertex needs a project: pass --vertex-project or set GOOGLE_CLOUD_PROJECT"
+        )
+    return VertexEmbedding(
+        project=vertex_project, location=vertex_location, model=value, dim=dim or 768
+    )
+
+
+def build_llm(spec: str) -> LLMClient | None:
+    """Make the LLM client a ``--llm`` value names, or None for ``none``.
+
+    Keys come only from each provider's own environment variable
+    (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``). There is no key flag.
+    """
+    scheme, value = _split_spec(spec, "--llm", LLM_SCHEMES)
+    if scheme == "none":
+        if value is not None:
+            raise ValueError("--llm none takes no model")
+        return None
+    if scheme not in ("openai", "anthropic", "ollama"):
+        raise ValueError(f"unknown LLM {spec!r:.80}; use {LLM_SCHEMES}")
+    if not value:
+        raise ValueError(f"--llm {scheme} needs a model: {scheme}:<model>")
+    if scheme == "openai":
+        from engram.llm.openai import OpenAILLM
+
+        return OpenAILLM(model=value)
+    if scheme == "anthropic":
+        from engram.llm.anthropic import AnthropicLLM
+
+        return AnthropicLLM(model=value)
+    from engram.llm.ollama import OllamaLLM
+
+    return OllamaLLM(model=value)
+
+
 @app.command()
 def main(
     transport: str = typer.Option("http", "--transport", help="Only `http` valid in v0.2."),
@@ -111,6 +225,49 @@ def main(
         ),
     ),
     db_path: str | None = typer.Option(None, "--db-path", help="SQLite path."),
+    embedder: str = typer.Option(
+        "synthetic",
+        "--embedder",
+        envvar="ENGRAM_EMBEDDER",
+        help=(
+            f"Embedder: {EMBEDDER_SCHEMES}. The default, synthetic, is not semantic: "
+            "use it for tests only."
+        ),
+    ),
+    embedder_dim: int | None = typer.Option(
+        None,
+        "--embedder-dim",
+        help="Vector size. Without it each embedder uses its own (768 for ollama and vertex).",
+    ),
+    vertex_project: str | None = typer.Option(
+        None,
+        "--vertex-project",
+        envvar="GOOGLE_CLOUD_PROJECT",
+        help="Google Cloud project for --embedder vertex:<model>.",
+    ),
+    vertex_location: str = typer.Option(
+        DEFAULT_VERTEX_LOCATION,
+        "--vertex-location",
+        envvar="ENGRAM_VERTEX_LOCATION",
+        help="Vertex AI region.",
+    ),
+    on_embedder_change: str = typer.Option(
+        "refuse",
+        "--on-embedder-change",
+        help=(
+            "What to do when the database holds vectors from another embedder: "
+            "refuse (the default) or switch (record the new one, then re-embed)."
+        ),
+    ),
+    llm: str = typer.Option(
+        "none",
+        "--llm",
+        envvar="ENGRAM_LLM",
+        help=(
+            f"LLM that extracts facts: {LLM_SCHEMES}. Keys are read only from "
+            "OPENAI_API_KEY or ANTHROPIC_API_KEY."
+        ),
+    ),
     log_level: str = typer.Option("INFO", "--log-level"),
     version: bool = typer.Option(False, "--version", help="Print version and exit."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate flags, do not bind."),
@@ -129,6 +286,7 @@ def main(
         or os.environ.get(ALLOW_UNAUTHENTICATED_ENV, "").strip().lower() in _YES
     )
 
+    from engram.errors import EmbeddingError, ExtractionError
     from engram.server.auth import check_token, normalize_host, normalize_origin
 
     try:
@@ -203,6 +361,24 @@ def main(
             f"this is weak. Suggested: {_TOKEN_HINT}"
         )
 
+    if on_embedder_change not in ("refuse", "switch"):
+        _eprint(f"--on-embedder-change must be refuse or switch, not {on_embedder_change!r:.40}")
+        raise typer.Exit(2)
+
+    # Both objects are built before --dry-run returns, so a bad value, a
+    # missing package or a missing key fails here. Neither makes a network call.
+    try:
+        embedder_obj = build_embedder(
+            embedder,
+            dim=embedder_dim,
+            vertex_project=vertex_project,
+            vertex_location=vertex_location,
+        )
+        llm_obj = build_llm(llm)
+    except (ValueError, EmbeddingError, ExtractionError) as e:
+        _eprint(f"refusing to start: {e}")
+        raise typer.Exit(2) from e
+
     if dry_run:
         return
 
@@ -218,6 +394,9 @@ def main(
             allowed_origins=origins,
             allowed_hosts=hosts,
             log_level=log_level,
+            embedder=embedder_obj,
+            llm=llm_obj,
+            on_embedder_change=_checked_policy(on_embedder_change),
         )
     )
 
@@ -232,6 +411,9 @@ async def serve_engram(
     allow_unauthenticated: bool = False,
     allowed_origins: list[str] | None = None,
     allowed_hosts: list[str] | None = None,
+    embedder: EmbeddingProvider | None = None,
+    llm: LLMClient | None = None,
+    on_embedder_change: Literal["refuse", "switch"] = "refuse",
 ) -> None:
     """Open Engram and serve the FastAPI app via uvicorn — all on one event loop.
 
@@ -256,19 +438,32 @@ async def serve_engram(
     # Late imports — keep --version, --help, and dry-run fast.
     import uvicorn
 
+    from engram.embedding.base import embedder_identity
     from engram.engram import Engram
     from engram.server.http import build_http_app
     from engram.server.mcp import build_mcp_server
 
     # The server's contract reads a missing user_id or org_id as "default".
-    engram = await Engram.open(path=db_path, allow_default_scope=True)
+    engram = await Engram.open(
+        path=db_path,
+        embedder=embedder,
+        llm=llm,
+        allow_default_scope=True,
+        on_embedder_change=on_embedder_change,
+    )
     if engram._extract is None:
         logger.warning(
             "no LLM configured, so fact extraction is off: POST /v1/memory and "
             "/v1/memory/extract return 400, POST /v1/memory/messages stores the turns with "
             "fact_ids null, and recall and context only find facts written through "
-            "/v1/memory/record. To extract facts, serve Engram from Python with llm=... "
-            "(see the README)."
+            "/v1/memory/record. To extract facts, start the server with --llm "
+            "(for example --llm openai:gpt-4o-mini)."
+        )
+    if embedder_identity(engram._embed).provider == "synthetic":
+        logger.warning(
+            "the synthetic embedder is on, so recall is not semantic: it matches on shared "
+            "words only. Start the server with --embedder for real meaning "
+            "(for example --embedder vertex:gemini-embedding-001)."
         )
     try:
         mcp_server = build_mcp_server(engram, name="engram")
@@ -285,6 +480,10 @@ async def serve_engram(
         await server.serve()
     finally:
         await engram.close()
+        # Engram.close() does not close the embedder it was given.
+        aclose = getattr(engram._embed, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 if __name__ == "__main__":

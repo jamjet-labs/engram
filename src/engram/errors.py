@@ -20,6 +20,15 @@ class SchemaVersionError(StoreError):
     """The database's schema version is not one this library can open in this mode."""
 
 
+class EmbedderMismatchError(StoreError):
+    """The database records another embedder than the one this open was given.
+
+    Vectors from two embedders do not compare, so the open is refused and
+    nothing is written. The message names both embedder keys and the fix:
+    open with ``on_embedder_change="switch"``, then re-embed.
+    """
+
+
 class NotFoundError(EngramError):
     """Requested resource (fact, session, entity) does not exist."""
 
@@ -48,6 +57,36 @@ class ExtractionError(EngramError):
 
 class EmbeddingError(EngramError):
     """Embedding provider failure."""
+
+
+class EmbeddingResponseError(EmbeddingError):
+    """The embedder answered, but not with one usable vector per text.
+
+    A wrong count, a wrong length, a NaN or infinite value, or a zero vector.
+    The whole answer is refused, so nothing from it is stored or indexed. The
+    message names the vector's index, never its text.
+    """
+
+
+class EmbeddingAuthError(EmbeddingError):
+    """The embedding service refused the credentials, or none could be found or refreshed.
+
+    Trying again with the same credentials will not help. Nothing was embedded.
+    """
+
+
+class EmbeddingQuotaError(EmbeddingError):
+    """The embedding service kept answering 429 (quota or rate limit) until the retries ran out.
+
+    Nothing was embedded. Try again later, or ask for more quota.
+    """
+
+
+class EmbeddingTimeoutError(EmbeddingError):
+    """No usable answer came before the retries or the deadline ran out.
+
+    Timeouts, lost connections and 5xx answers end here. Nothing was embedded.
+    """
 
 
 class ScopeErasedError(EngramError):

@@ -137,6 +137,24 @@ def test_docker_cmd_without_token_fails_fast(monkeypatch):
     assert "ENGRAM_AUTH_TOKEN" in (result.stderr + result.output)
 
 
+def test_docker_image_installs_the_vertex_extra_and_copies_no_credentials():
+    # `--embedder vertex:<model>` works in the image. Its credentials come
+    # from the environment at run time, so the image copies in only the source.
+    import re
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    dockerfile = (root / "Dockerfile").read_text()
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+    assert "vertex" in pyproject["project"]["optional-dependencies"]
+    installed = re.findall(r"pip install --no-cache-dir '\.\[([a-z,]+)\]'", dockerfile)
+    assert installed and "vertex" in installed[0].split(","), installed
+    copied = re.findall(r"^COPY (.+) \S+$", dockerfile, re.MULTILINE)
+    assert copied == ["pyproject.toml README.md", "src"]
+    assert not re.findall(r"^(?:ENV|ARG) .*GOOGLE.*$", dockerfile, re.MULTILINE)
+
+
 def test_bad_allowed_origin_refuses(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("ENGRAM_AUTH_TOKEN", "x" * 40)
@@ -348,7 +366,7 @@ async def test_serve_engram_applies_the_cli_rules(monkeypatch):
         await cli.serve_engram(host="127.0.0.1", auth_token="bad token", **base)
 
 
-async def _serve_once(monkeypatch) -> None:
+async def _serve_once(monkeypatch, **kwargs) -> None:
     import uvicorn
 
     import engram.cli as cli
@@ -364,6 +382,7 @@ async def _serve_once(monkeypatch) -> None:
         auth_token=None,
         allow_unauthenticated=True,
         log_level="INFO",
+        **kwargs,
     )
 
 
@@ -381,19 +400,12 @@ async def test_serve_engram_warns_that_extraction_is_off(monkeypatch, caplog):
 
 
 async def test_serve_engram_does_not_warn_when_an_llm_is_set(monkeypatch, caplog):
-    from engram.engram import Engram
     from engram.llm.base import LLMResponse
 
     class AnyLLM:
         async def generate(self, messages, temperature=0.0, max_tokens=None, json_mode=False):
             return LLMResponse(content='{"facts": []}', finish_reason="stop")
 
-    opened = Engram.open
-
-    async def open_with_llm(*args, **kwargs):
-        return await opened(*args, llm=AnyLLM(), **kwargs)
-
-    monkeypatch.setattr(Engram, "open", open_with_llm)
     caplog.set_level(logging.WARNING, logger="engram.cli")
-    await _serve_once(monkeypatch)
+    await _serve_once(monkeypatch, llm=AnyLLM())
     assert _no_llm_warnings(caplog) == []

@@ -1,4 +1,8 @@
-"""Shared pytest fixtures."""
+"""Shared pytest fixtures.
+
+The network guard is in tests/network_guard.py. The root conftest.py
+registers it for every test path.
+"""
 
 from __future__ import annotations
 

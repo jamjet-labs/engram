@@ -36,7 +36,14 @@ SCOPED_TABLES = {
 }
 # Scoped tables erase_user keeps: content-free audit rows, and the erase epoch.
 KEPT_TABLES = {"erasures", "revocations", "scope_state"}
-UNSCOPED_TABLES = {"content_matches", "fact_derivations", "fact_entity_refs", "schema_version"}
+# engram_meta holds settings of the whole file (the embedder key), no memory.
+UNSCOPED_TABLES = {
+    "content_matches",
+    "engram_meta",
+    "fact_derivations",
+    "fact_entity_refs",
+    "schema_version",
+}
 FTS_SHADOW_PREFIXES = ("facts_fts_", "events_fts_")
 
 

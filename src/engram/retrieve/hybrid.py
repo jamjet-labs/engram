@@ -6,7 +6,7 @@ import math
 from datetime import UTC, datetime
 from uuid import UUID
 
-from engram.embedding.base import EmbeddingProvider
+from engram.embedding.base import EmbeddingProvider, embed_query
 from engram.models import Fact
 from engram.retrieve.base import Reranker, RetrievalConfig, ScoredFact
 from engram.retrieve.temporal import TemporalIntent, detect_temporal_intent
@@ -70,8 +70,9 @@ class HybridRetriever:
             # rather than emit an empty result — handles the "first ingestion
             # didn't tag session_id" case gracefully.
 
-        # 1. Vector search
-        [q_vec] = await self._embed.embed([query])
+        # 1. Vector search. The embedder's embed_query when it has one; the
+        #    vector is checked, and a bad one raises EmbeddingResponseError.
+        q_vec = await embed_query(self._embed, query)
         vec_matches = await self._vec.search(q_vec, scope, k=candidate_k)
         vec_scores: dict[UUID, float] = {m.fact_id: m.score for m in vec_matches}
 
